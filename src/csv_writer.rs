@@ -7,7 +7,7 @@ pub fn write_csv(state: &ScanState, output: &Path) -> io::Result<()> {
     let mut wtr = csv::Writer::from_writer(file);
 
     wtr.write_record(["path", "size", "ctime", "mtime"])
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        .map_err(io::Error::other)?;
 
     // Sort directories for stable output
     let mut dirs: Vec<_> = state.dirs.keys().collect();
@@ -17,16 +17,16 @@ pub fn write_csv(state: &ScanState, output: &Path) -> io::Result<()> {
         let entry = &state.dirs[dir];
         for file in &entry.files {
             let path = dir.join(&file.filename);
-            wtr.write_record(&[
+            wtr.write_record([
                 path.to_string_lossy().as_ref(),
                 &file.size.to_string(),
                 &file.ctime.to_string(),
                 &file.mtime.to_string(),
             ])
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
         }
     }
 
-    wtr.flush().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    wtr.flush().map_err(io::Error::other)?;
     Ok(())
 }

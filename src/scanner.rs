@@ -11,7 +11,7 @@ pub struct ScanStats {
     pub dirs_removed: usize,
 }
 
-pub fn scan(root: &Path, state: &mut ScanState, verbose: bool) -> io::Result<ScanStats> {
+pub fn scan(root: &Path, state: &mut ScanState, exclude: &[String], verbose: bool) -> io::Result<ScanStats> {
     let mut stats = ScanStats {
         dirs_cached: 0,
         dirs_scanned: 0,
@@ -20,8 +20,17 @@ pub fn scan(root: &Path, state: &mut ScanState, verbose: bool) -> io::Result<Sca
 
     let mut seen_dirs = std::collections::HashSet::new();
 
-    for entry in WalkDir::new(root).into_iter() {
-        let entry = entry.map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let walker = WalkDir::new(root).into_iter().filter_entry(|e| {
+        if e.file_type().is_dir() {
+            if let Some(name) = e.path().file_name() {
+                return !exclude.iter().any(|ex| ex == name.to_string_lossy().as_ref());
+            }
+        }
+        true
+    });
+
+    for entry in walker {
+        let entry = entry.map_err(io::Error::other)?;
         if !entry.file_type().is_dir() {
             continue;
         }

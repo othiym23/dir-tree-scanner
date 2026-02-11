@@ -21,6 +21,10 @@ struct Cli {
     #[arg(short, long)]
     state: Option<PathBuf>,
 
+    /// Directory names to exclude from scanning
+    #[arg(short, long, default_values_t = [String::from("@eaDir")])]
+    exclude: Vec<String>,
+
     /// Print cache hit/miss info
     #[arg(short, long)]
     verbose: bool,
@@ -53,7 +57,7 @@ fn main() {
         }
     };
 
-    match scanner::scan(root, &mut scan_state, cli.verbose) {
+    match scanner::scan(root, &mut scan_state, &cli.exclude, cli.verbose) {
         Ok(stats) => {
             eprintln!(
                 "dirs: {} cached, {} scanned, {} removed",
