@@ -38,4 +38,7 @@ clap 4 (derive), serde 1, bincode 1, csv 1, walkdir 2. Rust edition 2021.
 
 ## Cross-compilation
 
-`.cargo/config.toml` sets the linker for `x86_64-unknown-linux-musl` to `x86_64-linux-musl-gcc`. Install the musl cross toolchain or use `cross` (Docker-based) as an alternative.
+`.cargo/config.toml` sets the linker for `x86_64-unknown-linux-musl` to `x86_64-linux-musl-gcc`. Two options:
+
+1. **musl toolchain**: `brew install filosottile/musl-cross/musl-cross`, then `rustup target add x86_64-unknown-linux-musl`
+2. **cross (Docker-based)**: Must use the git version (`cargo install cross --git https://github.com/cross-rs/cross`) — the crates.io release (0.2.5) lacks ARM64 Docker image support and fails on Apple Silicon.
