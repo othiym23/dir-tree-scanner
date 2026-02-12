@@ -29,7 +29,7 @@ Four modules, no tests yet:
 - **Incremental scanning**: directory mtime is the cache key. If a directory's mtime hasn't changed, all file entries within it are reused from the state file. This means unchanged directories cost one stat call instead of N.
 - **Unix-only**: uses `std::os::unix::fs::MetadataExt` for ctime/mtime as raw `i64` values from the inode.
 - **bincode v1** for state serialization (not v2). Changing the `FileEntry` or `DirEntry` structs will invalidate existing state files.
-- **CSV stability**: directories are sorted lexicographically in output; files within a directory appear in readdir order.
+- **CSV stability**: directory traversal uses `sort_by_file_name()` for deterministic order, and files within each directory are sorted by filename after scanning. This ensures identical CSV output across runs when the filesystem is unchanged.
 - State file and CSV output are written into the scanned directory by default — keep this in mind when scanning (they become part of the scan).
 
 ## Dependencies
