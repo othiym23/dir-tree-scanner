@@ -103,3 +103,130 @@ fn scan_directory(dir: &Path) -> io::Result<Vec<FileEntry>> {
     files.sort_by(|a, b| a.filename.cmp(&b.filename));
     Ok(files)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_tree(dir: &std::path::Path) {
+        // dir/
+        //   a.txt
+        //   sub/
+        //     b.txt
+        //     deeper/
+        //       c.txt
+        fs::write(dir.join("a.txt"), "hello").unwrap();
+        fs::create_dir_all(dir.join("sub/deeper")).unwrap();
+        fs::write(dir.join("sub/b.txt"), "world").unwrap();
+        fs::write(dir.join("sub/deeper/c.txt"), "deep").unwrap();
+    }
+
+    #[test]
+    fn fresh_scan_all_dirs_scanned() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_tree(tmp.path());
+
+        let mut state = ScanState::default();
+        let stats = scan(tmp.path(), &mut state, &[], false).unwrap();
+
+        // root, sub, sub/deeper = 3 dirs scanned
+        assert_eq!(stats.dirs_scanned, 3);
+        assert_eq!(stats.dirs_cached, 0);
+        assert_eq!(stats.dirs_removed, 0);
+        assert_eq!(state.dirs.len(), 3);
+    }
+
+    #[test]
+    fn second_scan_no_changes_all_cached() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_tree(tmp.path());
+
+        let mut state = ScanState::default();
+        scan(tmp.path(), &mut state, &[], false).unwrap();
+
+        let stats = scan(tmp.path(), &mut state, &[], false).unwrap();
+        assert_eq!(stats.dirs_scanned, 0);
+        assert_eq!(stats.dirs_cached, 3);
+        assert_eq!(stats.dirs_removed, 0);
+    }
+
+    #[test]
+    fn modified_dir_is_rescanned() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_tree(tmp.path());
+
+        let mut state = ScanState::default();
+        scan(tmp.path(), &mut state, &[], false).unwrap();
+
+        // Simulate sub/ having changed by setting its cached mtime to a stale value
+        let sub_path = tmp.path().join("sub");
+        state.dirs.get_mut(&sub_path).unwrap().dir_mtime -= 1;
+
+        let stats = scan(tmp.path(), &mut state, &[], false).unwrap();
+        // Only sub/ should be rescanned (its cached mtime doesn't match)
+        assert_eq!(stats.dirs_scanned, 1);
+        assert_eq!(stats.dirs_cached, 2);
+        assert_eq!(stats.dirs_removed, 0);
+    }
+
+    #[test]
+    fn remove_subdir_shows_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_tree(tmp.path());
+
+        let mut state = ScanState::default();
+        scan(tmp.path(), &mut state, &[], false).unwrap();
+        assert!(state.dirs.contains_key(&tmp.path().join("sub/deeper")));
+
+        // Remove sub/deeper/
+        fs::remove_dir_all(tmp.path().join("sub/deeper")).unwrap();
+
+        let stats = scan(tmp.path(), &mut state, &[], false).unwrap();
+        assert_eq!(stats.dirs_removed, 1);
+        assert!(!state.dirs.contains_key(&tmp.path().join("sub/deeper")));
+    }
+
+    #[test]
+    fn exclude_list_skips_directories() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_tree(tmp.path());
+        // Add an excluded dir
+        fs::create_dir_all(tmp.path().join("@eaDir")).unwrap();
+        fs::write(tmp.path().join("@eaDir/junk.txt"), "junk").unwrap();
+
+        let mut state = ScanState::default();
+        let exclude = vec!["@eaDir".to_string()];
+        let stats = scan(tmp.path(), &mut state, &exclude, false).unwrap();
+
+        assert!(!state.dirs.contains_key(&tmp.path().join("@eaDir")));
+        // 3 dirs: root, sub, sub/deeper (not @eaDir)
+        assert_eq!(stats.dirs_scanned, 3);
+    }
+
+    #[test]
+    fn files_sorted_by_filename() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Create files in reverse alphabetical order
+        fs::write(tmp.path().join("z.txt"), "z").unwrap();
+        fs::write(tmp.path().join("m.txt"), "m").unwrap();
+        fs::write(tmp.path().join("a.txt"), "a").unwrap();
+
+        let mut state = ScanState::default();
+        scan(tmp.path(), &mut state, &[], false).unwrap();
+
+        let entry = &state.dirs[tmp.path()];
+        let names: Vec<&str> = entry.files.iter().map(|f| f.filename.as_str()).collect();
+        assert_eq!(names, vec!["a.txt", "m.txt", "z.txt"]);
+    }
+
+    #[test]
+    fn empty_directory_produces_empty_files() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let mut state = ScanState::default();
+        scan(tmp.path(), &mut state, &[], false).unwrap();
+
+        let entry = &state.dirs[tmp.path()];
+        assert!(entry.files.is_empty());
+    }
+}
