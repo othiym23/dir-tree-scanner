@@ -10,10 +10,10 @@ cargo build --release --target x86_64-unknown-linux-musl # NAS (static binary)
 just build-nas-cross                                     # alternative via cross tool
 
 # Usage
-fsscan <directory> [--output <file.csv>] [--state <file.state>] [--verbose]
+fsscan <directory> [--output <file.csv>] [--state <file.state>] [--exclude <name>...] [--verbose]
 ```
 
-Defaults: output is `<dir>/index.csv`, state is `<dir>/.fsscan.state`.
+Defaults: output is `<dir>/index.csv`, state is `<dir>/.fsscan.state`, exclude is `@eaDir` (Synology metadata directories).
 
 ## Architecture
 
