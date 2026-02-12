@@ -20,7 +20,7 @@ pub fn scan(root: &Path, state: &mut ScanState, exclude: &[String], verbose: boo
 
     let mut seen_dirs = std::collections::HashSet::new();
 
-    let walker = WalkDir::new(root).into_iter().filter_entry(|e| {
+    let walker = WalkDir::new(root).sort_by_file_name().into_iter().filter_entry(|e| {
         if e.file_type().is_dir() {
             if let Some(name) = e.path().file_name() {
                 return !exclude.iter().any(|ex| ex == name.to_string_lossy().as_ref());
@@ -100,5 +100,6 @@ fn scan_directory(dir: &Path) -> io::Result<Vec<FileEntry>> {
             mtime: meta.mtime(),
         });
     }
+    files.sort_by(|a, b| a.filename.cmp(&b.filename));
     Ok(files)
 }
