@@ -230,7 +230,7 @@ def run_scan(
         print(f"error: unknown mode '{mode}' for scan '{name}'", file=sys.stderr)
         return False
 
-    print(f"# cataloging {name}: {disk}")
+    print(f"\n# cataloging {name}: {disk}")
 
     ok = True
     with Timer() as total:

@@ -6,14 +6,14 @@ csvs_path = "{trees_path}/csv"
 state_path = "{trees_path}/state"
 
 [scan.laptop-music]
-enabled = true
+enabled = false
 mode = "used"
 disk = "/Users/ogd/Downloads/music"
 desc = "laptop music directory"
 header = "local music processing directory"
 
 [scan.xphear]
-enabled = true
+enabled = false
 mode = "subs"
 disk = "/Volumes/XPHEAR"
 desc = "XPHEAR (2TB blue Seagate Backup Plus)"
@@ -31,7 +31,7 @@ enabled = true
 mode = "df"
 disk = "/volume1/data/video/Television"
 desc = "euterpe television (NAS directory)"
-header = "Synology NAS //data/video/Television sharre"
+header = "Synology NAS //data/video/Television share"
 
 [scan.movies]
 enabled = true
