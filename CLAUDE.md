@@ -19,7 +19,7 @@ is `@eaDir` (Synology metadata directories).
 
 ## Architecture
 
-Four modules, no tests yet:
+Four modules:
 
 - `main.rs` — CLI (clap derive), wires modules together
 - `state.rs` — `ScanState` type: `HashMap<PathBuf, DirEntry>`, bincode
@@ -45,6 +45,53 @@ Four modules, no tests yet:
   filesystem is unchanged.
 - State file and CSV output are written into the scanned directory by default —
   keep this in mind when scanning (they become part of the scan).
+
+## Scripts
+
+`scripts/` contains a Python orchestrator that drives fsscan across multiple
+directory trees, configured via TOML.
+
+### Files
+
+- `catalog-nas.py` — main script, runs on Python 3.8+ (NAS target: 3.8.15)
+- `catalog.toml` — TOML config with global paths and 7 scan entries
+- `_vendor/tomli/` — vendored TOML parser for NAS (no pip install needed)
+- `test_catalog.py` — pytest tests for config loading and CLI behavior
+- `catalog-nas.sh` — original bash version (kept for reference)
+
+### Dev setup
+
+```bash
+cd scripts
+uv sync                           # creates .venv with ruff, pyright, pytest, tomli
+uv run ruff check catalog-nas.py  # lint
+uv run ruff format --check *.py   # format check
+uv run pyright                    # type check (targets py3.8 + Linux)
+uv run pytest test_catalog.py -v  # tests (15 tests)
+```
+
+### Usage
+
+```bash
+python3 catalog-nas.py                          # run all scans from catalog.toml
+python3 catalog-nas.py --dry-run                # print plan without executing
+python3 catalog-nas.py --scan laptop-music      # run single scan
+python3 catalog-nas.py catalog.toml --verbose   # explicit config path + verbose
+```
+
+### NAS deployment
+
+Copy three things: `catalog-nas.py`, `catalog.toml`, `_vendor/`. The script uses
+`tomllib` (3.11+) when available, falls back to vendored `tomli` for 3.8.
+
+### Config format
+
+`catalog.toml` has two sections:
+
+- `[global]` — paths with `$ENV_VAR` expansion and `{key}` interpolation
+  (resolved in definition order, so later keys can reference earlier ones)
+- `[scan.<name>]` — per-directory entries with `mode` (`used`/`df`/`subs`),
+  `disk`, `desc`, `header`, and optional `enabled` (default true)
 
 ## Dependencies
 

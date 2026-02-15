@@ -1,0 +1,8 @@
+{
+  "pythonVersion": "3.8",
+  "pythonPlatform": "Linux",
+  "include": ["catalog-nas.py", "test_catalog.py"],
+  "exclude": ["_vendor", ".venv"],
+  "typeCheckingMode": "basic",
+  "reportMissingModuleSource": false
+}
