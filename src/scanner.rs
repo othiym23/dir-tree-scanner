@@ -46,12 +46,13 @@ pub fn scan(
         }
 
         let dir_path = entry.path().to_path_buf();
-        seen_dirs.insert(dir_path.clone());
+        let dir_key = dir_path.to_string_lossy().into_owned();
+        seen_dirs.insert(dir_key.clone());
 
         let dir_meta = fs::metadata(&dir_path)?;
         let dir_mtime = dir_meta.mtime();
 
-        if let Some(cached) = state.dirs.get(&dir_path)
+        if let Some(cached) = state.dirs.get(&dir_key)
             && cached.dir_mtime == dir_mtime
         {
             stats.dirs_cached += 1;
@@ -67,20 +68,20 @@ pub fn scan(
         }
 
         let files = scan_directory(&dir_path)?;
-        state.dirs.insert(dir_path, DirEntry { dir_mtime, files });
+        state.dirs.insert(dir_key, DirEntry { dir_mtime, files });
     }
 
     // Remove directories that no longer exist
     let to_remove: Vec<_> = state
         .dirs
         .keys()
-        .filter(|k| !seen_dirs.contains(*k))
+        .filter(|k| !seen_dirs.contains(k.as_str()))
         .cloned()
         .collect();
     stats.dirs_removed = to_remove.len();
     for k in &to_remove {
         if verbose {
-            eprintln!("removed: {}", k.display());
+            eprintln!("removed: {k}");
         }
         state.dirs.remove(k);
     }
@@ -125,6 +126,11 @@ mod tests {
         fs::write(dir.join("sub/deeper/c.txt"), "deep").unwrap();
     }
 
+    /// Helper to build a state key from a path (matching what scan() does).
+    fn key(path: &Path) -> String {
+        path.to_string_lossy().into_owned()
+    }
+
     #[test]
     fn fresh_scan_all_dirs_scanned() {
         let tmp = tempfile::tempdir().unwrap();
@@ -163,8 +169,8 @@ mod tests {
         scan(tmp.path(), &mut state, &[], false).unwrap();
 
         // Simulate sub/ having changed by setting its cached mtime to a stale value
-        let sub_path = tmp.path().join("sub");
-        state.dirs.get_mut(&sub_path).unwrap().dir_mtime -= 1;
+        let sub_key = key(&tmp.path().join("sub"));
+        state.dirs.get_mut(&sub_key).unwrap().dir_mtime -= 1;
 
         let stats = scan(tmp.path(), &mut state, &[], false).unwrap();
         // Only sub/ should be rescanned (its cached mtime doesn't match)
@@ -180,14 +186,22 @@ mod tests {
 
         let mut state = ScanState::default();
         scan(tmp.path(), &mut state, &[], false).unwrap();
-        assert!(state.dirs.contains_key(&tmp.path().join("sub/deeper")));
+        assert!(
+            state
+                .dirs
+                .contains_key(&key(&tmp.path().join("sub/deeper")))
+        );
 
         // Remove sub/deeper/
         fs::remove_dir_all(tmp.path().join("sub/deeper")).unwrap();
 
         let stats = scan(tmp.path(), &mut state, &[], false).unwrap();
         assert_eq!(stats.dirs_removed, 1);
-        assert!(!state.dirs.contains_key(&tmp.path().join("sub/deeper")));
+        assert!(
+            !state
+                .dirs
+                .contains_key(&key(&tmp.path().join("sub/deeper")))
+        );
     }
 
     #[test]
@@ -202,7 +216,7 @@ mod tests {
         let exclude = vec!["@eaDir".to_string()];
         let stats = scan(tmp.path(), &mut state, &exclude, false).unwrap();
 
-        assert!(!state.dirs.contains_key(&tmp.path().join("@eaDir")));
+        assert!(!state.dirs.contains_key(&key(&tmp.path().join("@eaDir"))));
         // 3 dirs: root, sub, sub/deeper (not @eaDir)
         assert_eq!(stats.dirs_scanned, 3);
     }
@@ -218,7 +232,7 @@ mod tests {
         let mut state = ScanState::default();
         scan(tmp.path(), &mut state, &[], false).unwrap();
 
-        let entry = &state.dirs[tmp.path()];
+        let entry = &state.dirs[&key(tmp.path())];
         let names: Vec<&str> = entry.files.iter().map(|f| f.filename.as_str()).collect();
         assert_eq!(names, vec!["a.txt", "m.txt", "z.txt"]);
     }
@@ -230,7 +244,7 @@ mod tests {
         let mut state = ScanState::default();
         scan(tmp.path(), &mut state, &[], false).unwrap();
 
-        let entry = &state.dirs[tmp.path()];
+        let entry = &state.dirs[&key(tmp.path())];
         assert!(entry.files.is_empty());
     }
 }

@@ -41,8 +41,8 @@ Library crate (`src/lib.rs`) re-exports shared modules. Two binaries consume it:
   Hidden-file filtering (`-a`) happens in `merge_entries` at display time, not
   during scanning. Sort order uses case-insensitive collation to match `tree`'s
   sort behavior (see below)
-- `state.rs` — `ScanState` type: `HashMap<PathBuf, DirEntry>`, bincode
-  serialized to disk
+- `state.rs` — `ScanState` type: `HashMap<String, DirEntry>`, rkyv serialized to
+  disk with `FSSN` magic + version header. `LoadOutcome` enum for validation
 - `scanner.rs` — Walks directory tree with walkdir; compares directory mtime
   against cached state to skip unchanged directories entirely (no per-file stat
   calls)
@@ -56,8 +56,24 @@ Library crate (`src/lib.rs`) re-exports shared modules. Two binaries consume it:
   file. This means unchanged directories cost one stat call instead of N.
 - **Unix-only**: uses `std::os::unix::fs::MetadataExt` for ctime/mtime as raw
   `i64` values from the inode.
-- **bincode v1** for state serialization (not v2). Changing the `FileEntry` or
-  `DirEntry` structs will invalidate existing state files.
+- **rkyv 0.8** for state serialization (with `bytecheck` feature for
+  validation). Previously this package used bincode for state storage, but Rei
+  switched to rkyv to respect the stygianentity's
+  [decision to withdraw](https://old.reddit.com/r/rust/comments/1poe6ts/bincodes_source_code_still_matches_what_was_on/)
+  the package from the Crates ecosystem. State files have a 5-byte header:
+  4-byte magic `FSSN` + 1-byte version. Version 2 (current) adds brotli
+  compression (quality 1, lgwin 22) between rkyv serialization and the file
+  write, reducing state file size significantly for path-heavy data. The load
+  path checks the version byte and handles both version 1 (raw rkyv) and version
+  2 (brotli-compressed rkyv) for backwards compatibility. `ScanState::load()`
+  returns a `LoadOutcome` enum (`Loaded`/`NotFound`/`Invalid`) so callers decide
+  policy for corrupt or unrecognized files. On load, rkyv data is copied into an
+  `AlignedVec` since the header (and compression) shift the payload off the
+  allocation's alignment boundary. `ScanState.dirs` uses `String` keys (not
+  `PathBuf`) for rkyv compatibility — conversion happens at insert/lookup
+  boundaries. `save()` writes to a `.tmp` sibling then renames for atomicity
+  (crash-safe on Btrfs/ext4). Changing `FileEntry` or `DirEntry` structs will
+  invalidate existing state files; bump `VERSION` if the format changes.
 - **CSV stability**: directory traversal uses `sort_by_file_name()` for
   deterministic order, and files within each directory are sorted by filename
   after scanning. This ensures identical CSV output across runs when the
@@ -212,8 +228,8 @@ Implementation plans are saved in `docs/plans/` using the naming convention
 
 ## Dependencies
 
-clap 4 (derive), serde 1, bincode 1, csv 1, glob 0.3, walkdir 2. Rust
-edition 2024.
+clap 4 (derive), rkyv 0.8 (bytecheck), brotli 7, csv 1, glob 0.3, walkdir 2.
+Rust edition 2024.
 
 ## Cross-compilation
 

@@ -1,7 +1,7 @@
 mod csv_writer;
 
 use caching_scanners::scanner;
-use caching_scanners::state::ScanState;
+use caching_scanners::state::{LoadOutcome, ScanState};
 use clap::Parser;
 use std::path::PathBuf;
 use std::process;
@@ -42,16 +42,20 @@ fn main() {
     let state_path = cli.state.unwrap_or_else(|| root.join(".fsscan.state"));
 
     let mut scan_state = match ScanState::load(&state_path) {
-        Ok(s) => {
+        LoadOutcome::Loaded(s) => {
             if cli.verbose {
                 eprintln!("loaded state from {}", state_path.display());
             }
             s
         }
-        Err(_) => {
+        LoadOutcome::NotFound => {
             if cli.verbose {
                 eprintln!("no previous state, starting fresh");
             }
+            ScanState::default()
+        }
+        LoadOutcome::Invalid(reason) => {
+            eprintln!("warning: {}: {}, rescanning", state_path.display(), reason);
             ScanState::default()
         }
     };

@@ -16,7 +16,7 @@ pub fn write_csv(state: &ScanState, output: &Path) -> io::Result<()> {
     for dir in dirs {
         let entry = &state.dirs[dir];
         for file in &entry.files {
-            let path = dir.join(&file.filename);
+            let path = Path::new(dir).join(&file.filename);
             wtr.write_record([
                 path.to_string_lossy().as_ref(),
                 &file.size.to_string(),
@@ -35,7 +35,6 @@ pub fn write_csv(state: &ScanState, output: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use caching_scanners::state::{DirEntry, FileEntry};
-    use std::path::PathBuf;
 
     fn read_csv(path: &Path) -> String {
         std::fs::read_to_string(path).unwrap()
@@ -60,7 +59,7 @@ mod tests {
 
         let mut state = ScanState::default();
         state.dirs.insert(
-            PathBuf::from("/data"),
+            "/data".into(),
             DirEntry {
                 dir_mtime: 100,
                 files: vec![FileEntry {
@@ -89,7 +88,7 @@ mod tests {
         // Insert in reverse order
         for name in &["/z_dir", "/a_dir", "/m_dir"] {
             state.dirs.insert(
-                PathBuf::from(name),
+                (*name).into(),
                 DirEntry {
                     dir_mtime: 100,
                     files: vec![FileEntry {
@@ -119,7 +118,7 @@ mod tests {
 
         let mut state = ScanState::default();
         state.dirs.insert(
-            PathBuf::from("/dir"),
+            "/dir".into(),
             DirEntry {
                 dir_mtime: 100,
                 files: vec![

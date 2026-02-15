@@ -1,5 +1,5 @@
 use caching_scanners::scanner;
-use caching_scanners::state::ScanState;
+use caching_scanners::state::{LoadOutcome, ScanState};
 use clap::Parser;
 use glob::Pattern;
 use icu_collator::CollatorBorrowed;
@@ -61,16 +61,20 @@ fn main() {
     }
 
     let mut scan_state = match ScanState::load(&state_path) {
-        Ok(s) => {
+        LoadOutcome::Loaded(s) => {
             if cli.verbose {
                 eprintln!("loaded state from {}", state_path.display());
             }
             s
         }
-        Err(_) => {
+        LoadOutcome::NotFound => {
             if cli.verbose {
                 eprintln!("no previous state, starting fresh");
             }
+            ScanState::default()
+        }
+        LoadOutcome::Invalid(reason) => {
+            eprintln!("warning: {}: {}, rescanning", state_path.display(), reason);
             ScanState::default()
         }
     };
@@ -149,7 +153,8 @@ fn render_tree(
 ) -> (usize, usize) {
     // Build child-directory map: for each dir in state, register it as a child of its parent
     let mut children: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
-    for dir_path in state.dirs.keys() {
+    for dir_key in state.dirs.keys() {
+        let dir_path = Path::new(dir_key);
         if let Some(parent) = dir_path.parent()
             && let Some(name) = dir_path.file_name()
         {
@@ -221,10 +226,11 @@ fn render_dir(
     dir_count: &mut usize,
     file_count: &mut usize,
 ) {
+    let dir_key = dir_path.to_string_lossy();
     let files: Vec<String> = ctx
         .state
         .dirs
-        .get(dir_path)
+        .get(dir_key.as_ref())
         .map(|d| d.files.iter().map(|f| f.filename.clone()).collect())
         .unwrap_or_default();
     let empty = BTreeSet::new();
