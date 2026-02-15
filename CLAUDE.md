@@ -63,13 +63,13 @@ directory trees, configured via TOML.
 ### Dev setup
 
 ```bash
-cd scripts
-uv sync                           # creates .venv with ruff, pyright, pytest, tomli
-uv run ruff check catalog-nas.py  # lint
-uv run ruff format --check *.py   # format check
-uv run pyright                    # type check (targets py3.8 + Linux)
-uv run pytest test_catalog.py -v  # tests (15 tests)
+cd scripts && uv sync             # creates .venv with ruff, pyright, pytest, tomli
+just check                        # clippy + ruff + pyright
+just test                         # cargo test + pytest
 ```
+
+`just deploy` runs `check` and `test` before building and copying to the NAS, so
+lints and tests gate deployment.
 
 ### Usage
 
