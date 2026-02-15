@@ -21,8 +21,12 @@ is `@eaDir` (Synology metadata directories).
 
 ```bash
 # cached-tree: tree-compatible output using fsscan's incremental state
-cached-tree <directory> [--state <file.state>] [--exclude <name>...] [-N] [-I <pattern>...] [--verbose]
+cached-tree <directory> [--state <file.state>] [--exclude <name>...] [-a] [-N] [-I <pattern>...] [--verbose]
 ```
+
+Like `tree`, `cached-tree` hides dotfiles by default. Pass `-a` / `--all` to
+show hidden files (names starting with `.`). The filtering is display-only —
+dotfiles are still scanned and cached in the state file.
 
 Both binaries share `.fsscan.state` files — `cached-tree` scans (or loads cached
 state), then renders tree output instead of CSV.
@@ -33,7 +37,10 @@ Library crate (`src/lib.rs`) re-exports shared modules. Two binaries consume it:
 
 - `lib.rs` — re-exports `scanner` and `state` for both binaries
 - `main.rs` — `fsscan` CLI, wires scanner + csv_writer
-- `bin/cached_tree.rs` — `cached-tree` CLI, renders tree output from scan state
+- `bin/cached_tree.rs` — `cached-tree` CLI, renders tree output from scan state.
+  Hidden-file filtering (`-a`) happens in `merge_entries` at display time, not
+  during scanning. Sort order uses case-insensitive collation to match `tree`'s
+  sort behavior (see below)
 - `state.rs` — `ScanState` type: `HashMap<PathBuf, DirEntry>`, bincode
   serialized to disk
 - `scanner.rs` — Walks directory tree with walkdir; compares directory mtime
@@ -55,6 +62,21 @@ Library crate (`src/lib.rs`) re-exports shared modules. Two binaries consume it:
   deterministic order, and files within each directory are sorted by filename
   after scanning. This ensures identical CSV output across runs when the
   filesystem is unchanged.
+- **Collation**: `tree` sorts entries using glibc `strcoll()`, which under UTF-8
+  locales provides UCA-based ordering. Since `cached-tree` is musl-linked for
+  the NAS target and musl's `strcoll` is just `strcmp`, we use ICU4X (`icu`
+  crate) for proper Unicode collation. Configuration: root locale
+  (`Default::default()`) for language-independent multilingual sorting,
+  `Strength::Quaternary` to distinguish base letters, accents, case, and
+  punctuation, and `AlternateHandling::Shifted` so punctuation/symbols are
+  transparent at L1–L3 but distinguished at L4 (e.g. `show - s01e01` sorts near
+  `show S01E01`). The `Collator` is created once in `render_tree` and stored in
+  `TreeContext`; `merge_entries` collects into a `Vec` and sorts with a closure
+  that captures the collator. Note: `fsscan`'s CSV output still uses byte-order
+  sorting for determinism — only tree rendering uses ICU4X collation.
+- **Directory count**: `tree` includes the root directory in its count (e.g. a
+  directory with 2 subdirs reports "3 directories"). `cached-tree` matches this
+  by starting `dir_count` at 1.
 - State file and CSV output are written into the scanned directory by default —
   keep this in mind when scanning (they become part of the scan).
 
@@ -104,7 +126,8 @@ directory trees, configured via TOML.
 - `catalog-nas.py` — main script, runs on Python 3.8+ (NAS target: 3.8.15)
 - `catalog.toml` — TOML config with global paths and 7 scan entries
 - `_vendor/tomli/` — vendored TOML parser for NAS (no pip install needed)
-- `test_catalog.py` — pytest tests for config loading and CLI behavior
+- `test_catalog.py` — pytest tests for config loading, CLI behavior, and
+  `generate_tree` (all three modes: `used`, `df`, `subs`)
 - `catalog-nas.sh` — original bash version (kept for reference)
 
 ### Dev setup
@@ -151,6 +174,21 @@ mounted before attempting `mount_smbfs`. The vendor directory uses
 Manual deployment: copy `catalog-nas.py`, `catalog.toml`, `_vendor/`. The script
 uses `tomllib` (3.11+) when available, falls back to vendored `tomli` for 3.8.
 
+### Script architecture
+
+`catalog-nas.py` has a single `generate_tree()` function that handles all three
+scan modes (`used`, `df`, `subs`). It derives file paths and mode from
+`scan_cfg` + `global_cfg`. Mode controls which summary commands run after the
+shared `cached-tree` call:
+
+- `used`: `du -sm` on the disk
+- `df`: `df -PH` on the disk
+- `subs`: `df -PH` + `du -sm` per subdirectory (excluding `@eaDir`)
+
+`generate_tree` tests use a `_fake_run_cmd` mock that returns canned responses
+in sequence and records all calls for assertion. This avoids running real
+`du`/`df`/`tree` in tests.
+
 ### Config format
 
 `catalog.toml` has two sections:
@@ -161,6 +199,16 @@ uses `tomllib` (3.11+) when available, falls back to vendored `tomli` for 3.8.
   defaults to system `tree` if unset).
 - `[scan.<name>]` — per-directory entries with `mode` (`used`/`df`/`subs`),
   `disk`, `desc`, `header`, and optional `enabled` (default true)
+
+## Formatting
+
+Always run `cargo fmt` before finishing work on Rust files. The `just check`
+recipe includes `cargo fmt --check` so unformatted code will fail CI.
+
+## Plans
+
+Implementation plans are saved in `docs/plans/` using the naming convention
+`YYYY-MM-DD-plan-name.md` (e.g. `2026-02-15-icu4x-collation.md`).
 
 ## Dependencies
 
