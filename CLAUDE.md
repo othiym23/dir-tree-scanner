@@ -9,6 +9,7 @@ for NAS use (spinning disks, RAID 5) at 100K-1M file scale.
 cargo build --release                                    # native (aarch64-apple-darwin)
 cargo build --release --target x86_64-unknown-linux-musl # NAS (static binary)
 just build-nas-cross                                     # alternative via cross tool
+just deploy                                              # build + mount NAS + copy everything
 
 # Usage
 fsscan <directory> [--output <file.csv>] [--state <file.state>] [--exclude <name>...] [--verbose]
@@ -81,8 +82,26 @@ python3 catalog-nas.py catalog.toml --verbose   # explicit config path + verbose
 
 ### NAS deployment
 
-Copy three things: `catalog-nas.py`, `catalog.toml`, `_vendor/`. The script uses
-`tomllib` (3.11+) when available, falls back to vendored `tomli` for 3.8.
+`just deploy` automates the full workflow: builds the x86_64 binary, mounts the
+NAS home directory (`/Volumes/home` via SMB from `euterpe.local`), and copies
+everything into place. The deploy layout on the NAS:
+
+```
+/Volumes/home/
+├── bin/fsscan                      # x86_64 static binary
+├── scripts/
+│   ├── catalog-nas.py              # orchestrator script (chmod +x)
+│   ├── catalog.toml                # scan configuration
+│   └── _vendor/                    # vendored tomli (rsync --delete)
+└── catalog-nas → scripts/catalog-nas.py  # convenience symlink
+```
+
+The `mount-home` recipe is idempotent — it checks if `/Volumes/home` is already
+mounted before attempting `mount_smbfs`. The vendor directory uses
+`rsync --delete` to stay in sync (plain `cp -R` nests on repeated runs).
+
+Manual deployment: copy `catalog-nas.py`, `catalog.toml`, `_vendor/`. The script
+uses `tomllib` (3.11+) when available, falls back to vendored `tomli` for 3.8.
 
 ### Config format
 
