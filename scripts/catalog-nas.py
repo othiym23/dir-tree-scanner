@@ -229,7 +229,7 @@ def run_scan(
     csv_file = Path(global_cfg["csvs_path"]) / f"{desc}.csv"
     state_file = Path(global_cfg["state_path"]) / f"{desc}.state"
 
-    print(f"\n# cataloging {name}: {disk}")
+    print(f"\n# cataloging {name}: {disk}", flush=True)
 
     ok = True
     with Timer() as total:
@@ -242,7 +242,7 @@ def run_scan(
                     file=sys.stderr,
                 )
                 return False
-        print(f"# tree: {tree_t}")
+        print(f"# tree: {tree_t}", flush=True)
 
         cmd = [global_cfg["scanner"], disk, "-s", str(state_file), "-o", str(csv_file)]
         if verbose:
@@ -257,9 +257,9 @@ def run_scan(
                     file=sys.stderr,
                 )
                 ok = False
-        print(f"# scan: {scan_t}")
+        print(f"# scan: {scan_t}", flush=True)
 
-    print(f"# {name} TOTAL: {total}")
+    print(f"# {name} TOTAL: {total}", flush=True)
     return ok
 
 
@@ -374,7 +374,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"\n{len(failed)} scan(s) failed: {', '.join(failed)}")
         return 1
 
-    print("\nAll scans completed successfully.")
+    print("\nAll scans completed successfully.", flush=True)
     return 0
 
 
