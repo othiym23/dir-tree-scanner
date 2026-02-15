@@ -1,7 +1,8 @@
-# fsscan
+# caching-scanners
 
 Incremental filesystem scanner CLI that produces CSV metadata indexes. Designed
-for NAS use (spinning disks, RAID 5) at 100K-1M file scale.
+for NAS use (spinning disks, RAID 5) at 100K-1M file scale. Cargo package name
+is `caching-scanners` (library crate: `caching_scanners`).
 
 ## Build & run
 
@@ -18,18 +19,28 @@ fsscan <directory> [--output <file.csv>] [--state <file.state>] [--exclude <name
 Defaults: output is `<dir>/index.csv`, state is `<dir>/.fsscan.state`, exclude
 is `@eaDir` (Synology metadata directories).
 
+```bash
+# cached-tree: tree-compatible output using fsscan's incremental state
+cached-tree <directory> [--state <file.state>] [--exclude <name>...] [-N] [-I <pattern>...] [--verbose]
+```
+
+Both binaries share `.fsscan.state` files — `cached-tree` scans (or loads cached
+state), then renders tree output instead of CSV.
+
 ## Architecture
 
-Four modules:
+Library crate (`src/lib.rs`) re-exports shared modules. Two binaries consume it:
 
-- `main.rs` — CLI (clap derive), wires modules together
+- `lib.rs` — re-exports `scanner` and `state` for both binaries
+- `main.rs` — `fsscan` CLI, wires scanner + csv_writer
+- `bin/cached_tree.rs` — `cached-tree` CLI, renders tree output from scan state
 - `state.rs` — `ScanState` type: `HashMap<PathBuf, DirEntry>`, bincode
   serialized to disk
 - `scanner.rs` — Walks directory tree with walkdir; compares directory mtime
   against cached state to skip unchanged directories entirely (no per-file stat
   calls)
-- `csv_writer.rs` — Writes sorted CSV (`path,size,ctime,mtime`), directories
-  sorted for stable diffs
+- `csv_writer.rs` — Writes sorted CSV (`path,size,ctime,mtime`), private to
+  fsscan binary
 
 ### Key design decisions
 
@@ -125,6 +136,7 @@ everything into place. The deploy layout on the NAS:
 ```
 /Volumes/home/
 ├── bin/fsscan                      # x86_64 static binary
+├── bin/cached-tree                 # x86_64 static binary
 ├── scripts/
 │   ├── catalog-nas.py              # orchestrator script (chmod +x)
 │   ├── catalog.toml                # scan configuration
@@ -144,13 +156,16 @@ uses `tomllib` (3.11+) when available, falls back to vendored `tomli` for 3.8.
 `catalog.toml` has two sections:
 
 - `[global]` — paths with `$ENV_VAR` expansion and `{key}` interpolation
-  (resolved in definition order, so later keys can reference earlier ones)
+  (resolved in definition order, so later keys can reference earlier ones).
+  Includes `scanner` (fsscan binary path) and `tree` (cached-tree binary path,
+  defaults to system `tree` if unset).
 - `[scan.<name>]` — per-directory entries with `mode` (`used`/`df`/`subs`),
   `disk`, `desc`, `header`, and optional `enabled` (default true)
 
 ## Dependencies
 
-clap 4 (derive), serde 1, bincode 1, csv 1, walkdir 2. Rust edition 2021.
+clap 4 (derive), serde 1, bincode 1, csv 1, glob 0.3, walkdir 2. Rust
+edition 2024.
 
 ## Cross-compilation
 

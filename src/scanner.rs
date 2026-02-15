@@ -21,10 +21,10 @@ pub fn scan(root: &Path, state: &mut ScanState, exclude: &[String], verbose: boo
     let mut seen_dirs = std::collections::HashSet::new();
 
     let walker = WalkDir::new(root).sort_by_file_name().into_iter().filter_entry(|e| {
-        if e.file_type().is_dir() {
-            if let Some(name) = e.path().file_name() {
-                return !exclude.iter().any(|ex| ex == name.to_string_lossy().as_ref());
-            }
+        if e.file_type().is_dir()
+            && let Some(name) = e.path().file_name()
+        {
+            return !exclude.iter().any(|ex| ex == name.to_string_lossy().as_ref());
         }
         true
     });
@@ -41,14 +41,14 @@ pub fn scan(root: &Path, state: &mut ScanState, exclude: &[String], verbose: boo
         let dir_meta = fs::metadata(&dir_path)?;
         let dir_mtime = dir_meta.mtime();
 
-        if let Some(cached) = state.dirs.get(&dir_path) {
-            if cached.dir_mtime == dir_mtime {
-                stats.dirs_cached += 1;
-                if verbose {
-                    eprintln!("cache hit: {}", dir_path.display());
-                }
-                continue;
+        if let Some(cached) = state.dirs.get(&dir_path)
+            && cached.dir_mtime == dir_mtime
+        {
+            stats.dirs_cached += 1;
+            if verbose {
+                eprintln!("cache hit: {}", dir_path.display());
             }
+            continue;
         }
 
         stats.dirs_scanned += 1;

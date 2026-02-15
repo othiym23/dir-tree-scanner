@@ -136,11 +136,16 @@ def run_cmd(
 
 
 def generate_tree_used(
-    disk: str, header: str, tree_file: Path, *, verbose: bool = False
+    disk: str,
+    header: str,
+    tree_file: Path,
+    *,
+    tree_bin: str = "tree",
+    verbose: bool = False,
 ) -> None:
     """Mode 'used': tree + du -sm."""
     tree_out = run_cmd(
-        ["tree", "-I", "@eaDir", "-N", disk], capture=True, verbose=verbose
+        [tree_bin, "-I", "@eaDir", "-N", disk], capture=True, verbose=verbose
     )
     du_out = run_cmd(["du", "-sm", disk], capture=True, verbose=verbose)
 
@@ -152,11 +157,16 @@ def generate_tree_used(
 
 
 def generate_tree_df(
-    disk: str, header: str, tree_file: Path, *, verbose: bool = False
+    disk: str,
+    header: str,
+    tree_file: Path,
+    *,
+    tree_bin: str = "tree",
+    verbose: bool = False,
 ) -> None:
     """Mode 'df': tree + df -PH."""
     tree_out = run_cmd(
-        ["tree", "-I", "@eaDir", "-N", disk], capture=True, verbose=verbose
+        [tree_bin, "-I", "@eaDir", "-N", disk], capture=True, verbose=verbose
     )
     df_out = run_cmd(["df", "-PH", disk], capture=True, verbose=verbose)
 
@@ -168,11 +178,16 @@ def generate_tree_df(
 
 
 def generate_tree_subs(
-    disk: str, header: str, tree_file: Path, *, verbose: bool = False
+    disk: str,
+    header: str,
+    tree_file: Path,
+    *,
+    tree_bin: str = "tree",
+    verbose: bool = False,
 ) -> None:
     """Mode 'subs': tree + df -PH + du -sm per subdirectory."""
     tree_out = run_cmd(
-        ["tree", "-I", "@eaDir", "-N", disk], capture=True, verbose=verbose
+        [tree_bin, "-I", "@eaDir", "-N", disk], capture=True, verbose=verbose
     )
     df_out = run_cmd(["df", "-PH", disk], capture=True, verbose=verbose)
 
@@ -236,7 +251,10 @@ def run_scan(
     with Timer() as total:
         with Timer() as tree_t:
             try:
-                TREE_GENERATORS[mode](disk, header, tree_file, verbose=verbose)
+                tree_bin = global_cfg.get("tree", "tree")
+                TREE_GENERATORS[mode](
+                    disk, header, tree_file, tree_bin=tree_bin, verbose=verbose
+                )
             except subprocess.CalledProcessError as exc:
                 print(
                     f"warning: {exc.cmd} failed (code {exc.returncode}): {exc.stderr or ''}",
@@ -339,6 +357,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.dry_run:
         print("Dry run — would execute the following scans:\n")
         print(f"  scanner:    {global_cfg.get('scanner', '(not set)')}")
+        print(f"  tree:       {global_cfg.get('tree', '(not set)')}")
         print(f"  trees_path: {global_cfg.get('trees_path', '(not set)')}")
         print(f"  csvs_path:  {global_cfg.get('csvs_path', '(not set)')}")
         print(f"  state_path: {global_cfg.get('state_path', '(not set)')}")

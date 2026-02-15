@@ -1,0 +1,5 @@
+bin.name = "cached-tree"
+args = [".", "-I", ".fsscan.state"]
+status = "success"
+stderr = ""
+fs.sandbox = true

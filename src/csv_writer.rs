@@ -1,4 +1,4 @@
-use crate::state::ScanState;
+use caching_scanners::state::ScanState;
 use std::io;
 use std::path::Path;
 
@@ -34,7 +34,7 @@ pub fn write_csv(state: &ScanState, output: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{DirEntry, FileEntry};
+    use caching_scanners::state::{DirEntry, FileEntry};
     use std::path::PathBuf;
 
     fn read_csv(path: &Path) -> String {

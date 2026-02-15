@@ -48,9 +48,10 @@ mount-home:
 deploy: check test build-nas mount-home
     #!/usr/bin/env bash
     set -euo pipefail
-    # fsscan binary
+    # binaries
     mkdir -p "{{ nas_home }}/bin"
     cp target/x86_64-unknown-linux-musl/release/fsscan "{{ nas_home }}/bin"
+    cp target/x86_64-unknown-linux-musl/release/cached-tree "{{ nas_home }}/bin"
     # catalog-nas
     mkdir -p "{{ nas_home }}/scripts"
     cp scripts/catalog-nas.py "{{ nas_home }}/scripts"
@@ -58,4 +59,3 @@ deploy: check test build-nas mount-home
     rsync -r --delete scripts/_vendor/ "{{ nas_home }}/scripts/_vendor/"
     # permissions and link creation
     chmod 0755 "{{ nas_home }}/scripts/catalog-nas.py"
-    ln -sf "./scripts/catalog-nas.py" "{{ nas_home }}/catalog-nas"
