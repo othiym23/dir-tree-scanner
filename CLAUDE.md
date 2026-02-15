@@ -62,7 +62,7 @@ Library crate (`src/lib.rs`) re-exports shared modules. Two binaries consume it:
   [decision to withdraw](https://old.reddit.com/r/rust/comments/1poe6ts/bincodes_source_code_still_matches_what_was_on/)
   the package from the Crates ecosystem. State files have a 5-byte header:
   4-byte magic `FSSN` + 1-byte version. Version 2 (current) adds brotli
-  compression (quality 1, lgwin 22) between rkyv serialization and the file
+  compression (quality 5, lgwin 22) between rkyv serialization and the file
   write, reducing state file size significantly for path-heavy data. The load
   path checks the version byte and handles both version 1 (raw rkyv) and version
   2 (brotli-compressed rkyv) for backwards compatibility. `ScanState::load()`
