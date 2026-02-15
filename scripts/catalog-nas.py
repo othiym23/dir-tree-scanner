@@ -378,9 +378,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"\n{len(failed)} scan(s) failed: {', '.join(failed)}")
             return 1
 
-        print("\nAll scans completed successfully.", flush=True)
-        print(f"Run time: {running_time}")
-
+    print("\nAll scans completed successfully.", flush=True)
+    print(f"Run time: {running_time}")
     return 0
 
 
