@@ -351,30 +351,36 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"    desc: {desc}")
         return 0
 
-    # ensure necessary directories exist
-    Path(global_cfg["trees_path"]).mkdir(parents=True, exist_ok=True)
-    Path(global_cfg["csvs_path"]).mkdir(parents=True, exist_ok=True)
-    Path(global_cfg["state_path"]).mkdir(parents=True, exist_ok=True)
+    with Timer() as running_time:
+        # ensure necessary directories exist
+        Path(global_cfg["trees_path"]).mkdir(parents=True, exist_ok=True)
+        Path(global_cfg["csvs_path"]).mkdir(parents=True, exist_ok=True)
+        Path(global_cfg["state_path"]).mkdir(parents=True, exist_ok=True)
 
-    # Run scans
-    failed: List[str] = []
-    for name, scan_cfg in scans.items():
-        try:
-            ok = run_scan(name, scan_cfg, global_cfg, verbose=args.verbose)
-            if not ok:
+        # Run scans
+        failed: List[str] = []
+        for name, scan_cfg in scans.items():
+            try:
+                ok = run_scan(name, scan_cfg, global_cfg, verbose=args.verbose)
+                if not ok:
+                    failed.append(name)
+            except subprocess.CalledProcessError as exc:
+                print(
+                    f"\nerror: in {name} scan, '{exc.cmd}' failed: {exc}",
+                    file=sys.stderr,
+                )
                 failed.append(name)
-        except subprocess.CalledProcessError as exc:
-            print(f"\nerror: scan '{name}' failed: {exc}", file=sys.stderr)
-            failed.append(name)
-        except Exception as exc:
-            print(f"\nerror: scan '{name}': {exc}", file=sys.stderr)
-            failed.append(name)
+            except Exception as exc:
+                print(f"\nerror: scan '{name}': {exc}", file=sys.stderr)
+                failed.append(name)
 
-    if failed:
-        print(f"\n{len(failed)} scan(s) failed: {', '.join(failed)}")
-        return 1
+        if failed:
+            print(f"\n{len(failed)} scan(s) failed: {', '.join(failed)}")
+            return 1
 
-    print("\nAll scans completed successfully.", flush=True)
+        print("\nAll scans completed successfully.", flush=True)
+        print(f"Run time: {running_time}")
+
     return 0
 
 
