@@ -59,10 +59,12 @@ fn main() {
 
     match scanner::scan(root, &mut scan_state, &cli.exclude, cli.verbose) {
         Ok(stats) => {
-            eprintln!(
-                "dirs: {} cached, {} scanned, {} removed",
-                stats.dirs_cached, stats.dirs_scanned, stats.dirs_removed
-            );
+            if cli.verbose {
+                eprintln!(
+                    "dirs: {} cached, {} scanned, {} removed",
+                    stats.dirs_cached, stats.dirs_scanned, stats.dirs_removed
+                );
+            }
         }
         Err(e) => {
             eprintln!("error scanning: {}", e);
@@ -74,11 +76,15 @@ fn main() {
         eprintln!("error writing CSV: {}", e);
         process::exit(1);
     }
-    eprintln!("wrote {}", output.display());
+    if cli.verbose {
+        eprintln!("wrote {}", output.display());
+    }
 
     if let Err(e) = scan_state.save(&state_path) {
         eprintln!("error saving state: {}", e);
         process::exit(1);
     }
-    eprintln!("saved state to {}", state_path.display());
+    if cli.verbose {
+        eprintln!("saved state to {}", state_path.display());
+    }
 }

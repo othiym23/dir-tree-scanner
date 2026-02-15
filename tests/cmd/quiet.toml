@@ -1,0 +1,6 @@
+bin.name = "fsscan"
+args = ["."]
+status = "success"
+stdout = ""
+stderr = ""
+fs.sandbox = true
