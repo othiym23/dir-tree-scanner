@@ -47,6 +47,42 @@ Four modules:
 - State file and CSV output are written into the scanned directory by default —
   keep this in mind when scanning (they become part of the scan).
 
+## Testing
+
+Unit tests live in each module (`scanner.rs`, `state.rs`, `csv_writer.rs`). CLI
+snapshot tests use **trycmd 0.15** and live in `tests/cmd/`.
+
+### trycmd test structure
+
+- `tests/cli_tests.rs` — harness that runs all `tests/cmd/*.toml` files
+- Each `.toml` file defines one CLI invocation: binary, args, expected
+  stdout/stderr, exit status
+- `<test>.in/` directory — fixture files copied into a sandbox temp dir when
+  `fs.sandbox = true`
+- `<test>.stderr` (or `.stdout`) — expected output for multi-line assertions
+  (short output can be inlined in the TOML)
+
+### Writing a new test case
+
+Create `tests/cmd/<name>.toml`:
+
+```toml
+bin.name = "fsscan"
+args = [".", "--some-flag"]
+status = "success"        # or status.code = 1 for expected failures
+stdout = ""
+stderr = ""               # or omit and provide <name>.stderr file
+fs.sandbox = true         # copies <name>.in/ to temp dir, sets CWD there
+```
+
+If the test needs input files, create `tests/cmd/<name>.in/` with fixtures.
+
+### Determinism
+
+Use `fs.sandbox = true` and pass `.` as the directory argument. This ensures all
+output paths are relative (`scanning: .`, `wrote ./index.csv`) rather than
+containing temp dir paths. WalkDir preserves the root path format you pass in.
+
 ## Scripts
 
 `scripts/` contains a Python orchestrator that drives fsscan across multiple
