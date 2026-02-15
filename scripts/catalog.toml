@@ -20,7 +20,7 @@ disk = "/Volumes/XPHEAR"
 desc = "XPHEAR (2TB blue Seagate Backup Plus)"
 header = "2TB blue Seagate Backup Plus HD formatted with APFS (offline music archive)"
 
-[scan.atropos]
+[scan.music-archives]
 enabled = true
 mode = "df"
 disk = "/volume1/data/backups/atropos"
