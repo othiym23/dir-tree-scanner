@@ -1,8 +1,8 @@
 mod csv_writer;
 
-use clap::Parser;
 use caching_scanners::scanner;
 use caching_scanners::state::ScanState;
+use clap::Parser;
 use std::path::PathBuf;
 use std::process;
 

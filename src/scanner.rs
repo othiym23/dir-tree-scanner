@@ -11,7 +11,12 @@ pub struct ScanStats {
     pub dirs_removed: usize,
 }
 
-pub fn scan(root: &Path, state: &mut ScanState, exclude: &[String], verbose: bool) -> io::Result<ScanStats> {
+pub fn scan(
+    root: &Path,
+    state: &mut ScanState,
+    exclude: &[String],
+    verbose: bool,
+) -> io::Result<ScanStats> {
     let mut stats = ScanStats {
         dirs_cached: 0,
         dirs_scanned: 0,
@@ -20,14 +25,19 @@ pub fn scan(root: &Path, state: &mut ScanState, exclude: &[String], verbose: boo
 
     let mut seen_dirs = std::collections::HashSet::new();
 
-    let walker = WalkDir::new(root).sort_by_file_name().into_iter().filter_entry(|e| {
-        if e.file_type().is_dir()
-            && let Some(name) = e.path().file_name()
-        {
-            return !exclude.iter().any(|ex| ex == name.to_string_lossy().as_ref());
-        }
-        true
-    });
+    let walker = WalkDir::new(root)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|e| {
+            if e.file_type().is_dir()
+                && let Some(name) = e.path().file_name()
+            {
+                return !exclude
+                    .iter()
+                    .any(|ex| ex == name.to_string_lossy().as_ref());
+            }
+            true
+        });
 
     for entry in walker {
         let entry = entry.map_err(io::Error::other)?;
@@ -57,13 +67,7 @@ pub fn scan(root: &Path, state: &mut ScanState, exclude: &[String], verbose: boo
         }
 
         let files = scan_directory(&dir_path)?;
-        state.dirs.insert(
-            dir_path,
-            DirEntry {
-                dir_mtime,
-                files,
-            },
-        );
+        state.dirs.insert(dir_path, DirEntry { dir_mtime, files });
     }
 
     // Remove directories that no longer exist

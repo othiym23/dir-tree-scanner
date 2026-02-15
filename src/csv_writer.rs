@@ -123,9 +123,24 @@ mod tests {
             DirEntry {
                 dir_mtime: 100,
                 files: vec![
-                    FileEntry { filename: "second.txt".into(), size: 1, ctime: 0, mtime: 0 },
-                    FileEntry { filename: "first.txt".into(), size: 2, ctime: 0, mtime: 0 },
-                    FileEntry { filename: "third.txt".into(), size: 3, ctime: 0, mtime: 0 },
+                    FileEntry {
+                        filename: "second.txt".into(),
+                        size: 1,
+                        ctime: 0,
+                        mtime: 0,
+                    },
+                    FileEntry {
+                        filename: "first.txt".into(),
+                        size: 2,
+                        ctime: 0,
+                        mtime: 0,
+                    },
+                    FileEntry {
+                        filename: "third.txt".into(),
+                        size: 3,
+                        ctime: 0,
+                        mtime: 0,
+                    },
                 ],
             },
         );

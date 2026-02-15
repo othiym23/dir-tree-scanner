@@ -30,8 +30,7 @@ impl ScanState {
     }
 
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        let data =
-            bincode::serialize(self).map_err(io::Error::other)?;
+        let data = bincode::serialize(self).map_err(io::Error::other)?;
         fs::write(path, data)
     }
 }
