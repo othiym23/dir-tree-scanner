@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import textwrap
+from unittest.mock import patch
 
 # Import the script as a module
 catalog = importlib.import_module("catalog-nas")
@@ -197,3 +198,135 @@ class TestCLIDryRun:
         assert rc == 1
         err = capsys.readouterr().err
         assert "not found" in err
+
+
+def _make_scan_cfg(mode, disk="/vol/data"):
+    return {
+        "mode": mode,
+        "disk": disk,
+        "desc": "test-scan",
+        "header": "Test Header",
+    }
+
+
+def _make_global_cfg(tmp_path):
+    trees = tmp_path / "trees"
+    state = tmp_path / "state"
+    trees.mkdir()
+    state.mkdir()
+    return {
+        "trees_path": str(trees),
+        "state_path": str(state),
+        "tree": "/usr/bin/cached-tree",
+    }
+
+
+def _fake_run_cmd(responses):
+    """Return a mock for run_cmd that returns responses in order."""
+    calls = []
+    it = iter(responses)
+
+    def mock(args, *, capture=False, verbose=False, env_extra=None):
+        calls.append(list(args))
+        return next(it) if capture else None
+
+    return mock, calls
+
+
+class TestGenerateTree:
+    def test_mode_used(self, tmp_path):
+        global_cfg = _make_global_cfg(tmp_path)
+        scan_cfg = _make_scan_cfg("used")
+        mock, calls = _fake_run_cmd(["tree output\n", "42\t/vol/data\n"])
+
+        with patch.object(catalog, "run_cmd", mock):
+            catalog.generate_tree("mytest", scan_cfg, global_cfg)
+
+        tree_file = tmp_path / "trees" / "test-scan.tree"
+        content = tree_file.read_text()
+        assert content.startswith("Test Header\n\n")
+        assert "tree output" in content
+        assert "42\t/vol/data" in content
+
+        # tree command + du -sm
+        assert len(calls) == 2
+        assert calls[0][0] == "/usr/bin/cached-tree"
+        assert calls[1] == ["du", "-sm", "/vol/data"]
+
+    def test_mode_df(self, tmp_path):
+        global_cfg = _make_global_cfg(tmp_path)
+        scan_cfg = _make_scan_cfg("df")
+        mock, calls = _fake_run_cmd(["tree output\n", "Filesystem Size Used\n"])
+
+        with patch.object(catalog, "run_cmd", mock):
+            catalog.generate_tree("mytest", scan_cfg, global_cfg)
+
+        tree_file = tmp_path / "trees" / "test-scan.tree"
+        content = tree_file.read_text()
+        assert "tree output" in content
+        assert "Filesystem Size Used" in content
+
+        assert len(calls) == 2
+        assert calls[1] == ["df", "-PH", "/vol/data"]
+
+    def test_mode_subs(self, tmp_path):
+        global_cfg = _make_global_cfg(tmp_path)
+        disk = tmp_path / "disk"
+        disk.mkdir()
+        (disk / "alpha").mkdir()
+        (disk / "beta").mkdir()
+        (disk / "@eaDir").mkdir()  # should be excluded from du
+        scan_cfg = _make_scan_cfg("subs", disk=str(disk))
+
+        mock, calls = _fake_run_cmd(
+            [
+                "tree output\n",
+                "Filesystem Size Used\n",
+                "10\talpha\n20\tbeta\n",
+            ]
+        )
+
+        with patch.object(catalog, "run_cmd", mock):
+            catalog.generate_tree("mytest", scan_cfg, global_cfg)
+
+        tree_file = tmp_path / "trees" / "test-scan.tree"
+        content = tree_file.read_text()
+        assert "tree output" in content
+        assert "Filesystem Size Used" in content
+        assert "10\talpha" in content
+
+        # tree + df + du
+        assert len(calls) == 3
+        assert calls[1] == ["df", "-PH", str(disk)]
+        # du should include alpha and beta but not @eaDir
+        du_args = calls[2]
+        assert du_args[0:2] == ["du", "-sm"]
+        du_dirs = du_args[2:]
+        assert any("alpha" in d for d in du_dirs)
+        assert any("beta" in d for d in du_dirs)
+        assert not any("@eaDir" in d for d in du_dirs)
+
+    def test_mode_subs_no_subdirs(self, tmp_path):
+        global_cfg = _make_global_cfg(tmp_path)
+        disk = tmp_path / "empty-disk"
+        disk.mkdir()
+        scan_cfg = _make_scan_cfg("subs", disk=str(disk))
+
+        mock, calls = _fake_run_cmd(["tree output\n", "Filesystem Size Used\n"])
+
+        with patch.object(catalog, "run_cmd", mock):
+            catalog.generate_tree("mytest", scan_cfg, global_cfg)
+
+        # Only tree + df, no du call when no subdirs
+        assert len(calls) == 2
+
+    def test_unknown_mode_raises(self, tmp_path):
+        import pytest
+
+        global_cfg = _make_global_cfg(tmp_path)
+        scan_cfg = _make_scan_cfg("bogus")
+        mock, _ = _fake_run_cmd(["tree output\n"])
+
+        with patch.object(catalog, "run_cmd", mock):
+            with pytest.raises(TypeError):
+                catalog.generate_tree("mytest", scan_cfg, global_cfg)

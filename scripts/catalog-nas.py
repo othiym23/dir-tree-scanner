@@ -135,85 +135,71 @@ def run_cmd(
 # ---------------------------------------------------------------------------
 
 
-def generate_tree_used(
-    disk: str,
-    header: str,
-    tree_file: Path,
+VALID_MODES = {"used", "df", "subs"}
+
+
+def generate_tree(
+    name: str,
+    scan_cfg: Dict[str, Any],
+    global_cfg: Dict[str, str],
     *,
-    tree_bin: str = "tree",
     verbose: bool = False,
 ) -> None:
-    """Mode 'used': tree + du -sm."""
-    tree_out = run_cmd(
-        [tree_bin, "-I", "@eaDir", "-N", disk], capture=True, verbose=verbose
-    )
-    du_out = run_cmd(["du", "-sm", disk], capture=True, verbose=verbose)
+    """Generate a tree file for a scan entry.
+
+    Derives mode, tree/state file paths, header, and disk from scan_cfg
+    and global_cfg. Mode controls the summary commands appended after
+    the tree output:
+      - 'used': du -sm on disk
+      - 'df':   df -PH on disk
+      - 'subs': df -PH on disk + du -sm per subdirectory
+    """
+    disk = scan_cfg["disk"]
+    header = scan_cfg["header"]
+    mode = scan_cfg["mode"]
+    desc = scan_cfg["desc"]
+
+    tree_bin = global_cfg.get("tree", "tree")
+    tree_file = Path(global_cfg["trees_path"]) / f"{desc}.tree"
+    state_file = Path(global_cfg["state_path"]) / f"{desc}.state"
+
+    # Shared: run cached-tree
+    cmd = [tree_bin, "-s", str(state_file), "-I", "@eaDir", "-N", disk]
+    if verbose:
+        cmd.append("-v")
+
+    tree_out = run_cmd(cmd, capture=True, verbose=verbose)
+
+    suffix_parts: List[str] = []
+    if mode == "used":
+        suffix_parts.append(
+            run_cmd(["du", "-sm", disk], capture=True, verbose=verbose) or ""
+        )
+    elif mode == "df" or mode == "subs":
+        suffix_parts.append(
+            run_cmd(["df", "-PH", disk], capture=True, verbose=verbose) or ""
+        )
+        if mode == "subs":
+            # Enumerate subdirectories explicitly instead of shell glob
+            disk_path = Path(disk)
+            subdirs = sorted(
+                str(p) for p in disk_path.iterdir() if p.is_dir() and p.name != "@eaDir"
+            )
+            if subdirs:
+                suffix_parts.append(
+                    run_cmd(["du", "-sm"] + subdirs, capture=True, verbose=verbose)
+                    or ""
+                )
+    else:
+        print(f"error: unknown mode '{mode}' for scan '{name}'", file=sys.stderr)
+        raise TypeError()
 
     with open(tree_file, "w", encoding="utf-8") as f:
         f.write(header + "\n\n")
         f.write(tree_out or "")
-        f.write("\n")
-        f.write(du_out or "")
-
-
-def generate_tree_df(
-    disk: str,
-    header: str,
-    tree_file: Path,
-    *,
-    tree_bin: str = "tree",
-    verbose: bool = False,
-) -> None:
-    """Mode 'df': tree + df -PH."""
-    tree_out = run_cmd(
-        [tree_bin, "-I", "@eaDir", "-N", disk], capture=True, verbose=verbose
-    )
-    df_out = run_cmd(["df", "-PH", disk], capture=True, verbose=verbose)
-
-    with open(tree_file, "w", encoding="utf-8") as f:
-        f.write(header + "\n\n")
-        f.write(tree_out or "")
-        f.write("\n")
-        f.write(df_out or "")
-
-
-def generate_tree_subs(
-    disk: str,
-    header: str,
-    tree_file: Path,
-    *,
-    tree_bin: str = "tree",
-    verbose: bool = False,
-) -> None:
-    """Mode 'subs': tree + df -PH + du -sm per subdirectory."""
-    tree_out = run_cmd(
-        [tree_bin, "-I", "@eaDir", "-N", disk], capture=True, verbose=verbose
-    )
-    df_out = run_cmd(["df", "-PH", disk], capture=True, verbose=verbose)
-
-    # Enumerate subdirectories explicitly instead of shell glob
-    disk_path = Path(disk)
-    subdirs = sorted(
-        str(p) for p in disk_path.iterdir() if p.is_dir() and p.name != "@eaDir"
-    )
-    du_out = ""
-    if subdirs:
-        du_out = run_cmd(["du", "-sm"] + subdirs, capture=True, verbose=verbose) or ""
-
-    with open(tree_file, "w", encoding="utf-8") as f:
-        f.write(header + "\n\n")
-        f.write(tree_out or "")
-        f.write("\n")
-        f.write(df_out or "")
-        f.write("\n")
-        f.write(du_out)
-
-
-TREE_GENERATORS = {
-    "used": generate_tree_used,
-    "df": generate_tree_df,
-    "subs": generate_tree_subs,
-}
+        for part in suffix_parts:
+            f.write("\n")
+            f.write(part)
 
 
 # ---------------------------------------------------------------------------
@@ -231,19 +217,17 @@ def run_scan(
     disk = scan_cfg["disk"]
     desc = scan_cfg["desc"]
     mode = scan_cfg["mode"]
-    header = scan_cfg["header"]
 
     if not Path(disk).exists():
         print(f"warning: {disk} does not exist, skipping", file=sys.stderr)
         return False
 
-    tree_file = Path(global_cfg["trees_path"]) / f"{desc}.tree"
-    csv_file = Path(global_cfg["csvs_path"]) / f"{desc}.csv"
-    state_file = Path(global_cfg["state_path"]) / f"{desc}.state"
-
-    if mode not in TREE_GENERATORS:
+    if mode not in VALID_MODES:
         print(f"error: unknown mode '{mode}' for scan '{name}'", file=sys.stderr)
         return False
+
+    csv_file = Path(global_cfg["csvs_path"]) / f"{desc}.csv"
+    state_file = Path(global_cfg["state_path"]) / f"{desc}.state"
 
     print(f"\n# cataloging {name}: {disk}")
 
@@ -251,10 +235,7 @@ def run_scan(
     with Timer() as total:
         with Timer() as tree_t:
             try:
-                tree_bin = global_cfg.get("tree", "tree")
-                TREE_GENERATORS[mode](
-                    disk, header, tree_file, tree_bin=tree_bin, verbose=verbose
-                )
+                generate_tree(name, scan_cfg, global_cfg, verbose=verbose)
             except subprocess.CalledProcessError as exc:
                 print(
                     f"warning: {exc.cmd} failed (code {exc.returncode}): {exc.stderr or ''}",
