@@ -11,6 +11,10 @@
     {
       "matchManagers": ["pep621"],
       "groupName": "Python dev dependencies"
+    },
+    {
+      "matchDepNames": ["python"],
+      "enabled": false
     }
   ]
 }

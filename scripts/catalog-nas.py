@@ -6,28 +6,16 @@ and CSV metadata indexes. Replaces catalog-nas.sh with a config-driven
 approach.
 """
 
-from __future__ import annotations
-
 import argparse
 import os
 import re
 import subprocess
 import sys
 import time
+import tomllib
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
-
-# ---------------------------------------------------------------------------
-# TOML loading — prefer stdlib tomllib (3.11+), fall back to vendored tomli
-# ---------------------------------------------------------------------------
-
-try:
-    import tomllib  # pyright: ignore[reportMissingImports]
-except ModuleNotFoundError:
-    _vendor_dir = str(Path(__file__).resolve().parent / "_vendor")
-    if _vendor_dir not in sys.path:
-        sys.path.insert(0, _vendor_dir)
-    import tomli as tomllib  # type: ignore[no-redef]
+from typing import Any, Self
 
 
 # ---------------------------------------------------------------------------
@@ -35,13 +23,13 @@ except ModuleNotFoundError:
 # ---------------------------------------------------------------------------
 
 
-def resolve_global(global_cfg: Dict[str, str]) -> Dict[str, str]:
+def resolve_global(global_cfg: dict[str, str]) -> dict[str, str]:
     """Expand env vars and resolve {key} interpolation in global paths.
 
     Keys are processed in definition order so that later values can
     reference earlier ones (e.g. trees_path references home_base).
     """
-    resolved: Dict[str, str] = {}
+    resolved: dict[str, str] = {}
     for key, value in global_cfg.items():
         # First expand $ENV_VAR / ${ENV_VAR}
         value = os.path.expandvars(value)
@@ -55,12 +43,12 @@ def resolve_global(global_cfg: Dict[str, str]) -> Dict[str, str]:
     return resolved
 
 
-def load_config(path: Path) -> Dict[str, Any]:
+def load_config(path: Path) -> dict[str, Any]:
     """Load and resolve a catalog TOML config file."""
     with open(path, "rb") as f:
         raw = tomllib.load(f)
 
-    cfg: Dict[str, Any] = {}
+    cfg: dict[str, Any] = {}
     cfg["global"] = resolve_global(raw.get("global", {}))
     cfg["scans"] = raw.get("scan", {})
     return cfg
@@ -74,7 +62,7 @@ def load_config(path: Path) -> Dict[str, Any]:
 class Timer:
     """Context manager that captures wall-clock and child-process CPU time."""
 
-    def __enter__(self) -> Timer:
+    def __enter__(self) -> Self:
         self.wall = time.monotonic()
         self.times = os.times()
         self.elapsed = 0.0
@@ -103,9 +91,9 @@ def run_cmd(
     args: Sequence[str],
     *,
     capture: bool = False,
-    env_extra: Optional[Dict[str, str]] = None,
+    env_extra: dict[str, str] | None = None,
     verbose: bool = False,
-) -> Optional[str]:
+) -> str | None:
     """Run a command with QUOTING_STYLE=c in the environment.
 
     Returns captured stdout when capture=True, otherwise None.
@@ -140,8 +128,8 @@ VALID_MODES = {"used", "df", "subs"}
 
 def generate_tree(
     name: str,
-    scan_cfg: Dict[str, Any],
-    global_cfg: Dict[str, str],
+    scan_cfg: dict[str, Any],
+    global_cfg: dict[str, str],
     *,
     verbose: bool = False,
 ) -> None:
@@ -170,7 +158,7 @@ def generate_tree(
 
     tree_out = run_cmd(cmd, capture=True, verbose=verbose)
 
-    suffix_parts: List[str] = []
+    suffix_parts: list[str] = []
     if mode == "used":
         suffix_parts.append(
             run_cmd(["du", "-sm", disk], capture=True, verbose=verbose) or ""
@@ -209,8 +197,8 @@ def generate_tree(
 
 def run_scan(
     name: str,
-    scan_cfg: Dict[str, Any],
-    global_cfg: Dict[str, str],
+    scan_cfg: dict[str, Any],
+    global_cfg: dict[str, str],
     *,
     verbose: bool = False,
 ) -> bool:
@@ -299,7 +287,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Optional[List[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -358,7 +346,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         Path(global_cfg["state_path"]).mkdir(parents=True, exist_ok=True)
 
         # Run scans
-        failed: List[str] = []
+        failed: list[str] = []
         for name, scan_cfg in scans.items():
             try:
                 ok = run_scan(name, scan_cfg, global_cfg, verbose=args.verbose)

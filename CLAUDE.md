@@ -139,9 +139,8 @@ directory trees, configured via TOML.
 
 ### Files
 
-- `catalog-nas.py` — main script, runs on Python 3.8+ (NAS target: 3.8.15)
+- `catalog-nas.py` — main script, runs on Python 3.14+
 - `catalog.toml` — TOML config with global paths and 7 scan entries
-- `_vendor/tomli/` — vendored TOML parser for NAS (no pip install needed)
 - `test_catalog.py` — pytest tests for config loading, CLI behavior, and
   `generate_tree` (all three modes: `used`, `df`, `subs`)
 - `catalog-nas.sh` — original bash version (kept for reference)
@@ -178,17 +177,12 @@ everything into place. The deploy layout on the NAS:
 ├── bin/cached-tree                 # x86_64 static binary
 ├── scripts/
 │   ├── catalog-nas.py              # orchestrator script (chmod +x)
-│   ├── catalog.toml                # scan configuration
-│   └── _vendor/                    # vendored tomli (rsync --delete)
+│   └── catalog.toml                # scan configuration
 └── catalog-nas → scripts/catalog-nas.py  # convenience symlink
 ```
 
 The `mount-home` recipe is idempotent — it checks if `/Volumes/home` is already
-mounted before attempting `mount_smbfs`. The vendor directory uses
-`rsync --delete` to stay in sync (plain `cp -R` nests on repeated runs).
-
-Manual deployment: copy `catalog-nas.py`, `catalog.toml`, `_vendor/`. The script
-uses `tomllib` (3.11+) when available, falls back to vendored `tomli` for 3.8.
+mounted before attempting `mount_smbfs`.
 
 ### Script architecture
 

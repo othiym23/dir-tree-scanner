@@ -19,7 +19,7 @@ format:
     # Rust
     cargo fmt
     # Python
-    cd scripts && uv run ruff format --exclude _vendor
+    cd scripts && uv run ruff format
 
 # Lint, format-check, and typecheck source files
 check:
@@ -28,8 +28,8 @@ check:
     cargo clippy -- -D warnings
     # Python
     cd scripts && \
-      uv run ruff check --exclude _vendor && \
-      uv run ruff format --check --exclude _vendor
+      uv run ruff check && \
+      uv run ruff format --check
     cd scripts && \
       uv run pyright
 
@@ -64,6 +64,5 @@ deploy: check test build-nas mount-home
     mkdir -p "{{ nas_home }}/scripts"
     cp scripts/catalog-nas.py "{{ nas_home }}/scripts"
     cp scripts/catalog.toml "{{ nas_home }}/scripts"
-    rsync -r --delete scripts/_vendor/ "{{ nas_home }}/scripts/_vendor/"
     # permissions – current invocation is via the python interpreter
     chmod 0640 "{{ nas_home }}/scripts/catalog-nas.py"

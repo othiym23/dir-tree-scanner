@@ -1,7 +1,5 @@
 """Tests for catalog-nas.py config loading and resolution."""
 
-from __future__ import annotations
-
 import importlib
 import textwrap
 from unittest.mock import patch
