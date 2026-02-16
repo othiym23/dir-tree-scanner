@@ -1,2 +1,2 @@
-target-version = "py38"
+target-version = "py314"
 line-length = 88
