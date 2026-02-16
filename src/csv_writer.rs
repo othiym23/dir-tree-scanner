@@ -1,4 +1,6 @@
 use caching_scanners::state::ScanState;
+use icu_collator::CollatorBorrowed;
+use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
 use std::io;
 use std::path::Path;
 
@@ -6,16 +8,23 @@ pub fn write_csv(state: &ScanState, output: &Path) -> io::Result<()> {
     let file = std::fs::File::create(output)?;
     let mut wtr = csv::Writer::from_writer(file);
 
+    let mut options = CollatorOptions::default();
+    options.strength = Some(Strength::Quaternary);
+    options.alternate_handling = Some(AlternateHandling::Shifted);
+    let collator = CollatorBorrowed::try_new(Default::default(), options).unwrap();
+
     wtr.write_record(["path", "size", "ctime", "mtime"])
         .map_err(io::Error::other)?;
 
-    // Sort directories for stable output
+    // Sort everything collated for very stable output
     let mut dirs: Vec<_> = state.dirs.keys().collect();
-    dirs.sort();
+    dirs.sort_by(|a, b| collator.compare(a, b));
 
     for dir in dirs {
         let entry = &state.dirs[dir];
-        for file in &entry.files {
+        let mut files = entry.files.clone();
+        files.sort_by(|a, b| collator.compare(a.filename.as_str(), b.filename.as_str()));
+        for file in files {
             let path = Path::new(dir).join(&file.filename);
             wtr.write_record([
                 path.to_string_lossy().as_ref(),
@@ -112,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn files_appear_in_stored_order() {
+    fn files_appear_in_collated_order() {
         let tmp = tempfile::tempdir().unwrap();
         let csv_path = tmp.path().join("out.csv");
 
@@ -148,8 +157,8 @@ mod tests {
         let content = read_csv(&csv_path);
         let lines: Vec<&str> = content.lines().collect();
         assert_eq!(lines.len(), 4);
-        assert!(lines[1].contains("second.txt"));
-        assert!(lines[2].contains("first.txt"));
+        assert!(lines[1].contains("first.txt"));
+        assert!(lines[2].contains("second.txt"));
         assert!(lines[3].contains("third.txt"));
     }
 }
