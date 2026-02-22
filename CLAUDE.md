@@ -43,24 +43,25 @@ Library crate (`src/lib.rs`) re-exports shared modules:
 
 ### Key design decisions
 
+Architectural decisions are recorded in `docs/adrs/` using the naming convention
+`YYYY-MM-DD-NN-decision-name.md`. Key decisions affecting implementation:
+
 - **Incremental scanning**: directory mtime is the cache key. Unchanged
   directories cost one stat call instead of N.
 - **Unix-only**: uses `std::os::unix::fs::MetadataExt` for ctime/mtime.
-- **rkyv 0.8** for state serialization. State files have a 5-byte header: 4-byte
-  magic `FSSN` + 1-byte version. Version 2 (current) adds brotli compression.
-  The load path handles both v1 (raw rkyv) and v2 (brotli-compressed).
-  `ScanState.dirs` uses `String` keys (not `PathBuf`) for rkyv compatibility.
-  `save()` writes to `.tmp` then renames for atomicity. Changing `FileEntry` or
-  `DirEntry` structs invalidates state files; bump `VERSION` if the format
-  changes.
-- **ICU4X collation** for tree sort order (musl's `strcoll` is just `strcmp`).
-  Root locale, `Strength::Quaternary`, `AlternateHandling::Shifted`. The `csv`
-  subcommand uses byte-order sorting for determinism.
+- **rkyv 0.8** for state serialization — see
+  `docs/adrs/2026-02-15-01-rkyv-state-serialization.md`. `ScanState.dirs` uses
+  `String` keys (not `PathBuf`) for rkyv compatibility. `save()` writes to
+  `.tmp` then renames for atomicity. Changing `FileEntry` or `DirEntry` structs
+  invalidates state files; bump `VERSION` if the format changes.
+- **ICU4X collation** for tree sort order — see
+  `docs/adrs/2026-02-15-02-icu4x-collation.md`. The `csv` subcommand uses
+  byte-order sorting for determinism.
 
 ## Testing
 
-Unit tests in each module. CLI snapshot tests use **trycmd 0.15** in
-`tests/cmd/`.
+Unit tests in each module. CLI snapshot tests use trycmd in `tests/cmd/` — see
+`docs/adrs/2026-02-14-02-trycmd-snapshot-tests.md`.
 
 ### trycmd tests
 
@@ -91,17 +92,22 @@ just test                  # cargo test + pytest
 
 ## Formatting
 
-Always run `cargo fmt` before finishing work on Rust files.
+Always run `just format` before finishing work. This runs `cargo fmt` (Rust),
+`ruff format` (Python), and `prettier` (Markdown).
 
 ## Git workflow
 
 Branch protection is enabled on `main`. All changes must go through a feature
 branch and pull request — never commit directly to `main`.
 
-## Plans
+## Documentation
 
-Implementation plans are saved in `docs/plans/` using the naming convention
-`YYYY-MM-DD-plan-name.md`.
+- Implementation plans: `docs/plans/YYYY-MM-DD-plan-name.md`
+- Architecture decision records: `docs/adrs/YYYY-MM-DD-NN-decision-name.md`
+
+Record new architectural decisions as ADRs. Use the Nygard template (Status,
+Context, Decision, Consequences). Keep each ADR concise. When a decision
+supersedes an earlier one, update the status of both ADRs with cross-references.
 
 ## Cross-compilation
 
