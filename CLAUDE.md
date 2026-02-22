@@ -1,16 +1,19 @@
 # caching-scanners
 
-Incremental filesystem scanner CLI that produces CSV metadata indexes. Designed
-for NAS use (spinning disks, RAID 5) at 100K-1M file scale. Cargo package name
-is `caching-scanners` (library crate: `caching_scanners`).
+Incremental CLI filesystem scanner that produces CSV metadata indexes and text
+representations of filesystem trees. Designed for NAS use (spinning disks, RAID
+6 with two parity disks) at 200K-500K file scale. For performance, intended to
+be run on a Synology DiskStation running DSM 7.3.
+
+Cargo package name is `caching-scanners` (library crate: `caching_scanners`).
 
 ## Build & run
 
 ```bash
-cargo build --release                                    # native (aarch64-apple-darwin)
-cargo build --release --target x86_64-unknown-linux-musl # NAS (static binary)
-just build-nas-cross                                     # alternative via cross tool
-just deploy                                              # build + mount NAS + copy everything
+just build            # native (aarch64-apple-darwin)
+just build-nas        # NAS (static binary)
+just build-nas-cross  # alternative via cross tool
+just deploy           # build + mount NAS + copy everything
 
 # Usage
 fsscan <directory> [--output <file.csv>] [--state <file.state>] [--exclude <name>...] [--verbose]
@@ -239,8 +242,17 @@ Implementation plans are saved in `docs/plans/` using the naming convention
 
 ## Dependencies
 
-clap 4 (derive), rkyv 0.8 (bytecheck), brotli 8, csv 1, glob 0.3, walkdir 2,
-icu_collator 2. Rust edition 2024.
+Rust edition 2024.
+
+- walkdir 2
+- rkyv 0.8 (bytecheck)
+- brotli 8
+- clap 4 (derive)
+- icu_collator 2
+- csv 1
+- glob 0.3
+
+Python 3.14.2.
 
 ## Cross-compilation
 
