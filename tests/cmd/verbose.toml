@@ -1,5 +1,0 @@
-bin.name = "fsscan"
-args = [".", "-v"]
-status = "success"
-stdout = ""
-fs.sandbox = true

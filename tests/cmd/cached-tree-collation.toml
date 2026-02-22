@@ -1,5 +1,0 @@
-bin.name = "cached-tree"
-args = ["."]
-status = "success"
-stderr = ""
-fs.sandbox = true

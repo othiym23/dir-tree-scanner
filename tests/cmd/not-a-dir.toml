@@ -1,5 +1,0 @@
-bin.name = "fsscan"
-args = ["nonexistent_dir"]
-status.code = 1
-stdout = ""
-stderr = "error: nonexistent_dir is not a directory\n"

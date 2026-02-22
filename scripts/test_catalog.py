@@ -65,7 +65,7 @@ class TestLoadConfig:
         config.write_text(
             textwrap.dedent("""\
             [global]
-            scanner = "/usr/bin/fsscan"
+            scanner = "/usr/bin/dir-tree-scanner"
             base = "/data"
 
             [scan.mydir]
@@ -78,7 +78,7 @@ class TestLoadConfig:
         )
 
         cfg = catalog.load_config(config)
-        assert cfg["global"]["scanner"] == "/usr/bin/fsscan"
+        assert cfg["global"]["scanner"] == "/usr/bin/dir-tree-scanner"
         assert cfg["global"]["base"] == "/data"
         assert "mydir" in cfg["scans"]
         assert cfg["scans"]["mydir"]["mode"] == "used"
@@ -129,7 +129,7 @@ class TestCLIDryRun:
         config.write_text(
             textwrap.dedent("""\
             [global]
-            scanner = "/usr/bin/fsscan"
+            scanner = "/usr/bin/dir-tree-scanner"
             trees_path = "/tmp/trees"
             csvs_path = "/tmp/csv"
             state_path = "/tmp/state"
@@ -155,7 +155,7 @@ class TestCLIDryRun:
         config.write_text(
             textwrap.dedent("""\
             [global]
-            scanner = "/usr/bin/fsscan"
+            scanner = "/usr/bin/dir-tree-scanner"
 
             [scan.real]
             mode = "used"
@@ -175,7 +175,7 @@ class TestCLIDryRun:
         config.write_text(
             textwrap.dedent("""\
             [global]
-            scanner = "/usr/bin/fsscan"
+            scanner = "/usr/bin/dir-tree-scanner"
 
             [scan.disabled]
             enabled = false
@@ -215,7 +215,7 @@ def _make_global_cfg(tmp_path):
     return {
         "trees_path": str(trees),
         "state_path": str(state),
-        "tree": "/usr/bin/cached-tree",
+        "scanner": "/usr/bin/dir-tree-scanner",
     }
 
 
@@ -248,7 +248,7 @@ class TestGenerateTree:
 
         # tree command + du -sm
         assert len(calls) == 2
-        assert calls[0][0] == "/usr/bin/cached-tree"
+        assert calls[0][0:2] == ["/usr/bin/dir-tree-scanner", "tree"]
         assert calls[1] == ["du", "-sm", "/vol/data"]
 
     def test_mode_df(self, tmp_path):
