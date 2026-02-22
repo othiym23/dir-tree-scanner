@@ -1,4 +1,4 @@
-use caching_scanners::state::ScanState;
+use crate::state::ScanState;
 use icu_collator::CollatorBorrowed;
 use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
 use std::io;
@@ -43,7 +43,7 @@ pub fn write_csv(state: &ScanState, output: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use caching_scanners::state::{DirEntry, FileEntry};
+    use crate::state::{DirEntry, FileEntry};
 
     fn read_csv(path: &Path) -> String {
         std::fs::read_to_string(path).unwrap()

@@ -60,6 +60,7 @@ deploy: check test build-nas mount-home
     mkdir -p "{{ nas_home }}/bin"
     cp target/x86_64-unknown-linux-musl/release/fsscan "{{ nas_home }}/bin"
     cp target/x86_64-unknown-linux-musl/release/cached-tree "{{ nas_home }}/bin"
+    cp target/x86_64-unknown-linux-musl/release/dir-tree-scanner "{{ nas_home }}/bin"
     # catalog-nas
     mkdir -p "{{ nas_home }}/scripts"
     cp scripts/catalog-nas.py "{{ nas_home }}/scripts"

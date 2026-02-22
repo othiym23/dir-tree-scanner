@@ -1,0 +1,5 @@
+bin.name = "dir-tree-scanner"
+args = ["csv", ".", "-v"]
+status = "success"
+stdout = ""
+fs.sandbox = true

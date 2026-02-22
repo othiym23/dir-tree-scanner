@@ -1,6 +1,6 @@
 [package]
 name = "caching-scanners"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 
 [dependencies]
@@ -19,6 +19,10 @@ path = "src/main.rs"
 [[bin]]
 name = "cached-tree"
 path = "src/bin/cached_tree.rs"
+
+[[bin]]
+name = "dir-tree-scanner"
+path = "src/bin/dir_tree_scanner.rs"
 
 [dev-dependencies]
 tempfile = "3"

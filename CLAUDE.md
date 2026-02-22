@@ -28,26 +28,42 @@ Like `tree`, `cached-tree` hides dotfiles by default. Pass `-a` / `--all` to
 show hidden files (names starting with `.`). The filtering is display-only —
 dotfiles are still scanned and cached in the state file.
 
-Both binaries share `.fsscan.state` files — `cached-tree` scans (or loads cached
-state), then renders tree output instead of CSV.
+```bash
+# dir-tree-scanner: combined binary with subcommands (replaces fsscan + cached-tree)
+dir-tree-scanner csv <directory> [--output <file.csv>] [--state <file.state>] [--exclude <name>...] [-v]
+dir-tree-scanner tree <directory> [--state <file.state>] [--exclude <name>...] [-N] [-I <pattern>...] [-a] [-v]
+dir-tree-scanner --version
+```
+
+All three binaries share `.fsscan.state` files — they use the same scanning and
+state logic from the library crate.
 
 ## Architecture
 
-Library crate (`src/lib.rs`) re-exports shared modules. Two binaries consume it:
+Library crate (`src/lib.rs`) re-exports shared modules. Three binaries consume
+it:
 
-- `lib.rs` — re-exports `scanner` and `state` for both binaries
+- `lib.rs` — re-exports `scanner`, `state`, `cli`, `csv_writer`, and `tree`
+- `cli.rs` — shared helpers: `load_state`, `run_scan`, `save_state` (used by all
+  three binaries to avoid duplicating the state-load/scan/save boilerplate)
 - `main.rs` — `fsscan` CLI, wires scanner + csv_writer
 - `bin/cached_tree.rs` — `cached-tree` CLI, renders tree output from scan state.
   Hidden-file filtering (`-a`) happens in `merge_entries` at display time, not
   during scanning. Sort order uses case-insensitive collation to match `tree`'s
   sort behavior (see below)
+- `bin/dir_tree_scanner.rs` — `dir-tree-scanner` combined CLI with `csv` and
+  `tree` subcommands. Includes build-time git hash in `--version` output
 - `state.rs` — `ScanState` type: `HashMap<String, DirEntry>`, rkyv serialized to
   disk with `FSSN` magic + version header. `LoadOutcome` enum for validation
 - `scanner.rs` — Walks directory tree with walkdir; compares directory mtime
   against cached state to skip unchanged directories entirely (no per-file stat
   calls)
-- `csv_writer.rs` — Writes sorted CSV (`path,size,ctime,mtime`), private to
-  fsscan binary
+- `csv_writer.rs` — Writes sorted CSV (`path,size,ctime,mtime`)
+- `tree.rs` — Tree rendering: `render_tree` public API, with `TreeContext`,
+  `Entry`, `merge_entries`, `render_dir`, `maybe_escape` as module-private
+  helpers
+- `build.rs` — Embeds short git hash (`GIT_HASH` env var) at compile time for
+  the `dir-tree-scanner --version` output
 
 ### Key design decisions
 
@@ -175,6 +191,7 @@ everything into place. The deploy layout on the NAS:
 /Volumes/home/
 ├── bin/fsscan                      # x86_64 static binary
 ├── bin/cached-tree                 # x86_64 static binary
+├── bin/dir-tree-scanner            # x86_64 static binary (combined)
 ├── scripts/
 │   ├── catalog-nas.py              # orchestrator script (chmod +x)
 │   └── catalog.toml                # scan configuration
@@ -222,8 +239,8 @@ Implementation plans are saved in `docs/plans/` using the naming convention
 
 ## Dependencies
 
-clap 4 (derive), rkyv 0.8 (bytecheck), brotli 7, csv 1, glob 0.3, walkdir 2.
-Rust edition 2024.
+clap 4 (derive), rkyv 0.8 (bytecheck), brotli 8, csv 1, glob 0.3, walkdir 2,
+icu_collator 2. Rust edition 2024.
 
 ## Cross-compilation
 

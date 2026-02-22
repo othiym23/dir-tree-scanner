@@ -1,7 +1,4 @@
-mod csv_writer;
-
-use caching_scanners::scanner;
-use caching_scanners::state::{LoadOutcome, ScanState};
+use caching_scanners::{cli, csv_writer};
 use clap::Parser;
 use std::path::PathBuf;
 use std::process;
@@ -30,64 +27,27 @@ struct Cli {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let args = Cli::parse();
 
-    let root = &cli.directory;
+    let root = &args.directory;
     if !root.is_dir() {
         eprintln!("error: {} is not a directory", root.display());
         process::exit(1);
     }
 
-    let output = cli.output.unwrap_or_else(|| root.join("index.csv"));
-    let state_path = cli.state.unwrap_or_else(|| root.join(".fsscan.state"));
+    let output = args.output.unwrap_or_else(|| root.join("index.csv"));
+    let state_path = args.state.unwrap_or_else(|| root.join(".fsscan.state"));
 
-    let mut scan_state = match ScanState::load(&state_path) {
-        LoadOutcome::Loaded(s) => {
-            if cli.verbose {
-                eprintln!("loaded state from {}", state_path.display());
-            }
-            s
-        }
-        LoadOutcome::NotFound => {
-            if cli.verbose {
-                eprintln!("no previous state, starting fresh");
-            }
-            ScanState::default()
-        }
-        LoadOutcome::Invalid(reason) => {
-            eprintln!("warning: {}: {}, rescanning", state_path.display(), reason);
-            ScanState::default()
-        }
-    };
-
-    match scanner::scan(root, &mut scan_state, &cli.exclude, cli.verbose) {
-        Ok(stats) => {
-            if cli.verbose {
-                eprintln!(
-                    "dirs: {} cached, {} scanned, {} removed",
-                    stats.dirs_cached, stats.dirs_scanned, stats.dirs_removed
-                );
-            }
-        }
-        Err(e) => {
-            eprintln!("error scanning: {}", e);
-            process::exit(1);
-        }
-    }
+    let mut scan_state = cli::load_state(&state_path, args.verbose);
+    cli::run_scan(root, &mut scan_state, &args.exclude, args.verbose);
 
     if let Err(e) = csv_writer::write_csv(&scan_state, &output) {
         eprintln!("error writing CSV: {}", e);
         process::exit(1);
     }
-    if cli.verbose {
+    if args.verbose {
         eprintln!("wrote {}", output.display());
     }
 
-    if let Err(e) = scan_state.save(&state_path) {
-        eprintln!("error saving state: {}", e);
-        process::exit(1);
-    }
-    if cli.verbose {
-        eprintln!("saved state to {}", state_path.display());
-    }
+    cli::save_state(&scan_state, &state_path, args.verbose);
 }
