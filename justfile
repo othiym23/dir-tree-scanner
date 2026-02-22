@@ -20,6 +20,8 @@ format:
     cargo fmt
     # Python
     cd scripts && uv run ruff format
+    # Markdown
+    prettier --write "**/*.md"
 
 # Lint, format-check, and typecheck source files
 check:
@@ -32,6 +34,8 @@ check:
       uv run ruff format --check
     cd scripts && \
       uv run pyright
+    # Markdown
+    prettier --check "**/*.md"
 
 # Run all tests (Rust + Python)
 test:
