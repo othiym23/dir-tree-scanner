@@ -1,6 +1,5 @@
 [global]
-scanner = "$HOME/bin/fsscan"
-tree = "$HOME/bin/cached-tree"
+scanner = "$HOME/bin/dir-tree-scanner"
 home_base = "/volume1/data/downloads/(music)"
 trees_path = "{home_base}/catalogs/trees"
 csvs_path = "{trees_path}/csv"

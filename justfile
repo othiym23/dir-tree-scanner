@@ -10,9 +10,9 @@ build-nas:
 build-nas-cross:
     cross build --release --target x86_64-unknown-linux-musl
 
-# Run Cargo binaries in a given directory
+# Run a CSV scan on a given directory
 run dir:
-    cargo run --release -- {{dir}} -v
+    cargo run --release -- csv {{dir}} -v
 
 # Format sources
 format:
@@ -58,8 +58,11 @@ deploy: check test build-nas mount-home
     set -euo pipefail
     # binaries
     mkdir -p "{{ nas_home }}/bin"
-    cp target/x86_64-unknown-linux-musl/release/fsscan "{{ nas_home }}/bin"
-    cp target/x86_64-unknown-linux-musl/release/cached-tree "{{ nas_home }}/bin"
+    # clean out legacy binaries
+    rm -f "{{ nas_home }}/bin/fsscan"
+    rm -f "{{ nas_home }}/bin/cached-tree"
+    rm -f "{{ nas_home }}/bin/dir-tree-scanner"
+    cp target/x86_64-unknown-linux-musl/release/dir-tree-scanner "{{ nas_home }}/bin"
     # catalog-nas
     mkdir -p "{{ nas_home }}/scripts"
     cp scripts/catalog-nas.py "{{ nas_home }}/scripts"

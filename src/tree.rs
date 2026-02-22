@@ -1,121 +1,9 @@
-use caching_scanners::scanner;
-use caching_scanners::state::{LoadOutcome, ScanState};
-use clap::Parser;
+use crate::state::ScanState;
 use glob::Pattern;
 use icu_collator::CollatorBorrowed;
 use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process;
-
-#[derive(Parser)]
-#[command(
-    name = "cached-tree",
-    about = "tree-compatible output using fsscan incremental state"
-)]
-struct Cli {
-    /// Root directory to display
-    directory: PathBuf,
-
-    /// State file path for incremental scanning
-    #[arg(short, long)]
-    state: Option<PathBuf>,
-
-    /// Directory names to exclude from scanning
-    #[arg(short, long, default_values_t = [String::from("@eaDir")])]
-    exclude: Vec<String>,
-
-    /// Print names as-is (no character escaping)
-    #[arg(short = 'N', long = "no-escape")]
-    no_escape: bool,
-
-    /// Glob pattern to exclude from output (repeatable)
-    #[arg(short = 'I', long = "ignore")]
-    ignore: Vec<String>,
-
-    /// Show hidden files (names starting with '.')
-    #[arg(short, long)]
-    all: bool,
-
-    /// Print scan info on stderr
-    #[arg(short, long)]
-    verbose: bool,
-}
-
-fn main() {
-    let cli = Cli::parse();
-
-    let root = &cli.directory;
-    if cli.verbose {
-        eprintln!("root is {}", root.display())
-    }
-    if !root.is_dir() {
-        eprintln!("error: {} is not a directory", root.display());
-        process::exit(1);
-    }
-
-    // Load state, scan, save
-    let state_path = cli.state.unwrap_or_else(|| root.join(".fsscan.state"));
-    if cli.verbose {
-        eprintln!("state_path is {}", state_path.display())
-    }
-
-    let mut scan_state = match ScanState::load(&state_path) {
-        LoadOutcome::Loaded(s) => {
-            if cli.verbose {
-                eprintln!("loaded state from {}", state_path.display());
-            }
-            s
-        }
-        LoadOutcome::NotFound => {
-            if cli.verbose {
-                eprintln!("no previous state, starting fresh");
-            }
-            ScanState::default()
-        }
-        LoadOutcome::Invalid(reason) => {
-            eprintln!("warning: {}: {}, rescanning", state_path.display(), reason);
-            ScanState::default()
-        }
-    };
-
-    match scanner::scan(root, &mut scan_state, &cli.exclude, cli.verbose) {
-        Ok(stats) => {
-            if cli.verbose {
-                eprintln!(
-                    "dirs: {} cached, {} scanned, {} removed",
-                    stats.dirs_cached, stats.dirs_scanned, stats.dirs_removed
-                );
-            }
-        }
-        Err(e) => {
-            eprintln!("error scanning: {}", e);
-            process::exit(1);
-        }
-    }
-
-    if let Err(e) = scan_state.save(&state_path) {
-        eprintln!("error saving state: {}", e);
-        process::exit(1);
-    }
-
-    // Parse ignore patterns
-    let patterns: Vec<Pattern> = cli
-        .ignore
-        .iter()
-        .filter_map(|p| match Pattern::new(p) {
-            Ok(pat) => Some(pat),
-            Err(e) => {
-                eprintln!("warning: invalid glob pattern '{}': {}", p, e);
-                None
-            }
-        })
-        .collect();
-
-    // Render tree
-    let (dir_count, file_count) = render_tree(&scan_state, root, &patterns, cli.no_escape, cli.all);
-    println!("\n{} directories, {} files", dir_count, file_count);
-}
 
 /// Escape non-printable and non-ASCII bytes to '?' (matching tree's default behavior).
 /// With -N, returns the name unchanged.
@@ -144,7 +32,9 @@ struct TreeContext<'a> {
     show_hidden: bool,
 }
 
-fn render_tree(
+/// Render a tree view of the scan state, printing to stdout.
+/// Returns `(dir_count, file_count)`.
+pub fn render_tree(
     state: &ScanState,
     root: &Path,
     patterns: &[Pattern],

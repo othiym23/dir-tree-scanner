@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Incremental filesystem catalog builder driven by TOML config.
 
-Orchestrates fsscan across multiple directory trees, generating tree files
-and CSV metadata indexes. Replaces catalog-nas.sh with a config-driven
-approach.
+Orchestrates dir-tree-scanner across multiple directory trees, generating
+tree files and CSV metadata indexes. Replaces catalog-nas.sh with a
+config-driven approach.
 """
 
 import argparse
@@ -147,12 +147,12 @@ def generate_tree(
     mode = scan_cfg["mode"]
     desc = scan_cfg["desc"]
 
-    tree_bin = global_cfg.get("tree", "tree")
+    scanner = global_cfg["scanner"]
     tree_file = Path(global_cfg["trees_path"]) / f"{desc}.tree"
     state_file = Path(global_cfg["state_path"]) / f"{desc}.state"
 
-    # Shared: run cached-tree
-    cmd = [tree_bin, "-s", str(state_file), "-I", "@eaDir", "-N", disk]
+    # Shared: run dir-tree-scanner tree
+    cmd = [scanner, "tree", "-s", str(state_file), "-I", "@eaDir", "-N", disk]
     if verbose:
         cmd.append("-v")
 
@@ -232,7 +232,15 @@ def run_scan(
                 return False
         print(f"# tree: {tree_t}", flush=True)
 
-        cmd = [global_cfg["scanner"], disk, "-s", str(state_file), "-o", str(csv_file)]
+        cmd = [
+            global_cfg["scanner"],
+            "csv",
+            disk,
+            "-s",
+            str(state_file),
+            "-o",
+            str(csv_file),
+        ]
         if verbose:
             cmd.append("-v")
 
@@ -241,7 +249,7 @@ def run_scan(
                 run_cmd(cmd, verbose=verbose)
             except subprocess.CalledProcessError as exc:
                 print(
-                    f"warning: fsscan failed (code {exc.returncode})",
+                    f"warning: scanner failed (code {exc.returncode})",
                     file=sys.stderr,
                 )
                 ok = False
@@ -258,7 +266,7 @@ def run_scan(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Catalog filesystem trees using fsscan and tree/du/df.",
+        description="Catalog filesystem trees using dir-tree-scanner and du/df.",
     )
     parser.add_argument(
         "config",
@@ -282,7 +290,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--verbose",
         "-v",
         action="store_true",
-        help="Verbose output; passes -v to fsscan",
+        help="Verbose output; passes -v to dir-tree-scanner",
     )
     return parser
 
@@ -326,7 +334,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         print("Dry run — would execute the following scans:\n")
         print(f"  scanner:    {global_cfg.get('scanner', '(not set)')}")
-        print(f"  tree:       {global_cfg.get('tree', '(not set)')}")
         print(f"  trees_path: {global_cfg.get('trees_path', '(not set)')}")
         print(f"  csvs_path:  {global_cfg.get('csvs_path', '(not set)')}")
         print(f"  state_path: {global_cfg.get('state_path', '(not set)')}")

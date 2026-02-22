@@ -1,6 +1,6 @@
 [package]
 name = "caching-scanners"
-version = "0.0.2"
+version = "0.0.4"
 edition = "2024"
 
 [dependencies]
@@ -13,12 +13,8 @@ brotli = "8"
 icu_collator = "2.1.1"
 
 [[bin]]
-name = "fsscan"
-path = "src/main.rs"
-
-[[bin]]
-name = "cached-tree"
-path = "src/bin/cached_tree.rs"
+name = "dir-tree-scanner"
+path = "src/bin/dir_tree_scanner.rs"
 
 [dev-dependencies]
 tempfile = "3"

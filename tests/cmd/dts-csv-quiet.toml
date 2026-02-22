@@ -1,5 +1,5 @@
-bin.name = "fsscan"
-args = ["."]
+bin.name = "dir-tree-scanner"
+args = ["csv", "."]
 status = "success"
 stdout = ""
 stderr = ""
