@@ -1,3 +1,7 @@
+# Build for local machine with a dev profile to ensure it still can be compiled
+build-smoketest:
+    cargo build --workspace
+
 # Build for local machine (macOS ARM)
 build:
     cargo build --workspace --release
