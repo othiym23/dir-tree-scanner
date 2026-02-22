@@ -93,6 +93,11 @@ just test                  # cargo test + pytest
 
 Always run `cargo fmt` before finishing work on Rust files.
 
+## Git workflow
+
+Branch protection is enabled on `main`. All changes must go through a feature
+branch and pull request — never commit directly to `main`.
+
 ## Plans
 
 Implementation plans are saved in `docs/plans/` using the naming convention
