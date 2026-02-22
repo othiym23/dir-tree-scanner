@@ -21,7 +21,7 @@ dir-tree-scanner --version  →  "0.0.3 (deadbeef)"
 
 ### Shared logic extracted to library
 
-Common operations moved into `src/cli.rs` (re-exported from lib):
+Common operations moved into `src/ops.rs` (re-exported from lib):
 
 1. **`load_state(path, verbose) -> ScanState`** — the 18-line match block
    duplicated in both binaries
@@ -57,7 +57,7 @@ Rerun triggers: `.git/HEAD` and `.git/refs`.
 
 ### Created
 
-- **`src/cli.rs`** — shared `load_state`, `run_scan`, `save_state`,
+- **`src/ops.rs`** — shared `load_state`, `run_scan`, `save_state`,
   `parse_ignore_patterns`
 - **`src/tree.rs`** — tree rendering moved from `bin/cached_tree.rs`
 - **`src/bin/dir_tree_scanner.rs`** — combined CLI with `Csv` and `Tree`

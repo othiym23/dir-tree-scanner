@@ -1,7 +1,21 @@
 use crate::scanner;
 use crate::state::{LoadOutcome, ScanState};
-use std::path::Path;
+use crate::{csv_writer, tree};
+use std::path::{Path, PathBuf};
 use std::process;
+
+/// Verify that a path is a directory, exiting with an error if not.
+pub fn validate_directory(root: &Path) {
+    if !root.is_dir() {
+        eprintln!("error: {} is not a directory", root.display());
+        process::exit(1);
+    }
+}
+
+/// Resolve the state file path, defaulting to `<root>/.fsscan.state`.
+pub fn resolve_state_path(state: Option<PathBuf>, root: &Path) -> PathBuf {
+    state.unwrap_or_else(|| root.join(".fsscan.state"))
+}
 
 /// Load scan state from disk, handling all three outcomes.
 /// Exits the process on unrecoverable errors.
@@ -67,4 +81,28 @@ pub fn save_state(state: &ScanState, path: &Path, verbose: bool) {
     if verbose {
         eprintln!("saved state to {}", path.display());
     }
+}
+
+/// Write CSV output from scan state. Exits on error.
+pub fn write_csv(state: &ScanState, output: &Path, verbose: bool) {
+    if let Err(e) = csv_writer::write_csv(state, output) {
+        eprintln!("error writing CSV: {}", e);
+        process::exit(1);
+    }
+    if verbose {
+        eprintln!("wrote {}", output.display());
+    }
+}
+
+/// Render tree output from scan state, printing summary line.
+pub fn render_tree(
+    state: &ScanState,
+    root: &Path,
+    ignore: &[String],
+    no_escape: bool,
+    show_hidden: bool,
+) {
+    let patterns = parse_ignore_patterns(ignore);
+    let (dir_count, file_count) = tree::render_tree(state, root, &patterns, no_escape, show_hidden);
+    println!("\n{} directories, {} files", dir_count, file_count);
 }

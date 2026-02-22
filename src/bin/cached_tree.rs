@@ -1,7 +1,6 @@
-use caching_scanners::{cli, tree};
+use caching_scanners::ops;
 use clap::Parser;
 use std::path::PathBuf;
-use std::process;
 
 #[derive(Parser)]
 #[command(
@@ -44,23 +43,15 @@ fn main() {
     if args.verbose {
         eprintln!("root is {}", root.display())
     }
-    if !root.is_dir() {
-        eprintln!("error: {} is not a directory", root.display());
-        process::exit(1);
-    }
+    ops::validate_directory(root);
 
-    let state_path = args.state.unwrap_or_else(|| root.join(".fsscan.state"));
+    let state_path = ops::resolve_state_path(args.state, root);
     if args.verbose {
         eprintln!("state_path is {}", state_path.display())
     }
 
-    let mut scan_state = cli::load_state(&state_path, args.verbose);
-    cli::run_scan(root, &mut scan_state, &args.exclude, args.verbose);
-    cli::save_state(&scan_state, &state_path, args.verbose);
-
-    let patterns = cli::parse_ignore_patterns(&args.ignore);
-
-    let (dir_count, file_count) =
-        tree::render_tree(&scan_state, root, &patterns, args.no_escape, args.all);
-    println!("\n{} directories, {} files", dir_count, file_count);
+    let mut scan_state = ops::load_state(&state_path, args.verbose);
+    ops::run_scan(root, &mut scan_state, &args.exclude, args.verbose);
+    ops::save_state(&scan_state, &state_path, args.verbose);
+    ops::render_tree(&scan_state, root, &args.ignore, args.no_escape, args.all);
 }

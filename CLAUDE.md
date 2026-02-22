@@ -46,9 +46,10 @@ state logic from the library crate.
 Library crate (`src/lib.rs`) re-exports shared modules. Three binaries consume
 it:
 
-- `lib.rs` — re-exports `scanner`, `state`, `cli`, `csv_writer`, and `tree`
-- `cli.rs` — shared helpers: `load_state`, `run_scan`, `save_state` (used by all
-  three binaries to avoid duplicating the state-load/scan/save boilerplate)
+- `lib.rs` — re-exports `scanner`, `state`, `ops`, `csv_writer`, and `tree`
+- `ops.rs` — shared operations: `validate_directory`, `resolve_state_path`,
+  `load_state`, `run_scan`, `save_state`, `write_csv`, `render_tree`,
+  `parse_ignore_patterns` (used by all three binaries)
 - `main.rs` — `fsscan` CLI, wires scanner + csv_writer
 - `bin/cached_tree.rs` — `cached-tree` CLI, renders tree output from scan state.
   Hidden-file filtering (`-a`) happens in `merge_entries` at display time, not

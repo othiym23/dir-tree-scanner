@@ -1,7 +1,6 @@
-use caching_scanners::{cli, csv_writer, tree};
+use caching_scanners::ops;
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
-use std::process;
 
 #[derive(Parser)]
 #[command(
@@ -100,26 +99,15 @@ fn run_csv(
     exclude: &[String],
     verbose: bool,
 ) {
-    if !root.is_dir() {
-        eprintln!("error: {} is not a directory", root.display());
-        process::exit(1);
-    }
+    ops::validate_directory(root);
 
     let output = output.unwrap_or_else(|| root.join("index.csv"));
-    let state_path = state.unwrap_or_else(|| root.join(".fsscan.state"));
+    let state_path = ops::resolve_state_path(state, root);
 
-    let mut scan_state = cli::load_state(&state_path, verbose);
-    cli::run_scan(root, &mut scan_state, exclude, verbose);
-
-    if let Err(e) = csv_writer::write_csv(&scan_state, &output) {
-        eprintln!("error writing CSV: {}", e);
-        process::exit(1);
-    }
-    if verbose {
-        eprintln!("wrote {}", output.display());
-    }
-
-    cli::save_state(&scan_state, &state_path, verbose);
+    let mut scan_state = ops::load_state(&state_path, verbose);
+    ops::run_scan(root, &mut scan_state, exclude, verbose);
+    ops::write_csv(&scan_state, &output, verbose);
+    ops::save_state(&scan_state, &state_path, verbose);
 }
 
 fn run_tree(
@@ -134,22 +122,15 @@ fn run_tree(
     if verbose {
         eprintln!("root is {}", root.display());
     }
-    if !root.is_dir() {
-        eprintln!("error: {} is not a directory", root.display());
-        process::exit(1);
-    }
+    ops::validate_directory(root);
 
-    let state_path = state.unwrap_or_else(|| root.join(".fsscan.state"));
+    let state_path = ops::resolve_state_path(state, root);
     if verbose {
         eprintln!("state_path is {}", state_path.display());
     }
 
-    let mut scan_state = cli::load_state(&state_path, verbose);
-    cli::run_scan(root, &mut scan_state, exclude, verbose);
-    cli::save_state(&scan_state, &state_path, verbose);
-
-    let patterns = cli::parse_ignore_patterns(ignore);
-
-    let (dir_count, file_count) = tree::render_tree(&scan_state, root, &patterns, no_escape, all);
-    println!("\n{} directories, {} files", dir_count, file_count);
+    let mut scan_state = ops::load_state(&state_path, verbose);
+    ops::run_scan(root, &mut scan_state, exclude, verbose);
+    ops::save_state(&scan_state, &state_path, verbose);
+    ops::render_tree(&scan_state, root, ignore, no_escape, all);
 }
