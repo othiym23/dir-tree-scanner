@@ -27,6 +27,17 @@ pub async fn open_db(path: &Path, verbose: bool) -> Result<SqlitePool, sqlx::Err
     Ok(pool)
 }
 
+/// Checkpoint the WAL and close the database pool cleanly.
+///
+/// This removes the `-wal` and `-shm` files, leaving only the single `.db` file.
+pub async fn close_db(pool: SqlitePool) {
+    sqlx::raw_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+        .execute(&pool)
+        .await
+        .ok();
+    pool.close().await;
+}
+
 /// Open an in-memory SQLite database for testing.
 pub async fn open_memory() -> Result<SqlitePool, sqlx::Error> {
     let options = SqliteConnectOptions::from_str("sqlite::memory:")?
@@ -118,7 +129,7 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
-            pool.close().await;
+            close_db(pool).await;
         }
 
         // Second open — must not fail on migrations
@@ -130,7 +141,7 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(count.0, 1);
-            pool.close().await;
+            close_db(pool).await;
         }
     }
 }

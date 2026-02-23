@@ -111,4 +111,6 @@ async fn main() {
     if cli.du {
         ops::render_du(&pool, scan_id, cli.du_subs).await;
     }
+
+    etp_lib::db::close_db(pool).await;
 }

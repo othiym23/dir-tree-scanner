@@ -79,4 +79,6 @@ async fn main() {
     };
 
     ops::write_csv_from_db(&pool, scan_id, &output, &cli.exclude, cli.verbose).await;
+
+    etp_lib::db::close_db(pool).await;
 }
