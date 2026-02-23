@@ -32,12 +32,7 @@ pub async fn open_memory() -> Result<SqlitePool, sqlx::Error> {
 }
 
 async fn migrate(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    sqlx::raw_sql(include_str!("migrations/001_initial.sql"))
-        .execute(pool)
-        .await?;
-    sqlx::raw_sql(include_str!("migrations/002_add_directory_size.sql"))
-        .execute(pool)
-        .await?;
+    sqlx::migrate!().run(pool).await?;
     Ok(())
 }
 
@@ -63,13 +58,45 @@ mod tests {
     #[tokio::test]
     async fn open_memory_twice_is_idempotent() {
         let pool = open_memory().await.unwrap();
-        // Running migrate again should not fail (CREATE TABLE without IF NOT EXISTS
-        // would fail, but we only run once per connection)
+        // Running migrate again should not fail — sqlx tracks applied migrations
+        migrate(&pool).await.unwrap();
+
         let tables: Vec<(String,)> =
             sqlx::query_as("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
                 .fetch_all(&pool)
                 .await
                 .unwrap();
         assert!(!tables.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reopening_existing_db_does_not_fail() {
+        // Regression test: opening a DB that already has all migrations applied
+        // must not fail with "duplicate column name" or similar errors.
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("test.db");
+
+        // First open — creates and migrates
+        {
+            let pool = open_db(&db_path).await.unwrap();
+            // Insert some data to prove it's functional
+            sqlx::raw_sql("INSERT INTO scans (run_type, root_path, started_at) VALUES ('test', '/tmp', '2026-01-01T00:00:00Z')")
+                .execute(&pool)
+                .await
+                .unwrap();
+            pool.close().await;
+        }
+
+        // Second open — must not fail on migrations
+        {
+            let pool = open_db(&db_path).await.unwrap();
+            // Verify previous data survived
+            let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM scans")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(count.0, 1);
+            pool.close().await;
+        }
     }
 }
