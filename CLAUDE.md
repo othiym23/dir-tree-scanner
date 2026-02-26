@@ -5,11 +5,18 @@ representations of filesystem trees. Designed for NAS use (spinning disks, RAID
 6 with two parity disks) at 200K-500K file scale. For performance, intended to
 be run on a Synology DiskStation running DSM 7.3.
 
-Cargo workspace with three crates:
+Cargo workspace with four crates:
 
 - `etp-lib` — library crate (all shared logic)
 - `etp-csv` — CSV output binary
 - `etp-tree` — tree output binary
+- `etp-find` — regex-based file search binary
+
+Python porcelain in `etp/`:
+
+- `etp` — git-style dispatcher (`etp <cmd>` → `etp-<cmd>`)
+- `etp-catalog` — KDL-configured catalog orchestrator
+- `kdl/` — vendored `kdl-py` 1.2.0 (KDL 1 parser, no install step needed)
 
 ## Build & run
 
@@ -23,6 +30,12 @@ just deploy           # check + test + build + mount NAS + copy everything
 # Usage
 etp-csv <directory> [--output <file.csv>] [--db <file.db>] [--exclude <name>...] [--no-scan] [-v]
 etp-tree <directory> [--db <file.db>] [--exclude <name>...] [--no-scan] [--du [--du-subs]] [-N] [-I <pattern>...] [-a] [-v]
+etp-find <directory> <pattern> [--tree=<file>] [--csv=<file>] [--size] [--db <path>] [--exclude <name>...] [--no-scan] [-v]
+
+# Via dispatcher
+etp tree <directory> [args...]
+etp find <directory> <pattern> [args...]
+etp catalog [--dry-run] [config.kdl]
 ```
 
 Defaults: output is `<dir>/index.csv`, database is `<dir>/.etp.db`, exclude is
@@ -35,10 +48,13 @@ by default (they become part of the scan).
 Library crate (`etp-lib/src/lib.rs`) re-exports shared modules:
 
 - `ops.rs` — shared operations: `validate_directory`, `parse_ignore_patterns`,
-  `run_scan_to_db`, `write_csv_from_db`, `render_tree_from_db`, `render_du`
+  `run_scan_to_db`, `write_csv_from_db`, `render_tree_from_db`, `render_du`,
+  `stream_find_matches`, `collect_find_matches`, `write_find_csv`,
+  `render_find_tree`
 - `scanner.rs` — walkdir-based scanning; skips unchanged directories by mtime
 - `csv_writer.rs` — sorted CSV (`path,size,ctime,mtime`)
 - `tree.rs` — tree rendering with ICU4X collation for Unicode-aware sorting
+- `finder.rs` — regex matching against file records
 - `db/` — SQLite database layer (`dao.rs` for queries, `mod.rs` for connection)
 - `config.rs` — KDL configuration parsing
 - `paths.rs` — XDG-based path resolution
@@ -72,6 +88,7 @@ Install with `cargo install --locked cargo-nextest`.
 
 - `etp-csv/tests/cmd/` — CSV snapshot tests (4 tests)
 - `etp-tree/tests/cmd/` — tree snapshot tests (3 tests)
+- `etp-find/tests/cmd/` — find snapshot tests (5 tests)
 
 ### trycmd tests
 
@@ -90,14 +107,23 @@ fs.sandbox = true
 
 ## Scripts
 
-`scripts/` contains a Python orchestrator (`catalog-nas.py`) that drives the
-scanner across multiple directory trees, configured via `catalog.toml`. Tests in
-`test_catalog.py`.
+`scripts/` contains the legacy Python orchestrator (`catalog-nas.py`) driven by
+`catalog.toml`. This is superseded by `etp/etp-catalog` with KDL config.
+
+`etp/` contains the current Python porcelain:
+
+- `etp` — git-style dispatcher
+- `etp-catalog` — KDL-configured catalog orchestrator
+- `test_catalog.py` — pytest tests
+
+`conf/` contains KDL configuration files:
+
+- `catalog.kdl` — catalog scan configuration
 
 ```bash
-cd scripts && uv sync  # creates .venv with ruff, pyright, pytest
-just check             # clippy + ruff + pyright
-just test              # cargo test + pytest
+cd etp && uv sync     # creates .venv with kdl-py, ruff, pyright, pytest
+just check            # clippy + ruff + pyright
+just test             # cargo nextest + pytest (scripts + etp)
 ```
 
 ## Formatting

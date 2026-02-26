@@ -2,6 +2,7 @@ use crate::db::dao;
 use crate::scanner;
 use crate::{csv_writer, tree};
 use sqlx::SqlitePool;
+use std::io::Write;
 use std::path::Path;
 use std::process;
 
@@ -79,7 +80,7 @@ pub async fn render_tree_from_db(
 }
 
 /// Format a byte count as a human-readable string with two significant digits.
-fn format_size(bytes: u64) -> String {
+pub fn format_size(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = 1024.0 * 1024.0;
     const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -120,6 +121,106 @@ pub async fn render_du(pool: &SqlitePool, scan_id: i64, show_subs: bool) {
             println!("  {}  {}", format_size(*size), name);
         }
     }
+}
+
+/// Stream files from DB, printing matching paths immediately. Returns (count, total_size).
+pub async fn stream_find_matches(
+    pool: &SqlitePool,
+    scan_id: i64,
+    pattern: &regex::Regex,
+) -> (usize, u64) {
+    use crate::finder;
+    use std::future::poll_fn;
+    use std::pin::Pin;
+
+    let mut stream = dao::stream_files(pool, scan_id);
+    let mut count = 0;
+    let mut total_size = 0u64;
+
+    while let Some(result) = poll_fn(|cx| {
+        use futures_core::Stream;
+        Pin::new(&mut stream).poll_next(cx)
+    })
+    .await
+    {
+        match result {
+            Ok(record) => {
+                if let Some(m) = finder::matches_pattern(&record, pattern) {
+                    println!("{}", m.full_path);
+                    total_size += m.size;
+                    count += 1;
+                }
+            }
+            Err(e) => {
+                eprintln!("error reading from database: {}", e);
+                process::exit(1);
+            }
+        }
+    }
+
+    (count, total_size)
+}
+
+/// Collect all matching files into a Vec. Returns the matches.
+pub async fn collect_find_matches(
+    pool: &SqlitePool,
+    scan_id: i64,
+    pattern: &regex::Regex,
+) -> Vec<crate::finder::FindMatch> {
+    use crate::finder;
+
+    let files = dao::list_files(pool, scan_id).await.unwrap_or_else(|e| {
+        eprintln!("error reading from database: {}", e);
+        process::exit(1);
+    });
+
+    files
+        .iter()
+        .filter_map(|record| finder::matches_pattern(record, pattern))
+        .collect()
+}
+
+/// Write matched files as CSV to a file path, or stdout when `output == "-"`.
+pub fn write_find_csv(matches: &[crate::finder::FindMatch], output: &str) {
+    let writer: Box<dyn std::io::Write> = if output == "-" {
+        Box::new(std::io::stdout().lock())
+    } else {
+        Box::new(std::fs::File::create(output).unwrap_or_else(|e| {
+            eprintln!("error creating {}: {}", output, e);
+            process::exit(1);
+        }))
+    };
+
+    let mut wtr = csv::Writer::from_writer(writer);
+    wtr.write_record(["path", "size", "ctime", "mtime"])
+        .unwrap();
+
+    for m in matches {
+        wtr.write_record([
+            &m.full_path,
+            &m.size.to_string(),
+            &m.ctime.to_string(),
+            &m.mtime.to_string(),
+        ])
+        .unwrap();
+    }
+
+    wtr.flush().unwrap();
+}
+
+/// Render matched files as a tree to a file path, or stdout when `output == "-"`.
+pub fn render_find_tree(matches: &[crate::finder::FindMatch], root: &Path, output: &str) {
+    let mut writer: Box<dyn std::io::Write> = if output == "-" {
+        Box::new(std::io::stdout().lock())
+    } else {
+        Box::new(std::fs::File::create(output).unwrap_or_else(|e| {
+            eprintln!("error creating {}: {}", output, e);
+            process::exit(1);
+        }))
+    };
+
+    let (dir_count, file_count) = tree::render_tree_from_paths(matches, root, &mut writer);
+    writeln!(writer, "\n{} directories, {} files", dir_count, file_count).unwrap();
 }
 
 #[cfg(test)]

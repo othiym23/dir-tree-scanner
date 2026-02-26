@@ -7,29 +7,38 @@ Tasks should be marked as done when they are incorporated into the plan, and
 then removed once it has been verified that they have been completely
 implemented.
 
-## SP 1.4
+## SP 1.5
 
-- [x] Migrate away from using du to sum up the sizes of the dir trees in
-      catalog-nas.py. Add a switch to `etp-tree` to append the two kinds of du
-      output (total for the root path, and a path for each subdirectory of the
-      root path) to the tree output. The output of the replacement function
-      should match the output of the catalog-nas.py / etp-catalog / etp catalog
-      tree output.
-- [x] Because the cataloging process runs both `etp-csv` and `etp-tree` in quick
-      succession, it's not necessary to run the dirtree scanner for both
-      processes. Add a (hidden) plumbing-only flag (`--no-scan`, unless there's
-      a name that better suggests its purpose) to `etp-csv` and `etp-tree` to
-      skip the scanning process and just use the cached values to speed up
-      etp-catalog.
-- [ ] add an `etp-find` command that takes a pattern and finds all paths
+- [x] add an `etp-find` command that takes a pattern and finds all paths
       matching that pattern
-  - [ ] extend `etp-find` to take `--tree=outfile.tree` and `--csv=outfile.csv`
+  - [x] extend `etp-find` to take `--tree=outfile.tree` and `--csv=outfile.csv`
         command-line switches to produce output in tree and / or csv formats;
         support using `-` for the file path to put the output on stdout
-  - [ ] extend `etp-find` to take a `--size` parameter to provide a
+  - [x] extend `etp-find` to take a `--size` parameter to provide a
         human-readable summary (KiB, MiB, GiB, etc; two significant digit
         precision) of the sizes of all of the matched paths at the end (if
         --tree=- and/or --csv=- are invoked) of etp-find output
+- [x] etp-find bug: `--tree` should print the files matched and not just the
+      directories (also the number of files should be included in the count)
+- [ ] etp-find feature: don't do a scan unless the database doesn't exist
+- [ ] etp-find feature: don't require a directory parameter (match against all
+      paths in the db)
+- [ ] etp-find feature: add '-I' / '--insensitive' for case-insensitive matching
+- [ ] etp-csv, etp-tree: add a `--find` option to both `etp-tree` and `etp-csv`
+      that uses the same search logic as `etp-find` – just a different way to
+      invoke the same functionality
+
+## SP 1.6
+
+- [ ] why do we need both `etp/` and `scripts/`?
+- [ ] refactor plumbing binaries to go into .local/share/libexec
+- [ ] etp-scan: add a new plumbing command that extracts the scanning portion
+      into its own command, and refactor porcelain to manage scanning before
+      calling etp-tree and etp-csv unless `--no-scan` is passed to the
+      porcelain. Remove `--no-scan` option from `etp-csv` and `etp-tree` and
+      clean up those tools' source.
+- [ ] create README with description of all porcelain commands and with
+      installation instructions
 
 ## SP 2
 

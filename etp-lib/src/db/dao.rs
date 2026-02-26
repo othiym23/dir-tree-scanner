@@ -1,5 +1,7 @@
+use futures_core::Stream;
 use sqlx::SqlitePool;
 use std::collections::HashSet;
+use std::pin::Pin;
 
 /// A file record as returned by `list_files`, with the full path reconstructed.
 #[derive(Debug, Clone)]
@@ -176,6 +178,66 @@ pub async fn list_files(pool: &SqlitePool, scan_id: i64) -> Result<Vec<FileRecor
             }
         })
         .collect())
+}
+
+/// Stream all files for a scan, yielding `FileRecord` values one at a time
+/// via a database cursor instead of loading everything into memory.
+pub fn stream_files(
+    pool: &SqlitePool,
+    scan_id: i64,
+) -> Pin<Box<dyn Stream<Item = Result<FileRecord, sqlx::Error>> + Send + '_>> {
+    let raw = sqlx::query_as::<_, (String, String, String, i64, i64, i64)>(
+        "SELECT s.root_path, d.path, f.filename, f.size, f.ctime, f.mtime
+         FROM files f
+         JOIN directories d ON f.dir_id = d.id
+         JOIN scans s ON d.scan_id = s.id
+         WHERE d.scan_id = ?",
+    )
+    .bind(scan_id)
+    .fetch(pool);
+
+    Box::pin(MapStream {
+        inner: Box::pin(raw),
+    })
+}
+
+type RawRowStream<'a> = Pin<
+    Box<
+        dyn Stream<Item = Result<(String, String, String, i64, i64, i64), sqlx::Error>> + Send + 'a,
+    >,
+>;
+
+/// Adapter that maps raw query rows to `FileRecord`.
+struct MapStream<'a> {
+    inner: RawRowStream<'a>,
+}
+
+impl Stream for MapStream<'_> {
+    type Item = Result<FileRecord, sqlx::Error>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx).map(|opt| {
+            opt.map(|res| {
+                res.map(|(root, dir_path, filename, size, ctime, mtime)| {
+                    let full_path = if dir_path.is_empty() {
+                        root
+                    } else {
+                        format!("{}/{}", root, dir_path)
+                    };
+                    FileRecord {
+                        dir_path: full_path,
+                        filename,
+                        size: size as u64,
+                        ctime,
+                        mtime,
+                    }
+                })
+            })
+        })
+    }
 }
 
 /// Get the total size of all files in a scan.
@@ -822,6 +884,73 @@ mod tests {
         assert_eq!(subs.len(), 2);
         assert_eq!(subs[0], ("alpha".to_string(), 250)); // 100 + 150
         assert_eq!(subs[1], ("beta".to_string(), 200));
+    }
+
+    #[tokio::test]
+    async fn stream_files_yields_all_records() {
+        use std::future::poll_fn;
+        use std::pin::Pin;
+
+        let pool = open_memory().await.unwrap();
+        let scan_id = upsert_scan(&pool, "test", "/volume1/music").await.unwrap();
+
+        let root_dir_id = upsert_directory(&pool, scan_id, "", 1000, 0).await.unwrap();
+        replace_files(
+            &pool,
+            root_dir_id,
+            &[FileInput {
+                filename: "root.txt".into(),
+                size: 10,
+                ctime: 100,
+                mtime: 200,
+            }],
+        )
+        .await
+        .unwrap();
+
+        let sub_dir_id = upsert_directory(&pool, scan_id, "sub/dir", 2000, 0)
+            .await
+            .unwrap();
+        replace_files(
+            &pool,
+            sub_dir_id,
+            &[FileInput {
+                filename: "deep.txt".into(),
+                size: 20,
+                ctime: 300,
+                mtime: 400,
+            }],
+        )
+        .await
+        .unwrap();
+
+        // Collect from stream using poll_fn
+        let mut stream = stream_files(&pool, scan_id);
+        let mut streamed: Vec<FileRecord> = Vec::new();
+        while let Some(result) = poll_fn(|cx| {
+            use futures_core::Stream;
+            Pin::new(&mut stream).poll_next(cx)
+        })
+        .await
+        {
+            streamed.push(result.unwrap());
+        }
+
+        // Compare with list_files
+        let listed = list_files(&pool, scan_id).await.unwrap();
+        assert_eq!(streamed.len(), listed.len());
+
+        let mut stream_paths: Vec<String> = streamed
+            .iter()
+            .map(|f| format!("{}/{}", f.dir_path, f.filename))
+            .collect();
+        stream_paths.sort();
+        let mut list_paths: Vec<String> = listed
+            .iter()
+            .map(|f| format!("{}/{}", f.dir_path, f.filename))
+            .collect();
+        list_paths.sort();
+        assert_eq!(stream_paths, list_paths);
     }
 
     #[tokio::test]

@@ -26,6 +26,7 @@ format:
     cargo fmt --all
     # Python
     cd scripts && uv run ruff format
+    cd etp && uv run ruff format
     # Markdown
     prettier --write "**/*.md"
 
@@ -34,11 +35,17 @@ check:
     # Rust
     cargo fmt --all --check
     cargo clippy --workspace -- -D warnings
-    # Python
+    # Python (scripts)
     cd scripts && \
       uv run ruff check && \
       uv run ruff format --check
     cd scripts && \
+      uv run pyright
+    # Python (etp)
+    cd etp && \
+      uv run ruff check && \
+      uv run ruff format --check
+    cd etp && \
       uv run pyright
     # Markdown
     prettier --check "**/*.md"
@@ -47,6 +54,7 @@ check:
 test:
     cargo nextest run --workspace
     cd scripts && uv run pytest test_catalog.py -q
+    cd etp && uv run pytest test_catalog.py -q
 
 nas_home := "/Volumes/home"
 
@@ -74,9 +82,16 @@ deploy: check test build-nas mount-home
     rm -f "{{ nas_home }}/bin/dir-tree-scanner"
     cp target/x86_64-unknown-linux-musl/release/etp-csv "{{ nas_home }}/bin"
     cp target/x86_64-unknown-linux-musl/release/etp-tree "{{ nas_home }}/bin"
-    # catalog-nas
-    mkdir -p "{{ nas_home }}/scripts"
-    cp scripts/catalog-nas.py "{{ nas_home }}/scripts"
-    cp scripts/catalog.toml "{{ nas_home }}/scripts"
-    # permissions – current invocation is via the python interpreter
-    chmod 0640 "{{ nas_home }}/scripts/catalog-nas.py"
+    cp target/x86_64-unknown-linux-musl/release/etp-find "{{ nas_home }}/bin"
+    # etp porcelain
+    mkdir -p "{{ nas_home }}/bin"
+    cp etp/etp "{{ nas_home }}/bin"
+    cp etp/etp-catalog "{{ nas_home }}/bin"
+    cp -R etp/kdl "{{ nas_home }}/bin/kdl"
+    chmod +x "{{ nas_home }}/bin/etp" "{{ nas_home }}/bin/etp-catalog"
+    # config
+    mkdir -p "{{ nas_home }}/conf"
+    cp conf/catalog.kdl "{{ nas_home }}/conf"
+    # clean out legacy scripts
+    rm -f "{{ nas_home }}/scripts/catalog-nas.py"
+    rm -f "{{ nas_home }}/scripts/catalog.toml"
