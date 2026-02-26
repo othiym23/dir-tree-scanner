@@ -35,6 +35,10 @@ struct Cli {
     #[arg(short, long, default_values_t = [String::from("@eaDir")])]
     exclude: Vec<String>,
 
+    /// Case-insensitive pattern matching
+    #[arg(short = 'I', long = "insensitive")]
+    insensitive: bool,
+
     /// Skip scanning, use existing DB data
     #[arg(long, hide = true)]
     no_scan: bool,
@@ -50,7 +54,10 @@ async fn main() {
 
     ops::validate_directory(&cli.directory);
 
-    let pattern = match regex::Regex::new(&cli.pattern) {
+    let pattern = match regex::RegexBuilder::new(&cli.pattern)
+        .case_insensitive(cli.insensitive)
+        .build()
+    {
         Ok(re) => re,
         Err(e) => {
             eprintln!("error: invalid regex '{}': {}", cli.pattern, e);
