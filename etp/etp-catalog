@@ -173,6 +173,18 @@ def find_binary(name: str) -> str:
 
 
 VALID_MODES = {"used", "df", "subs"}
+REQUIRED_SCAN_FIELDS = ("disk", "header", "mode", "desc")
+
+
+def _validate_scan_cfg(name: str, scan_cfg: dict[str, Any]) -> None:
+    """Raise SystemExit if required fields are missing from a scan config."""
+    missing = [f for f in REQUIRED_SCAN_FIELDS if f not in scan_cfg]
+    if missing:
+        print(
+            f"error: scan '{name}' missing required field(s): {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def generate_tree(
@@ -189,6 +201,7 @@ def generate_tree(
       - 'df':   df -PH on disk
       - 'subs': df -PH on disk + --du --du-subs
     """
+    _validate_scan_cfg(name, scan_cfg)
     disk = scan_cfg["disk"]
     header = scan_cfg["header"]
     mode = scan_cfg["mode"]
@@ -235,6 +248,7 @@ def run_scan(
     *,
     verbose: bool = False,
 ) -> bool:
+    _validate_scan_cfg(name, scan_cfg)
     disk = scan_cfg["disk"]
     desc = scan_cfg["desc"]
     mode = scan_cfg["mode"]
@@ -349,6 +363,16 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(config_path)
     global_cfg = cfg["global"]
     scans = cfg["scans"]
+
+    # Validate required global fields
+    required_global = ("trees_path", "csvs_path", "db_path")
+    missing_global = [f for f in required_global if f not in global_cfg]
+    if missing_global:
+        print(
+            f"error: global config missing required field(s): {', '.join(missing_global)}",
+            file=sys.stderr,
+        )
+        return 1
 
     # Filter to requested scans
     if args.scans:

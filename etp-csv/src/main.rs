@@ -90,7 +90,10 @@ async fn main() {
         let pattern = ops::compile_pattern(find_pattern, cli.insensitive);
         let matches = ops::collect_find_matches(&pool, scan_id, &pattern, &cli.exclude).await;
         let output_str = output.to_string_lossy();
-        ops::write_find_csv(&matches, &output_str);
+        ops::write_find_csv(&matches, &output_str).unwrap_or_else(|e| {
+            eprintln!("error writing CSV: {}", e);
+            std::process::exit(1);
+        });
     } else {
         ops::write_csv_from_db(&pool, scan_id, &output, &cli.exclude, cli.verbose).await;
     }

@@ -35,11 +35,12 @@ struct TreeContext<'a> {
     show_hidden: bool,
 }
 
-fn make_collator() -> CollatorBorrowed<'static> {
+fn make_collator() -> io::Result<CollatorBorrowed<'static>> {
     let mut options = CollatorOptions::default();
     options.strength = Some(Strength::Quaternary);
     options.alternate_handling = Some(AlternateHandling::Shifted);
-    CollatorBorrowed::try_new(Default::default(), options).unwrap()
+    CollatorBorrowed::try_new(Default::default(), options)
+        .map_err(|e| io::Error::other(format!("collator initialization failed: {e}")))
 }
 
 pub async fn render_tree_from_db(
@@ -49,9 +50,13 @@ pub async fn render_tree_from_db(
     patterns: &[Pattern],
     no_escape: bool,
     show_hidden: bool,
-) -> (usize, usize) {
-    let dir_paths = dao::list_directory_paths(pool, scan_id).await.unwrap();
-    let file_records = dao::list_files(pool, scan_id).await.unwrap();
+) -> io::Result<(usize, usize)> {
+    let dir_paths = dao::list_directory_paths(pool, scan_id)
+        .await
+        .map_err(io::Error::other)?;
+    let file_records = dao::list_files(pool, scan_id)
+        .await
+        .map_err(io::Error::other)?;
 
     // Build child-directory map from full dir paths
     let mut children: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
@@ -80,18 +85,18 @@ pub async fn render_tree_from_db(
         files_by_dir,
         children,
         patterns,
-        collator: make_collator(),
+        collator: make_collator()?,
         no_escape,
         show_hidden,
     };
 
     let mut out = io::stdout();
-    writeln!(out, "{}", root.display()).unwrap();
+    writeln!(out, "{}", root.display())?;
 
     let mut dir_count = 1;
     let mut file_count = 0;
-    render_dir(&ctx, root, "", &mut dir_count, &mut file_count, &mut out);
-    (dir_count, file_count)
+    render_dir(&ctx, root, "", &mut dir_count, &mut file_count, &mut out)?;
+    Ok((dir_count, file_count))
 }
 
 /// Build a tree from a list of `FindMatch` values and render it to `writer`.
@@ -100,7 +105,7 @@ pub fn render_tree_from_paths(
     matches: &[FindMatch],
     root: &Path,
     writer: &mut dyn Write,
-) -> (usize, usize) {
+) -> io::Result<(usize, usize)> {
     // Build the same data structures as render_tree_from_db
     let mut children: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
     let mut files_by_dir: HashMap<PathBuf, Vec<String>> = HashMap::new();
@@ -110,10 +115,14 @@ pub fn render_tree_from_paths(
     for m in matches {
         let full = Path::new(&m.full_path);
         if let Some(parent) = full.parent() {
+            let filename = match full.file_name() {
+                Some(name) => name.to_string_lossy().into_owned(),
+                None => continue,
+            };
             files_by_dir
                 .entry(parent.to_path_buf())
                 .or_default()
-                .push(full.file_name().unwrap().to_string_lossy().into_owned());
+                .push(filename);
 
             // Register all ancestor directories
             let mut ancestor = parent.to_path_buf();
@@ -144,17 +153,17 @@ pub fn render_tree_from_paths(
         files_by_dir,
         children,
         patterns: &no_patterns,
-        collator: make_collator(),
+        collator: make_collator()?,
         no_escape: true,
         show_hidden: true,
     };
 
-    writeln!(writer, "{}", root.display()).unwrap();
+    writeln!(writer, "{}", root.display())?;
 
     let mut dir_count = 1;
     let mut file_count = 0;
-    render_dir(&ctx, root, "", &mut dir_count, &mut file_count, writer);
-    (dir_count, file_count)
+    render_dir(&ctx, root, "", &mut dir_count, &mut file_count, writer)?;
+    Ok((dir_count, file_count))
 }
 
 /// Entry in the merged directory listing — either a file or subdirectory.
@@ -196,7 +205,7 @@ fn render_dir(
     dir_count: &mut usize,
     file_count: &mut usize,
     writer: &mut dyn Write,
-) {
+) -> io::Result<()> {
     let files: Vec<String> = ctx.files_by_dir.get(dir_path).cloned().unwrap_or_default();
     let empty = BTreeSet::new();
     let child_dirs = ctx.children.get(dir_path).unwrap_or(&empty);
@@ -216,8 +225,7 @@ fn render_dir(
                     prefix,
                     connector,
                     maybe_escape(name, ctx.no_escape)
-                )
-                .unwrap();
+                )?;
                 *file_count += 1;
             }
             Entry::Dir(name) => {
@@ -227,8 +235,7 @@ fn render_dir(
                     prefix,
                     connector,
                     maybe_escape(name, ctx.no_escape)
-                )
-                .unwrap();
+                )?;
                 *dir_count += 1;
                 let child_path = dir_path.join(name);
                 render_dir(
@@ -238,10 +245,11 @@ fn render_dir(
                     dir_count,
                     file_count,
                     writer,
-                );
+                )?;
             }
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -272,7 +280,7 @@ mod tests {
         ];
 
         let mut buf = Vec::new();
-        let (dir_count, file_count) = render_tree_from_paths(&matches, root, &mut buf);
+        let (dir_count, file_count) = render_tree_from_paths(&matches, root, &mut buf).unwrap();
 
         let output = String::from_utf8(buf).unwrap();
         assert!(

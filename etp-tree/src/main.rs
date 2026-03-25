@@ -105,7 +105,10 @@ async fn main() {
     if let Some(ref find_pattern) = cli.find {
         let pattern = ops::compile_pattern(find_pattern, cli.insensitive);
         let matches = ops::collect_find_matches(&pool, scan_id, &pattern, &cli.exclude).await;
-        ops::render_find_tree(&matches, &cli.directory, "-");
+        ops::render_find_tree(&matches, &cli.directory, "-").unwrap_or_else(|e| {
+            eprintln!("error rendering tree: {}", e);
+            std::process::exit(1);
+        });
     } else {
         // Combine exclude and ignore into patterns for tree rendering
         let mut all_ignore = cli.ignore.clone();
@@ -119,7 +122,11 @@ async fn main() {
             cli.no_escape,
             cli.all,
         )
-        .await;
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("error rendering tree: {}", e);
+            std::process::exit(1);
+        });
     }
 
     if cli.du {

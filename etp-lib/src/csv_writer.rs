@@ -58,7 +58,8 @@ pub async fn write_csv_from_db(
     let mut options = CollatorOptions::default();
     options.strength = Some(Strength::Quaternary);
     options.alternate_handling = Some(AlternateHandling::Shifted);
-    let collator = CollatorBorrowed::try_new(Default::default(), options).unwrap();
+    let collator = CollatorBorrowed::try_new(Default::default(), options)
+        .map_err(|e| io::Error::other(format!("collator initialization failed: {e}")))?;
 
     let mut dirs: Vec<String> = by_dir.keys().cloned().collect();
     dirs.sort_by(|a, b| collator.compare(a, b));
@@ -69,7 +70,9 @@ pub async fn write_csv_from_db(
         .map_err(io::Error::other)?;
 
     for dir in &dirs {
-        let dir_files = by_dir.get_mut(dir.as_str()).unwrap();
+        let Some(dir_files) = by_dir.get_mut(dir.as_str()) else {
+            continue;
+        };
         dir_files.sort_by(|a, b| collator.compare(&a.filename, &b.filename));
         for f in dir_files {
             let path = Path::new(dir).join(&f.filename);

@@ -100,11 +100,12 @@ pub async fn render_tree_from_db(
     ignore: &[String],
     no_escape: bool,
     show_hidden: bool,
-) {
+) -> std::io::Result<()> {
     let patterns = parse_ignore_patterns(ignore);
     let (dir_count, file_count) =
-        tree::render_tree_from_db(pool, scan_id, root, &patterns, no_escape, show_hidden).await;
+        tree::render_tree_from_db(pool, scan_id, root, &patterns, no_escape, show_hidden).await?;
     println!("\n{} directories, {} files", dir_count, file_count);
+    Ok(())
 }
 
 /// Format a byte count as a human-readable string with two significant digits.
@@ -276,19 +277,16 @@ pub async fn collect_find_all_matches(
 }
 
 /// Write matched files as CSV to a file path, or stdout when `output == "-"`.
-pub fn write_find_csv(matches: &[crate::finder::FindMatch], output: &str) {
+pub fn write_find_csv(matches: &[crate::finder::FindMatch], output: &str) -> std::io::Result<()> {
     let writer: Box<dyn std::io::Write> = if output == "-" {
         Box::new(std::io::stdout().lock())
     } else {
-        Box::new(std::fs::File::create(output).unwrap_or_else(|e| {
-            eprintln!("error creating {}: {}", output, e);
-            process::exit(1);
-        }))
+        Box::new(std::fs::File::create(output)?)
     };
 
     let mut wtr = csv::Writer::from_writer(writer);
     wtr.write_record(["path", "size", "ctime", "mtime"])
-        .unwrap();
+        .map_err(std::io::Error::other)?;
 
     for m in matches {
         wtr.write_record([
@@ -297,25 +295,28 @@ pub fn write_find_csv(matches: &[crate::finder::FindMatch], output: &str) {
             &m.ctime.to_string(),
             &m.mtime.to_string(),
         ])
-        .unwrap();
+        .map_err(std::io::Error::other)?;
     }
 
-    wtr.flush().unwrap();
+    wtr.flush().map_err(std::io::Error::other)?;
+    Ok(())
 }
 
 /// Render matched files as a tree to a file path, or stdout when `output == "-"`.
-pub fn render_find_tree(matches: &[crate::finder::FindMatch], root: &Path, output: &str) {
+pub fn render_find_tree(
+    matches: &[crate::finder::FindMatch],
+    root: &Path,
+    output: &str,
+) -> std::io::Result<()> {
     let mut writer: Box<dyn std::io::Write> = if output == "-" {
         Box::new(std::io::stdout().lock())
     } else {
-        Box::new(std::fs::File::create(output).unwrap_or_else(|e| {
-            eprintln!("error creating {}: {}", output, e);
-            process::exit(1);
-        }))
+        Box::new(std::fs::File::create(output)?)
     };
 
-    let (dir_count, file_count) = tree::render_tree_from_paths(matches, root, &mut writer);
-    writeln!(writer, "\n{} directories, {} files", dir_count, file_count).unwrap();
+    let (dir_count, file_count) = tree::render_tree_from_paths(matches, root, &mut writer)?;
+    writeln!(writer, "\n{} directories, {} files", dir_count, file_count)?;
+    Ok(())
 }
 
 #[cfg(test)]

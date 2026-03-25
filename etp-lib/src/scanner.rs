@@ -72,7 +72,7 @@ pub async fn scan_to_db(
         let dir_path = entry.path().to_path_buf();
         let relative = dir_path
             .strip_prefix(root)
-            .unwrap()
+            .map_err(|e| io::Error::other(format!("path not under root: {}", e)))?
             .to_string_lossy()
             .into_owned();
         seen_paths.insert(relative.clone());

@@ -427,7 +427,7 @@ fn chrono_now() -> String {
     use std::time::SystemTime;
     let duration = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap();
+        .expect("system clock before Unix epoch");
     let secs = duration.as_secs();
     // Format as ISO 8601 using simple arithmetic
     let days = secs / 86400;

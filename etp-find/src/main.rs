@@ -146,7 +146,10 @@ async fn main() {
         // Write tree output (requires a root directory for the tree)
         if let Some(ref tree_path) = cli.tree {
             if let Some(ref dir) = cli.directory {
-                ops::render_find_tree(&matches, dir, tree_path);
+                ops::render_find_tree(&matches, dir, tree_path).unwrap_or_else(|e| {
+                    eprintln!("error rendering tree: {}", e);
+                    std::process::exit(1);
+                });
             } else {
                 eprintln!("error: --tree requires --root <directory>");
                 std::process::exit(1);
@@ -155,7 +158,10 @@ async fn main() {
 
         // Write CSV output
         if let Some(ref csv_path) = cli.csv {
-            ops::write_find_csv(&matches, csv_path);
+            ops::write_find_csv(&matches, csv_path).unwrap_or_else(|e| {
+                eprintln!("error writing CSV: {}", e);
+                std::process::exit(1);
+            });
         }
 
         if cli.size {

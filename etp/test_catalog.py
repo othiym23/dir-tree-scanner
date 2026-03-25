@@ -217,6 +217,8 @@ class TestCLIDryRun:
             textwrap.dedent("""\
             global {
                 trees-path "/tmp/trees"
+                csvs-path "/tmp/csvs"
+                db-path "/tmp/db"
             }
         """)
         )
@@ -225,6 +227,23 @@ class TestCLIDryRun:
         assert rc == 0
         out = capsys.readouterr().out
         assert "No scans to run" in out
+
+    def test_missing_global_fields_errors(self, tmp_path, capsys):
+        config = tmp_path / "test.kdl"
+        config.write_text(
+            textwrap.dedent("""\
+            global {
+                trees-path "/tmp/trees"
+            }
+        """)
+        )
+
+        rc = catalog.main([str(config)])
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "missing required field(s)" in err
+        assert "csvs_path" in err
+        assert "db_path" in err
 
     def test_missing_config_errors(self, capsys):
         rc = catalog.main(["/nonexistent/config.kdl"])
