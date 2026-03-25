@@ -25,7 +25,7 @@ async fn csv_output_from_db_is_correct() {
 
     let pool = db::open_memory().await.unwrap();
     let run_type = root.to_string_lossy();
-    let (scan_id, _stats) = scanner::scan_to_db(&root, &pool, &run_type, false)
+    let (scan_id, _stats) = scanner::scan_to_db(&root, &pool, &run_type, &[], false)
         .await
         .unwrap();
 
@@ -58,12 +58,12 @@ async fn csv_output_with_exclude_filters_correctly() {
 
     let pool = db::open_memory().await.unwrap();
     let run_type = root.to_string_lossy();
-    let (scan_id, _stats) = scanner::scan_to_db(&root, &pool, &run_type, false)
+    let exclude = vec!["@eaDir".to_string()];
+    let (scan_id, _stats) = scanner::scan_to_db(&root, &pool, &run_type, &exclude, false)
         .await
         .unwrap();
 
     let csv_path = tmp.path().join("out.csv");
-    let exclude = vec!["@eaDir".to_string()];
     csv_writer::write_csv_from_db(&pool, scan_id, &csv_path, &exclude, false)
         .await
         .unwrap();
@@ -77,7 +77,7 @@ async fn csv_output_with_exclude_filters_correctly() {
 }
 
 #[tokio::test]
-async fn scan_to_db_captures_all_directories() {
+async fn scan_to_db_excludes_directories() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("fixture");
     fs::create_dir(&root).unwrap();
@@ -89,18 +89,44 @@ async fn scan_to_db_captures_all_directories() {
 
     let pool = db::open_memory().await.unwrap();
     let run_type = root.to_string_lossy();
-    let (scan_id, stats) = scanner::scan_to_db(&root, &pool, &run_type, false)
+    let exclude = vec!["@eaDir".to_string()];
+    let (scan_id, stats) = scanner::scan_to_db(&root, &pool, &run_type, &exclude, false)
         .await
         .unwrap();
 
-    // scan_to_db should capture ALL directories, including @eaDir
+    // @eaDir should be excluded from scan
+    // root, sub, sub/deeper = 3 dirs
+    assert_eq!(stats.dirs_scanned, 3);
+
+    let dir_paths = db::dao::list_directory_paths(&pool, scan_id).await.unwrap();
+    assert_eq!(dir_paths.len(), 3);
+
+    let files = db::dao::list_files(&pool, scan_id).await.unwrap();
+    // a.txt, b.txt, c.txt = 3 files (no junk.txt)
+    assert_eq!(files.len(), 3);
+}
+
+#[tokio::test]
+async fn scan_to_db_without_exclude_captures_all() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("fixture");
+    fs::create_dir(&root).unwrap();
+    make_fixture(&root);
+
+    // Add @eaDir directory
+    fs::create_dir(root.join("@eaDir")).unwrap();
+    fs::write(root.join("@eaDir/junk.txt"), "junk").unwrap();
+
+    let pool = db::open_memory().await.unwrap();
+    let run_type = root.to_string_lossy();
+    let (scan_id, stats) = scanner::scan_to_db(&root, &pool, &run_type, &[], false)
+        .await
+        .unwrap();
+
+    // No exclude — all directories captured
     // root, sub, sub/deeper, @eaDir = 4 dirs
     assert_eq!(stats.dirs_scanned, 4);
 
-    let dir_paths = db::dao::list_directory_paths(&pool, scan_id).await.unwrap();
-    assert_eq!(dir_paths.len(), 4);
-
     let files = db::dao::list_files(&pool, scan_id).await.unwrap();
-    // a.txt, b.txt, c.txt, junk.txt = 4 files
     assert_eq!(files.len(), 4);
 }

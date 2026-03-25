@@ -60,6 +60,20 @@ pub async fn directory_mtime(
     Ok(row.map(|r| r.0))
 }
 
+/// Bulk-load all cached directory mtimes for a scan into a HashMap.
+/// Replaces per-directory `directory_mtime` queries during scanning.
+pub async fn all_directory_mtimes(
+    pool: &SqlitePool,
+    scan_id: i64,
+) -> Result<std::collections::HashMap<String, i64>, sqlx::Error> {
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT path, mtime FROM directories WHERE scan_id = ?")
+            .bind(scan_id)
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().collect())
+}
+
 /// Insert or update a directory entry. Returns the directory ID.
 pub async fn upsert_directory(
     pool: &SqlitePool,
@@ -92,15 +106,18 @@ pub struct FileInput {
 }
 
 /// Replace all files in a directory — deletes existing files for the dir_id,
-/// then inserts the new set.
+/// then inserts the new set. Wrapped in a transaction so the DELETE + all
+/// INSERTs are a single WAL commit instead of N+1 separate fsyncs.
 pub async fn replace_files(
     pool: &SqlitePool,
     dir_id: i64,
     files: &[FileInput],
 ) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
     sqlx::query("DELETE FROM files WHERE dir_id = ?")
         .bind(dir_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
     for f in files {
@@ -112,9 +129,11 @@ pub async fn replace_files(
         .bind(f.size as i64)
         .bind(f.ctime)
         .bind(f.mtime)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
     }
+
+    tx.commit().await?;
     Ok(())
 }
 

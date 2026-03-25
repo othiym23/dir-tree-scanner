@@ -1,6 +1,6 @@
 use crate::db::dao::{self, FileInput};
 use sqlx::SqlitePool;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt;
@@ -19,6 +19,7 @@ pub async fn scan_to_db(
     root: &Path,
     pool: &SqlitePool,
     run_type: &str,
+    exclude: &[String],
     verbose: bool,
 ) -> io::Result<(i64, ScanStats)> {
     let start = Instant::now();
@@ -40,7 +41,27 @@ pub async fn scan_to_db(
     };
     let mut seen_paths = HashSet::new();
 
-    let walker = WalkDir::new(root).sort_by_file_name();
+    // Bulk-load all cached mtimes in one query instead of per-directory SELECTs.
+    let cached_mtimes: HashMap<String, i64> = dao::all_directory_mtimes(pool, scan_id)
+        .await
+        .map_err(io::Error::other)?;
+
+    // Walk without sorting — order doesn't matter for scanning (output reads
+    // from DB with its own sort). Skipping sort avoids buffering + extra
+    // syscalls per directory. filter_entry skips excluded directories so
+    // walkdir never descends into them (e.g. Synology @eaDir).
+    let exclude_set: HashSet<&str> = exclude.iter().map(|s| s.as_str()).collect();
+    let walker = WalkDir::new(root).into_iter().filter_entry(|e| {
+        if e.file_type().is_dir()
+            && let Some(name) = e.file_name().to_str()
+        {
+            return !exclude_set.contains(name);
+        }
+        true
+    });
+
+    let mut pending: Vec<DirUpdate> = Vec::new();
+    const BATCH_SIZE: usize = 256;
 
     for entry in walker {
         let entry = entry.map_err(io::Error::other)?;
@@ -60,11 +81,7 @@ pub async fn scan_to_db(
         let dir_mtime = dir_meta.mtime();
         let dir_size = dir_meta.size();
 
-        let cached_mtime = dao::directory_mtime(pool, scan_id, &relative)
-            .await
-            .map_err(io::Error::other)?;
-
-        if cached_mtime == Some(dir_mtime) {
+        if cached_mtimes.get(&relative) == Some(&dir_mtime) {
             stats.dirs_cached += 1;
             if verbose {
                 eprintln!("directory unchanged, skipping: {}", dir_path.display());
@@ -79,11 +96,23 @@ pub async fn scan_to_db(
             eprintln!("scanning: {} ({} files)", dir_path.display(), files.len());
         }
 
-        let dir_id = dao::upsert_directory(pool, scan_id, &relative, dir_mtime, dir_size)
-            .await
-            .map_err(io::Error::other)?;
+        pending.push(DirUpdate {
+            relative,
+            mtime: dir_mtime,
+            size: dir_size,
+            files,
+        });
 
-        dao::replace_files(pool, dir_id, &files)
+        if pending.len() >= BATCH_SIZE {
+            flush_pending(pool, scan_id, &mut pending)
+                .await
+                .map_err(io::Error::other)?;
+        }
+    }
+
+    // Flush any remaining directories
+    if !pending.is_empty() {
+        flush_pending(pool, scan_id, &mut pending)
             .await
             .map_err(io::Error::other)?;
     }
@@ -100,6 +129,62 @@ pub async fn scan_to_db(
     stats.elapsed_ms = start.elapsed().as_millis();
 
     Ok((scan_id, stats))
+}
+
+/// Flush a batch of pending directory updates in a single transaction.
+async fn flush_pending(
+    pool: &SqlitePool,
+    scan_id: i64,
+    pending: &mut Vec<DirUpdate>,
+) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+
+    for update in pending.drain(..) {
+        let dir_id = {
+            let result = sqlx::query(
+                "INSERT INTO directories (scan_id, path, mtime, size)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT(scan_id, path) DO UPDATE SET mtime = excluded.mtime, size = excluded.size
+                 RETURNING id",
+            )
+            .bind(scan_id)
+            .bind(&update.relative)
+            .bind(update.mtime)
+            .bind(update.size as i64)
+            .fetch_one(&mut *tx)
+            .await?;
+            sqlx::Row::get::<i64, _>(&result, 0)
+        };
+
+        sqlx::query("DELETE FROM files WHERE dir_id = ?")
+            .bind(dir_id)
+            .execute(&mut *tx)
+            .await?;
+
+        for f in &update.files {
+            sqlx::query(
+                "INSERT INTO files (dir_id, filename, size, ctime, mtime) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(dir_id)
+            .bind(&f.filename)
+            .bind(f.size as i64)
+            .bind(f.ctime)
+            .bind(f.mtime)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Local struct for batching directory updates in scan_to_db.
+struct DirUpdate {
+    relative: String,
+    mtime: i64,
+    size: u64,
+    files: Vec<dao::FileInput>,
 }
 
 fn scan_directory(dir: &Path) -> io::Result<Vec<FileInput>> {

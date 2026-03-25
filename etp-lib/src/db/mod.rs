@@ -18,7 +18,10 @@ pub async fn open_db(path: &Path, verbose: bool) -> Result<SqlitePool, sqlx::Err
     let url = format!("sqlite:{}?mode=rwc", path.display());
     let options = SqliteConnectOptions::from_str(&url)?
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-        .foreign_keys(true);
+        .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+        .foreign_keys(true)
+        .pragma("cache_size", "-64000") // 64 MiB page cache (negative = KiB)
+        .pragma("temp_store", "MEMORY"); // temp tables/indexes in memory
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(options)

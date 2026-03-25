@@ -1,4 +1,5 @@
 use crate::db::dao::{self, FileRecord};
+use crate::ops;
 use icu_collator::CollatorBorrowed;
 use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
 use sqlx::SqlitePool;
@@ -26,11 +27,7 @@ pub async fn write_csv_from_db(
         all_files
             .into_iter()
             .filter(|f| {
-                let dominated = exclude.iter().any(|ex| {
-                    Path::new(&f.dir_path)
-                        .components()
-                        .any(|c| c.as_os_str() == ex.as_str())
-                });
+                let dominated = ops::is_excluded_path(&f.dir_path, exclude);
                 if dominated && verbose {
                     excluded_dirs.insert(f.dir_path.clone());
                 }

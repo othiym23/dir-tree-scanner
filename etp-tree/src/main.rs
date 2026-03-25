@@ -99,12 +99,12 @@ async fn main() {
             }
         }
     } else {
-        ops::run_scan_to_db(&cli.directory, &pool, &run_type, cli.verbose).await
+        ops::run_scan_to_db(&cli.directory, &pool, &run_type, &cli.exclude, cli.verbose).await
     };
 
     if let Some(ref find_pattern) = cli.find {
         let pattern = ops::compile_pattern(find_pattern, cli.insensitive);
-        let matches = ops::collect_find_matches(&pool, scan_id, &pattern).await;
+        let matches = ops::collect_find_matches(&pool, scan_id, &pattern, &cli.exclude).await;
         ops::render_find_tree(&matches, &cli.directory, "-");
     } else {
         // Combine exclude and ignore into patterns for tree rendering

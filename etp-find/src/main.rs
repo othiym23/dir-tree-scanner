@@ -112,7 +112,7 @@ async fn main() {
                 }
             }
         } else {
-            ops::run_scan_to_db(dir, &pool, &run_type, cli.verbose).await
+            ops::run_scan_to_db(dir, &pool, &run_type, &cli.exclude, cli.verbose).await
         };
         Some(id)
     } else {
@@ -130,8 +130,8 @@ async fn main() {
     if needs_collect {
         // Collect all matches
         let matches = match scan_id {
-            Some(id) => ops::collect_find_matches(&pool, id, &pattern).await,
-            None => ops::collect_find_all_matches(&pool, &pattern).await,
+            Some(id) => ops::collect_find_matches(&pool, id, &pattern, &cli.exclude).await,
+            None => ops::collect_find_all_matches(&pool, &pattern, &cli.exclude).await,
         };
         let count = matches.len();
         let total_size: u64 = matches.iter().map(|m| m.size).sum();
@@ -164,8 +164,8 @@ async fn main() {
     } else {
         // Stream matches to stdout
         let (count, total_size) = match scan_id {
-            Some(id) => ops::stream_find_matches(&pool, id, &pattern).await,
-            None => ops::stream_find_all_matches(&pool, &pattern).await,
+            Some(id) => ops::stream_find_matches(&pool, id, &pattern, &cli.exclude).await,
+            None => ops::stream_find_all_matches(&pool, &pattern, &cli.exclude).await,
         };
 
         if cli.size {

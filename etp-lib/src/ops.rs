@@ -25,6 +25,17 @@ pub fn validate_directory(root: &Path) {
     }
 }
 
+/// Check whether a directory path contains any excluded directory name as a
+/// path component.
+pub fn is_excluded_path(dir_path: &str, exclude: &[String]) -> bool {
+    if exclude.is_empty() {
+        return false;
+    }
+    std::path::Path::new(dir_path)
+        .components()
+        .any(|c| exclude.iter().any(|ex| c.as_os_str() == ex.as_str()))
+}
+
 /// Parse glob ignore patterns, warning on and discarding invalid ones.
 pub fn parse_ignore_patterns(patterns: &[String]) -> Vec<glob::Pattern> {
     patterns
@@ -40,8 +51,14 @@ pub fn parse_ignore_patterns(patterns: &[String]) -> Vec<glob::Pattern> {
 }
 
 /// Run the DB-backed scanner and log stats. Returns scan_id. Exits on error.
-pub async fn run_scan_to_db(root: &Path, pool: &SqlitePool, run_type: &str, verbose: bool) -> i64 {
-    match scanner::scan_to_db(root, pool, run_type, verbose).await {
+pub async fn run_scan_to_db(
+    root: &Path,
+    pool: &SqlitePool,
+    run_type: &str,
+    exclude: &[String],
+    verbose: bool,
+) -> i64 {
+    match scanner::scan_to_db(root, pool, run_type, exclude, verbose).await {
         Ok((scan_id, stats)) => {
             if verbose {
                 eprintln!(
@@ -139,6 +156,7 @@ pub async fn stream_find_matches(
     pool: &SqlitePool,
     scan_id: i64,
     pattern: &regex::Regex,
+    exclude: &[String],
 ) -> (usize, u64) {
     use crate::finder;
     use std::future::poll_fn;
@@ -156,6 +174,9 @@ pub async fn stream_find_matches(
     {
         match result {
             Ok(record) => {
+                if is_excluded_path(&record.dir_path, exclude) {
+                    continue;
+                }
                 if let Some(m) = finder::matches_pattern(&record, pattern) {
                     println!("{}", m.full_path);
                     total_size += m.size;
@@ -177,6 +198,7 @@ pub async fn collect_find_matches(
     pool: &SqlitePool,
     scan_id: i64,
     pattern: &regex::Regex,
+    exclude: &[String],
 ) -> Vec<crate::finder::FindMatch> {
     use crate::finder;
 
@@ -187,12 +209,17 @@ pub async fn collect_find_matches(
 
     files
         .iter()
+        .filter(|record| !is_excluded_path(&record.dir_path, exclude))
         .filter_map(|record| finder::matches_pattern(record, pattern))
         .collect()
 }
 
 /// Stream files from all scans in DB, printing matching paths. Returns (count, total_size).
-pub async fn stream_find_all_matches(pool: &SqlitePool, pattern: &regex::Regex) -> (usize, u64) {
+pub async fn stream_find_all_matches(
+    pool: &SqlitePool,
+    pattern: &regex::Regex,
+    exclude: &[String],
+) -> (usize, u64) {
     use crate::finder;
     use std::future::poll_fn;
     use std::pin::Pin;
@@ -209,6 +236,9 @@ pub async fn stream_find_all_matches(pool: &SqlitePool, pattern: &regex::Regex) 
     {
         match result {
             Ok(record) => {
+                if is_excluded_path(&record.dir_path, exclude) {
+                    continue;
+                }
                 if let Some(m) = finder::matches_pattern(&record, pattern) {
                     println!("{}", m.full_path);
                     total_size += m.size;
@@ -229,6 +259,7 @@ pub async fn stream_find_all_matches(pool: &SqlitePool, pattern: &regex::Regex) 
 pub async fn collect_find_all_matches(
     pool: &SqlitePool,
     pattern: &regex::Regex,
+    exclude: &[String],
 ) -> Vec<crate::finder::FindMatch> {
     use crate::finder;
 
@@ -239,6 +270,7 @@ pub async fn collect_find_all_matches(
 
     files
         .iter()
+        .filter(|record| !is_excluded_path(&record.dir_path, exclude))
         .filter_map(|record| finder::matches_pattern(record, pattern))
         .collect()
 }
@@ -318,5 +350,28 @@ mod tests {
     #[test]
     fn format_size_tib() {
         assert_eq!(format_size(1024 * 1024 * 1024 * 1024), "1.00 TiB");
+    }
+
+    #[test]
+    fn is_excluded_path_matches_component() {
+        let exclude = vec!["@eaDir".to_string()];
+        assert!(is_excluded_path("/data/@eaDir", &exclude));
+    }
+
+    #[test]
+    fn is_excluded_path_matches_nested() {
+        let exclude = vec!["@eaDir".to_string()];
+        assert!(is_excluded_path("/data/sub/@eaDir/thumbs", &exclude));
+    }
+
+    #[test]
+    fn is_excluded_path_no_match() {
+        let exclude = vec!["@eaDir".to_string()];
+        assert!(!is_excluded_path("/data/sub", &exclude));
+    }
+
+    #[test]
+    fn is_excluded_path_empty_exclude() {
+        assert!(!is_excluded_path("/data/@eaDir", &[]));
     }
 }
