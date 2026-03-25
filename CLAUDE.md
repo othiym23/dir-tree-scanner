@@ -41,9 +41,10 @@ etp catalog [--dry-run] [config.kdl]
 ```
 
 Defaults: output is `<dir>/index.csv`, database is `<dir>/.etp.db`, exclude is
-`@eaDir` (Synology metadata directories). `etp-tree` hides dotfiles by default
-(`-a` to show). Database and CSV output are written into the scanned directory
-by default (they become part of the scan).
+`@eaDir` (Synology metadata directories, filtered at scan time so walkdir never
+descends into them). `etp-tree` hides dotfiles by default (`-a` to show).
+Database and CSV output are written into the scanned directory by default (they
+become part of the scan).
 
 ## Architecture
 

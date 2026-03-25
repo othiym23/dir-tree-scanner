@@ -4,10 +4,9 @@ Date: 2026-02-22
 
 ## Status
 
-Superseded (2026-03-24) — `--exclude` now filters at scan time as well as output
-time. The assumption that excluded directories are "typically small" was wrong
-for Synology `@eaDir`, which contains large thumbnail/metadata trees that
-dominate scan time on spinning disks.
+Superseded by
+[2026-03-24-01-scan-time-exclude-filtering](2026-03-24-01-scan-time-exclude-filtering.md)
+— `--exclude` now filters at scan time as well as output time.
 
 ## Context
 
