@@ -41,12 +41,16 @@ check:
       uv run ruff format --check
     cd scripts && \
       uv run pyright
+    cd scripts && \
+      uv run ty check
     # Python (etp)
     cd etp && \
       uv run ruff check && \
       uv run ruff format --check
     cd etp && \
       uv run pyright
+    cd etp && \
+      uv run ty check
     # Markdown
     prettier --check "**/*.md"
 
@@ -87,11 +91,20 @@ deploy: check test build-nas mount-home
     mkdir -p "{{ nas_home }}/bin"
     cp etp/etp "{{ nas_home }}/bin"
     cp etp/etp-catalog "{{ nas_home }}/bin"
-    cp -R etp/kdl "{{ nas_home }}/bin/kdl"
     chmod +x "{{ nas_home }}/bin/etp" "{{ nas_home }}/bin/etp-catalog"
-    # config
-    mkdir -p "{{ nas_home }}/conf"
-    cp conf/catalog.kdl "{{ nas_home }}/conf"
-    # clean out legacy scripts
+    # shared Python libraries ($HOME/.local/lib/etp/)
+    mkdir -p "{{ nas_home }}/.local/lib/etp"
+    cp etp/paths.py "{{ nas_home }}/.local/lib/etp"
+    cp -R etp/kdl "{{ nas_home }}/.local/lib/etp/kdl"
+    # config ($HOME/.config/euterpe-tools/) — don't overwrite existing
+    mkdir -p "{{ nas_home }}/.config/euterpe-tools"
+    if [ ! -f "{{ nas_home }}/.config/euterpe-tools/catalog.kdl" ]; then
+        cp conf/catalog.kdl "{{ nas_home }}/.config/euterpe-tools"
+    else
+        echo "catalog.kdl already exists, skipping"
+    fi
+    # clean out legacy paths
     rm -f "{{ nas_home }}/scripts/catalog-nas.py"
     rm -f "{{ nas_home }}/scripts/catalog.toml"
+    rm -rf "{{ nas_home }}/bin/kdl"
+    rm -f "{{ nas_home }}/conf/catalog.kdl"

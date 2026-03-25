@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.14
 """Incremental filesystem catalog builder driven by KDL config.
 
 Orchestrates etp-tree and etp-csv across multiple directory trees,
@@ -18,8 +18,13 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Self
 
-# Ensure vendored packages (kdl/) are importable regardless of cwd
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Ensure vendored/shared packages (kdl/, paths.py) are importable.
+# Deployed: $HOME/.local/lib/etp/. Development: same directory as script.
+_lib_dir = Path.home() / ".local" / "lib" / "etp"
+if _lib_dir.is_dir():
+    sys.path.insert(0, str(_lib_dir))
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +307,7 @@ def build_parser() -> argparse.ArgumentParser:
         "config",
         nargs="?",
         default=None,
-        help="Path to catalog KDL config (default: catalog.kdl next to script)",
+        help="Path to catalog KDL config (default: catalog.kdl in config dir)",
     )
     parser.add_argument(
         "--scan",
@@ -329,11 +334,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    # Resolve config path
+    # Resolve config path: explicit arg > XDG/platform config dir
     if args.config is not None:
         config_path = Path(args.config)
     else:
-        config_path = Path(__file__).resolve().parent / "catalog.kdl"
+        import paths
+
+        config_path = paths.catalog_config()
 
     if not config_path.exists():
         print(f"error: config file not found: {config_path}", file=sys.stderr)
