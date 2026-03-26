@@ -207,6 +207,7 @@ def write_manifest(
     info: AnimeInfo,
     concise_name: str,
     series_dir: Path,
+    extras: list[Path] | None = None,
 ) -> Path:
     """Write manifest entries to a KDL file for editing."""
     provider = ""
@@ -279,6 +280,16 @@ def write_manifest(
         lines.append("}")
         lines.append("")
 
+    # Non-video extras (CDs, scans, etc.) — user can delete entries to skip
+    if extras:
+        lines.append("extras {")
+        for f in sorted(extras, key=lambda p: p.name):
+            lines.append(f'  file "{escape_kdl(str(f))}" {{')
+            lines.append(f'    dest "{escape_kdl(f.name)}"')
+            lines.append("  }")
+        lines.append("}")
+        lines.append("")
+
     fd, path = tempfile.mkstemp(suffix=".kdl", prefix="etp-triage-")
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
@@ -302,22 +313,38 @@ def parse_manifest(
     manifest_path: Path,
     known_sources: dict[str, SourceFile],
     series_dir: Path,
-) -> tuple[list[tuple[SourceFile, Path]], list[str]]:
+) -> tuple[list[tuple[SourceFile, Path]], list[str], list[tuple[Path, Path]]]:
     """Parse an edited KDL manifest file.
 
-    Returns ``(entries, errors)``. If errors is non-empty, the manifest has
-    problems the user should fix.
+    Returns ``(entries, errors, extras)`` where extras is a list of
+    ``(source_path, dest_path)`` pairs for non-video files.
     """
     text = manifest_path.read_text(encoding="utf-8")
     try:
         doc = kdl.parse(text)
     except kdl.ParseError as e:
-        return [], [f"  KDL parse error: {e}"]
+        return [], [f"  KDL parse error: {e}"], []
 
     entries: list[tuple[SourceFile, Path]] = []
+    extras: list[tuple[Path, Path]] = []
     errors: list[str] = []
 
     for group_node in doc.nodes:
+        # Extras section: non-video files
+        if group_node.name == "extras":
+            extras_dir = series_dir / "Extras"
+            for file_node in group_node.nodes:
+                if file_node.name != "file":
+                    continue
+                source_path = str(file_node.args[0]) if file_node.args else ""
+                dest_name = ""
+                for child in file_node.nodes:
+                    if child.name == "dest" and child.args:
+                        dest_name = str(child.args[0])
+                if source_path and dest_name:
+                    extras.append((Path(source_path), extras_dir / dest_name))
+            continue
+
         # Determine destination subdirectory
         if group_node.name == "specials":
             dest_subdir = series_dir / "Specials"
@@ -364,7 +391,7 @@ def parse_manifest(
 
             entries.append((sf, dest_subdir / dest_name))
 
-    return entries, errors
+    return entries, errors, extras
 
 
 def _check_filename_length(dest_path: Path) -> Path:

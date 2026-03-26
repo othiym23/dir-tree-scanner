@@ -310,7 +310,7 @@ class TestWriteManifest:
         manifest_path = write_manifest([entry], info, "Test", tmp_path / "series")
         try:
             series_dir = tmp_path / "series"
-            entries, errors = parse_manifest(
+            entries, errors, _extras = parse_manifest(
                 manifest_path,
                 {str(sf.path): sf},
                 series_dir,
@@ -338,7 +338,7 @@ class TestParseManifest:
         manifest = tmp_path / "manifest.kdl"
         manifest.write_text(self._make_kdl(1, "a.mkv", "dst.mkv"), encoding="utf-8")
         series_dir = tmp_path / "series"
-        entries, errors = parse_manifest(manifest, {"a.mkv": sf}, series_dir)
+        entries, errors, _extras = parse_manifest(manifest, {"a.mkv": sf}, series_dir)
         assert len(entries) == 1
         assert len(errors) == 0
         assert entries[0][0] is sf
@@ -352,7 +352,7 @@ class TestParseManifest:
             '    dest "dst.mkv"\n  }\n}\n',
             encoding="utf-8",
         )
-        entries, errors = parse_manifest(manifest, {"a.mkv": sf}, tmp_path)
+        entries, errors, _extras = parse_manifest(manifest, {"a.mkv": sf}, tmp_path)
         assert len(entries) == 0
         assert any("todo" in e for e in errors)
 
@@ -361,14 +361,14 @@ class TestParseManifest:
         manifest.write_text(
             self._make_kdl(1, "unknown.mkv", "dst.mkv"), encoding="utf-8"
         )
-        entries, errors = parse_manifest(manifest, {}, tmp_path)
+        entries, errors, _extras = parse_manifest(manifest, {}, tmp_path)
         assert len(entries) == 0
         assert any("unknown source" in e for e in errors)
 
     def test_empty_manifest(self, tmp_path):
         manifest = tmp_path / "manifest.kdl"
         manifest.write_text("// all entries deleted\n", encoding="utf-8")
-        entries, errors = parse_manifest(manifest, {}, tmp_path)
+        entries, errors, _extras = parse_manifest(manifest, {}, tmp_path)
         assert len(entries) == 0
         assert len(errors) == 0
 
@@ -381,7 +381,7 @@ class TestParseManifest:
             '    dest "dst.mkv"\n  }\n}\n',
             encoding="utf-8",
         )
-        entries, errors = parse_manifest(manifest, {"a.mkv": sf}, tmp_path)
+        entries, errors, _extras = parse_manifest(manifest, {"a.mkv": sf}, tmp_path)
         assert len(entries) == 0
         assert len(errors) == 0
 
@@ -394,7 +394,7 @@ class TestParseManifest:
             encoding="utf-8",
         )
         series_dir = tmp_path / "series"
-        entries, errors = parse_manifest(manifest, {"s.mkv": sf}, series_dir)
+        entries, errors, _extras = parse_manifest(manifest, {"s.mkv": sf}, series_dir)
         assert len(entries) == 1
         assert entries[0][1] == series_dir / "Specials" / "special.mkv"
 

@@ -1110,6 +1110,7 @@ def _process_group_batch(
     default_concise_name: str = "",
     pre_parsed: list[SourceFile] | None = None,
     season_override: int | None = None,
+    extras: list[Path] | None = None,
 ) -> tuple[int, int, list[Path]]:
     """Batch-process a group of files via an editable manifest.
 
@@ -1174,7 +1175,9 @@ def _process_group_batch(
     )
 
     # Write manifest to temp file
-    manifest_path = write_manifest(entries, info, concise_name, series_dir)
+    manifest_path = write_manifest(
+        entries, info, concise_name, series_dir, extras=extras or []
+    )
 
     # Build source lookup by full path for parsing back
     known_sources: dict[str, SourceFile] = {
@@ -1190,7 +1193,7 @@ def _process_group_batch(
                 print("  Editor failed. Skipping group.")
                 return 0, file_count, []
 
-            parsed_entries, errors = parse_manifest(
+            parsed_entries, errors, extra_entries = parse_manifest(
                 manifest_path, known_sources, series_dir
             )
 
@@ -1214,13 +1217,22 @@ def _process_group_batch(
 
         # Execute the manifest
         print(f"\n  Copying {len(parsed_entries)} file(s)...")
-        return execute_manifest(
+        result = execute_manifest(
             parsed_entries,
             dry_run,
             verbose,
             parse_source_filename_fn=parse_source_filename,
             analyze_file_fn=analyze_file,
         )
+
+        # Copy extras (non-video files) if any remained in the manifest
+        if extra_entries:
+            print(f"  Copying {len(extra_entries)} extra(s)...")
+            for src, dst in extra_entries:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                copy_reflink(src, dst, dry_run=dry_run)
+
+        return result
 
     finally:
         try:
@@ -1659,6 +1671,16 @@ def run_triage(args: argparse.Namespace, config: AnimeConfig) -> int:
         # Parse all files upfront for the group
         pool = _parse_files(files)
 
+        # Collect non-video extras from the same directory
+        group_dir = files[0].parent if files else None
+        group_extras: list[Path] = []
+        if group_dir and group_dir.is_dir():
+            group_extras = [
+                f
+                for f in group_dir.iterdir()
+                if f.is_file() and f.suffix.lower() in _EXTRAS_EXTENSIONS
+            ]
+
         # Loop: process one metadata ID at a time against the remaining pool
         while pool:
             remaining_count = len(pool)
@@ -1737,7 +1759,9 @@ def run_triage(args: argparse.Namespace, config: AnimeConfig) -> int:
                     default_concise_name=name,
                     pre_parsed=matched,
                     season_override=1,
+                    extras=group_extras,
                 )
+                group_extras = []  # only include extras in the first batch
             else:
                 # TVDB: process all remaining files at once (multi-season)
                 success, failed, copied_paths = _process_group_batch(
@@ -1749,7 +1773,9 @@ def run_triage(args: argparse.Namespace, config: AnimeConfig) -> int:
                     args.verbose,
                     default_concise_name=name,
                     pre_parsed=pool,
+                    extras=group_extras,
                 )
+                group_extras = []
                 pool = []  # TVDB consumes entire pool
 
             print(f"\n  Season done: {success} copied, {failed} skipped/failed")
@@ -1759,39 +1785,6 @@ def run_triage(args: argparse.Namespace, config: AnimeConfig) -> int:
             if copied_paths and not args.dry_run:
                 for p in copied_paths:
                     already_copied.add(resolved_paths.get(p, str(p.resolve())))
-
-        # Scan for non-video extras (CDs, scans, etc.) in the group's directory
-        if files:
-            group_dir = files[0].parent
-            extras = [
-                f
-                for f in group_dir.iterdir()
-                if f.is_file() and f.suffix.lower() in _EXTRAS_EXTENSIONS
-            ]
-            if extras:
-                # Find the first series directory created during this group
-                # (entries in id_map that were added during processing)
-                first_series_dir: Path | None = None
-                for key, path in id_map.items():
-                    first_series_dir = path
-                    break
-                if first_series_dir is not None:
-                    extras_dir = first_series_dir / "Extras"
-                    print(f"\n  {len(extras)} non-video extra(s) found.")
-                    raw = prompt_value(
-                        f"  Copy to {extras_dir.name}/ in series dir?", "y"
-                    )
-                    if raw.lower() in ("y", "yes", ""):
-                        extras_dir.mkdir(parents=True, exist_ok=True)
-                        for f in extras:
-                            dest = extras_dir / f.name
-                            if not args.dry_run:
-                                copy_reflink(f, dest, dry_run=False)
-                            else:
-                                print(f"    [dry-run] {f.name} → {dest}")
-                            if not args.dry_run:
-                                already_copied.add(str(f.resolve()))
-                        print(f"  Copied {len(extras)} extra(s).")
 
         groups_processed += 1
 
