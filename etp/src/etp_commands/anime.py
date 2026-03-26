@@ -2480,11 +2480,17 @@ def _match_files_to_season(
         matched = season_files
         leftover = []
 
-    # Renumber episodes to start at 1 (for multi-cour splits where e.g.
-    # S03E13 needs to become s1e01 of the second AniDB entry)
+    # Renumber episodes to start at 1 only for multi-cour splits where
+    # e.g. S01E13 needs to become ep 1 of the second AniDB entry.
+    # Skip renumbering when the episode range already fits within the
+    # AniDB entry (e.g. a single ep 12 of a 12-episode season).
     if matched:
         first_ep = matched[0].parsed_episode or 1
-        if first_ep != 1:
+        last_ep = matched[-1].parsed_episode or first_ep
+        needs_renumber = first_ep != 1 and (
+            regular_count > 0 and last_ep > regular_count
+        )
+        if needs_renumber:
             print(f"  Renumbering: ep {first_ep}+ → ep 1+")
             for sf in matched:
                 if sf.parsed_episode is not None:
