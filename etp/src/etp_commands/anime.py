@@ -231,6 +231,7 @@ def _maybe_save_mapping(
 
 # Media file extensions (canonical set in media_parser)
 _MEDIA_EXTENSIONS = media_parser._MEDIA_EXTENSIONS
+_EXTRAS_EXTENSIONS = frozenset({".rar", ".zip", ".7z", ".flac", ".wav", ".ape", ".txt"})
 
 
 def parse_source_filename(filename: str) -> SourceFile:
@@ -1758,6 +1759,39 @@ def run_triage(args: argparse.Namespace, config: AnimeConfig) -> int:
             if copied_paths and not args.dry_run:
                 for p in copied_paths:
                     already_copied.add(resolved_paths.get(p, str(p.resolve())))
+
+        # Scan for non-video extras (CDs, scans, etc.) in the group's directory
+        if files:
+            group_dir = files[0].parent
+            extras = [
+                f
+                for f in group_dir.iterdir()
+                if f.is_file() and f.suffix.lower() in _EXTRAS_EXTENSIONS
+            ]
+            if extras:
+                # Find the first series directory created during this group
+                # (entries in id_map that were added during processing)
+                first_series_dir: Path | None = None
+                for key, path in id_map.items():
+                    first_series_dir = path
+                    break
+                if first_series_dir is not None:
+                    extras_dir = first_series_dir / "Extras"
+                    print(f"\n  {len(extras)} non-video extra(s) found.")
+                    raw = prompt_value(
+                        f"  Copy to {extras_dir.name}/ in series dir?", "y"
+                    )
+                    if raw.lower() in ("y", "yes", ""):
+                        extras_dir.mkdir(parents=True, exist_ok=True)
+                        for f in extras:
+                            dest = extras_dir / f.name
+                            if not args.dry_run:
+                                copy_reflink(f, dest, dry_run=False)
+                            else:
+                                print(f"    [dry-run] {f.name} → {dest}")
+                            if not args.dry_run:
+                                already_copied.add(str(f.resolve()))
+                        print(f"  Copied {len(extras)} extra(s).")
 
         groups_processed += 1
 
