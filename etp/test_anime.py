@@ -1355,7 +1355,7 @@ class TestExtractSeriesName:
         name = anime._extract_series_name(
             "Girls.und.Panzer.S01E05.1080p.BluRay.x264-GROUP.mkv"
         )
-        assert name == "Girls.und.Panzer"
+        assert name == "Girls und Panzer"
 
     def test_no_group_no_hash(self):
         name = anime._extract_series_name("My Anime - 03 (1080p).mkv")
@@ -1363,7 +1363,7 @@ class TestExtractSeriesName:
 
     def test_movie_no_episode(self):
         name = anime._extract_series_name("[Group] Movie Title [BD 1080p].mkv")
-        assert name == "Movie Title [BD 1080p]"
+        assert name == "Movie Title"
 
     def test_empty_filename(self):
         name = anime._extract_series_name("")

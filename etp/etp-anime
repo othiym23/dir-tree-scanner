@@ -45,6 +45,7 @@ else:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import kdl  # noqa: E402 — must come after sys.path setup
+import media_parser  # noqa: E402 — must come after sys.path setup
 
 VERSION = "0.1.0"
 
@@ -469,152 +470,27 @@ def analyze_file(path: Path) -> MediaInfo:
 # Source filename parsing
 # ---------------------------------------------------------------------------
 
-# Match: "[GroupName]" at start of string → group(1) = group name
-_RE_RELEASE_GROUP = re.compile(r"^\[([^\]]+)\]")
-
-# Match: scene-style trailing release group after a dash, before file extension
-# e.g., "Show.S01E05.1080p.WEB-DL.DUAL-VARYG.mkv" → group(1) = "VARYG"
-_RE_SCENE_GROUP = re.compile(r"-([A-Za-z][A-Za-z0-9]{1,})(?:\.\w+)?$")
-
-# Match: "[PMR]" — short bracketed release group tag (2-6 alpha chars) anywhere
-# in the filename. All-alpha constraint excludes CRC32 hashes (8 hex chars),
-# numbered tags like [1080p], and tags with spaces like [Dual Audio].
-# Used as a last-resort fallback after _RE_RELEASE_GROUP and _RE_SCENE_GROUP.
-_RE_BRACKET_GROUP = re.compile(r"\[([A-Za-z]{2,6})\]")
-
-# Match: Sonarr-style metadata block "[GROUP QUALITY-res,depth,codec,audio]"
-# where the first word is the release group followed by a quality keyword.
-# e.g., "[VARYG WEBDL-1080p,8bit,x264,AAC]" → group(1) = "VARYG"
-_RE_SONARR_GROUP = re.compile(
-    r"\[([A-Za-z][A-Za-z0-9_-]+)\s+"
-    r"(?:WEBDL|WEB-DL|Bluray|BluRay|HDTV|DVD|SDTV|Raw)"
-)
-
-# Episode number patterns (ordered by specificity in parse_source_filename).
-# All allow an optional "v2"/"v3" version suffix.
-
-# Match: "S01E05" or "s1e5" (case-insensitive)
-#   → group(1) = season, group(2) = episode, group(3) = version or None
-_RE_EPISODE_S_E = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,4})(?:v(\d+))?", re.IGNORECASE)
-
-# Match: " - 05" or " - 05v2" followed by whitespace/bracket/dot/end
-#   → group(1) = episode, group(2) = version or None
-_RE_EPISODE_DASH = re.compile(r" - (\d{1,4})(?:v(\d+))?(?:\s|$|\[|\(|\.)")
-
-# Match: "EP05" or "E5" (case-insensitive) followed by whitespace/bracket/dot/end
-#   → group(1) = episode, group(2) = version or None
-_RE_EPISODE_EP = re.compile(
-    r"(?:EP?|ep?)(\d{1,4})(?:v(\d+))?(?:\s|$|\[|\.])", re.IGNORECASE
-)
-
-# Match: ".S01E05." with dots on both sides (scene naming)
-#   → group(1) = season, group(2) = episode, group(3) = version or None
-_RE_EPISODE_DOT = re.compile(r"\.S(\d{1,2})E(\d{1,4})(?:v(\d+))?\.", re.IGNORECASE)
-
-# Match: "[ABCD1234]" — 8-char hex CRC32 hash in brackets → group(1) = hash
-_RE_HASH = re.compile(r"\[([0-9A-Fa-f]{8})\]")
-
-# Match: BD/Blu-ray source keywords (word boundary, case-insensitive) → no groups
-_RE_BD = re.compile(r"\b(?:BD|Blu-?Ray|BDRip|BDREMUX|Bluray)\b", re.IGNORECASE)
-
-# Match: web source keywords (word boundary, case-insensitive) → no groups
-_RE_WEB = re.compile(r"\b(?:WEB|WEBRip|WEB-DL|CR|AMZN|DSNP|HULU|NF)\b", re.IGNORECASE)
-
-# Match: "REMUX" (case-insensitive) → no groups
-_RE_REMUX = re.compile(r"REMUX", re.IGNORECASE)
-
 # Match: "commentary" as a whole word in audio track titles → no groups
 _RE_COMMENTARY = re.compile(r"\bcommentary\b", re.IGNORECASE)
 
-# Media file extensions
-_MEDIA_EXTENSIONS = {".mkv", ".mp4", ".avi"}
-
-# Series name extraction patterns (used by _strip_series_name)
-
-# Match: "[GroupName] " at start → strips release group prefix
-_RE_LEADING_GROUP = re.compile(r"^\[([^\]]+)\]\s*")
-
-# Match: " [ABCD1234]" — trailing CRC32 hash with optional leading whitespace
-_RE_TRAILING_HASH = re.compile(r"\s*\[[0-9A-Fa-f]{8}\]")
-
-# Match: " - 05 [..." or " - 05 (..." — dash-episode followed by metadata brackets
-_RE_EPISODE_SUFFIX = re.compile(r"\s*-\s*\d+\s*[\[\(].*")
-
-# Match: " - S01E05..." — dash then SxEy and everything after
-_RE_S_E_SUFFIX = re.compile(r"\s*-\s*[Ss]\d+[Ee]\d+.*")
-
-# Match: ".S01E05..." — dot then SxEy and everything after (scene naming)
-_RE_DOT_S_E = re.compile(r"\.[Ss]\d+[Ee]\d+.*")
-
-# Match: " S01E05..." — space then SxEy and everything after (no dash/dot separator)
-_RE_SPACE_S_E = re.compile(r"\s+[Ss]\d+[Ee]\d+.*")
-
-# Match: " - 05" at end of string — trailing dash-episode with no metadata after
-_RE_DASH_EP_END = re.compile(r"\s*-\s*\d+\s*$")
-
-
-def _apply_episode_match(sf: SourceFile, m: re.Match[str], *, has_season: bool) -> None:
-    """Extract episode number, optional season, and version from a regex match."""
-    if has_season:
-        sf.parsed_season = int(m.group(1))
-        sf.parsed_episode = int(m.group(2))
-        version_group = 3
-    else:
-        sf.parsed_episode = int(m.group(1))
-        version_group = 2
-    if m.group(version_group):
-        sf.version = int(m.group(version_group))
-
-
-# Episode patterns tried in order: dot-S/E, S/E, dash, EP prefix
-_EPISODE_PATTERNS: list[tuple[re.Pattern[str], bool]] = [
-    (_RE_EPISODE_DOT, True),   # .S01E05. — has season
-    (_RE_EPISODE_S_E, True),   # S01E05 — has season
-    (_RE_EPISODE_DASH, False), # - 05 — episode only
-    (_RE_EPISODE_EP, False),   # EP05 — episode only
-]
+# Media file extensions (canonical set in media_parser)
+_MEDIA_EXTENSIONS = media_parser._MEDIA_EXTENSIONS
 
 
 def parse_source_filename(filename: str) -> SourceFile:
-    """Parse an anime release filename into a SourceFile."""
+    """Parse an anime release filename into a SourceFile.
+
+    Delegates to media_parser for tokenization and classification.
+    """
+    pm = media_parser.parse_component(filename)
     sf = SourceFile(path=Path(filename))
-
-    m = _RE_RELEASE_GROUP.match(filename)
-    if m:
-        sf.release_group = m.group(1)
-    else:
-        # Fallback: scene-style trailing group after dash (e.g., "...-VARYG.mkv")
-        m = _RE_SCENE_GROUP.search(filename)
-        if m:
-            sf.release_group = m.group(1)
-        else:
-            # Sonarr metadata block: "[GROUP QUALITY-res,...]"
-            m = _RE_SONARR_GROUP.search(filename)
-            if m:
-                sf.release_group = m.group(1)
-            else:
-                # Last resort: short bracketed tag anywhere (e.g., "...[PMR].mkv")
-                m = _RE_BRACKET_GROUP.search(filename)
-                if m:
-                    sf.release_group = m.group(1)
-
-    for pattern, has_season in _EPISODE_PATTERNS:
-        m = pattern.search(filename)
-        if m:
-            _apply_episode_match(sf, m, has_season=has_season)
-            break
-
-    m = _RE_HASH.search(filename)
-    if m:
-        sf.hash_code = m.group(1)
-
-    if _RE_BD.search(filename):
-        sf.source_type = "BD"
-    elif _RE_WEB.search(filename):
-        sf.source_type = "Web"
-
-    sf.is_remux = bool(_RE_REMUX.search(filename))
-
+    sf.release_group = pm.release_group
+    sf.source_type = pm.source_type
+    sf.is_remux = pm.is_remux
+    sf.hash_code = pm.hash_code
+    sf.parsed_episode = pm.episode
+    sf.parsed_season = pm.season
+    sf.version = pm.version
     return sf
 
 
@@ -1631,33 +1507,28 @@ def _iter_media_files(source_dirs: list[Path]) -> list[Path]:
 
 
 
-def _strip_series_name(stem: str) -> str:
-    """Strip release metadata from a filename stem to get a series name."""
-    name = _RE_LEADING_GROUP.sub("", stem)
-    name = _RE_TRAILING_HASH.sub("", name)
-    name = _RE_EPISODE_SUFFIX.sub("", name)
-    name = _RE_S_E_SUFFIX.sub("", name)
-    name = _RE_DOT_S_E.sub("", name)
-    name = _RE_SPACE_S_E.sub("", name)
-    name = _RE_DASH_EP_END.sub("", name)
-    return name.strip(" -")
+def _extract_series_name(text: str) -> str:
+    """Extract a series name from a filename or directory name.
 
-
-def _extract_series_name(filename: str) -> str:
-    """Extract a candidate series name from a single filename for grouping."""
-    return _strip_series_name(Path(filename).stem)
+    Delegates to media_parser for tokenization-based extraction.
+    """
+    return media_parser.parse_component(text).series_name
 
 
 def _normalize_for_grouping(name: str) -> str:
-    """Normalize a series name for grouping: lowercase, strip non-alnum."""
-    return _RE_NON_ALNUM.sub("", name.lower())
+    """Normalize a series name for grouping: lowercase, strip non-alnum.
+
+    Preserves CJK characters for Japanese title matching.
+    """
+    return media_parser.normalize_for_matching(name)
 
 
 def _extract_concise_name(source_files: list[SourceFile]) -> str:
     """Try to extract a concise series name from source filenames."""
     if not source_files:
         return ""
-    return _strip_series_name(source_files[0].path.stem)
+    pm = media_parser.parse_component(source_files[0].path.name)
+    return pm.series_name
 
 
 @dataclass
@@ -1679,22 +1550,28 @@ def _build_download_index(downloads_dir: Path) -> DownloadIndex:
     """Build an index of download files for matching.
 
     Indexes files by normalized series name AND by (season, episode) for
-    series-aware matching with a global fallback.
+    series-aware matching with a global fallback.  Uses media_parser for
+    full-path parsing (extracts series name from directory structure).
     """
     index = DownloadIndex()
     for f in _iter_media_files([downloads_dir]):
-        sf = parse_source_filename(f.name)
-        if sf.parsed_episode is None:
+        try:
+            rel = str(f.relative_to(downloads_dir))
+        except ValueError:
+            rel = f.name
+        pm = media_parser.parse_media_path(rel)
+        if pm.episode is None:
             continue
-        season = sf.parsed_season or 1
-        ep = sf.parsed_episode
+        season = pm.season or 1
+        ep = pm.episode
         try:
             size = f.stat().st_size
         except OSError:
             continue
 
-        # Index by series name
-        series_key = _normalize_for_grouping(_extract_group_name(f, [downloads_dir]))
+        # Index by series name (prefer path_series_name from directory)
+        raw_name = pm.path_series_name or pm.series_name
+        series_key = _normalize_for_grouping(raw_name)
         if series_key:
             index.by_series.setdefault(series_key, []).append(
                 (season, ep, f, size)
@@ -1726,17 +1603,29 @@ def _match_to_downloads(
     source_files: list[SourceFile],
     download_index: DownloadIndex,
     series_name: str = "",
+    title_index: media_parser.TitleAliasIndex | None = None,
 ) -> list[SourceFile]:
     """Enrich source files with metadata from matching download files.
 
-    Matches by series name first, then falls back to global (season, episode)
-    index. Picks the closest file size when multiple candidates exist.
-    The download file's parsed metadata (release group, hash, version,
-    source type) replaces the source file's, but the path is kept.
+    Matches by series name first, using the title alias index to bridge
+    English/Japanese title differences when available.  Picks the closest
+    file size when multiple candidates exist.  The download file's parsed
+    metadata (release group, hash, version, source type) replaces the
+    source file's, but the path is kept.
     """
     # Build series-specific lookup if we have a series name
     series_key = _normalize_for_grouping(series_name) if series_name else ""
     series_entries = download_index.by_series.get(series_key, []) if series_key else []
+
+    # If direct lookup failed and we have a title alias index, try alias keys
+    if not series_entries and series_key and title_index is not None:
+        aliases = title_index.lookup(series_name)
+        if aliases:
+            for alias in aliases:
+                entries = download_index.by_series.get(alias, [])
+                if entries:
+                    series_entries = entries
+                    break
 
     # Index series entries by (season, ep) for fast lookup
     series_by_ep: dict[tuple[int, int], list[tuple[Path, int]]] = {}
@@ -1800,7 +1689,7 @@ def _extract_group_name(f: Path, source_dirs: list[Path]) -> str:
             continue
         if len(rel.parts) > 1:
             # In a subdirectory — use the immediate subdirectory name
-            return _strip_series_name(rel.parts[0])
+            return _extract_series_name(rel.parts[0])
     # Directly in source dir — use the filename
     return _extract_series_name(f.name)
 
@@ -1967,9 +1856,6 @@ def _confirm_anime_info(info: AnimeInfo) -> AnimeInfo:
 
     return info
 
-
-# Match: any character that is not a lowercase letter or digit → used for grouping normalization
-_RE_NON_ALNUM = re.compile(r"[^a-z0-9]")
 
 
 def _parse_files(files: list[Path]) -> list[SourceFile]:
@@ -2699,6 +2585,14 @@ def run_series(args: argparse.Namespace, config: AnimeConfig) -> int:
     else:
         download_index = DownloadIndex()
 
+    # Build title alias index from cached AniDB/TVDB metadata
+    title_index = media_parser.build_title_index(str(_cache_dir("anidb").parent))
+    if title_index.title_count:
+        print(
+            f"  Title alias index: {title_index.series_count} series, "
+            f"{title_index.title_count} titles."
+        )
+
     # Load triage manifest for tracking
     already_copied = _load_triage_manifest()
     manifest_size_at_start = len(already_copied)
@@ -2760,7 +2654,10 @@ def run_series(args: argparse.Namespace, config: AnimeConfig) -> int:
         pool = _parse_files(media_files)
         if download_index.by_series:
             pool = _match_to_downloads(
-                pool, download_index, series_name=series_path.name
+                pool,
+                download_index,
+                series_name=series_path.name,
+                title_index=title_index,
             )
 
         # Process IDs from queue, then prompt for more if files remain

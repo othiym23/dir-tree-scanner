@@ -66,7 +66,7 @@ check:
 test:
     cargo nextest run --workspace
     cd scripts && uv run pytest test_catalog.py -q
-    cd etp && uv run pytest test_catalog.py test_anime.py -q
+    cd etp && uv run pytest test_catalog.py test_anime.py test_media_parser.py -q
 
 nas_home := "/Volumes/home"
 
