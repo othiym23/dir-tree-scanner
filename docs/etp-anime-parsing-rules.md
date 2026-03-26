@@ -248,7 +248,8 @@ Format: `{prefix},{technical fields}`
 **Prefix** (space-separated):
 
 - Release group with optional version: `MTBB(v2)` or `MTBB`
-- Source type: `BD` or `Web`
+- Source type: `BD` or `Web` (defaults to `Web` when not detected, ensuring the
+  space separator between group and tech fields is always present)
 
 **Technical fields** (comma-separated, in order):
 
@@ -297,9 +298,77 @@ season 3 {
 ```
 
 - Entries are sorted by episode number within each season group
-- `source` is the original filename (read-only reference)
+- `source` is the full path to the original file (read-only reference)
 - `dest` is the target filename (editable)
 - Season/specials directory is derived from the parent node
 - `/- episode ...` (KDL slashdash) skips an entry — the parser excludes it
 - `(todo)` tagged entries are rejected at parse time until resolved
 - `// CRC32 MISMATCH` comments mark files where the hash was stripped
+
+## AniDB per-season triage
+
+AniDB assigns separate IDs per season. In triage mode, the script processes one
+AniDB ID at a time against a shrinking pool of remaining files:
+
+1. Show all files in the group
+2. Prompt for an AniDB ID (or TVDB ID with `t` prefix, `s` to skip, `d` to mark
+   done)
+3. Fetch metadata and match files by season number
+4. Generate a KDL manifest for the matched files
+5. Remove matched files from the pool and loop
+
+Each AniDB ID gets its own series directory with `s1eYY` numbering (AniDB treats
+each season as its own show). The user can override the directory name at the
+prompt.
+
+### File-to-season matching
+
+When the user provides an AniDB ID, files are matched as follows:
+
+1. Group remaining pool files by parsed season number
+2. Show candidate seasons with file counts
+3. User picks which season maps to this AniDB ID
+4. Sort the chosen season's files by episode number
+5. If the season has more files than the AniDB entry has regular episodes, take
+   only the first N and leave the rest in the pool for the next AniDB ID
+6. Renumber episodes to start at 1 if the first episode isn't already 1 (e.g.,
+   S03E13 → s1e01 for a second cour)
+
+The split only happens when the AniDB episode count is known and the file count
+exceeds it. A 24-episode AniDB entry with 24 files is not split. The number of
+episodes in a season cannot be determined from the files alone — it requires the
+AniDB metadata.
+
+Example: BEASTARS S03 (24 files) split across two AniDB entries — "FINAL SEASON"
+(12 eps) and "FINAL SEASON Part 2" (12 eps). First AniDB ID takes S03E01–E12 as
+s1e01–s1e12. Second AniDB ID takes S03E13–E24, renumbers to s1e01–s1e12. Each
+gets its own series directory.
+
+### Specials handling
+
+Specials may use AniDB naming (S1, NCOP1a, T1, O01), TVDB naming (S00EYY), or
+have no clear numbering. Files without a detected episode number are included in
+the manifest with `(todo)` tag for the user to resolve manually.
+
+## Destination conflict resolution
+
+Before copying, the script checks if the destination file already exists:
+
+- **Same metadata** (release group, source type, video codec, audio codecs):
+  - File sizes compared first (short-circuit if different)
+  - If sizes match, CRC32 computed for both files
+  - CRC32 match → auto-replace silently (same encode, fixing naming)
+  - CRC32 mismatch → prompt user
+- **Different metadata**: show both filenames with mediainfo summaries and file
+  sizes, prompt `[k]eep existing / [r]eplace / [s]kip`
+
+Either way, the file is marked as triaged after the decision. Mediainfo is run
+on the existing file during conflict detection to ensure symmetric metadata
+comparison (both files analyzed the same way).
+
+## Triage copy tracking
+
+Successfully copied files are tracked in a JSON manifest at
+`$XDG_CACHE_HOME/etp/triage/copied.json`. Files marked as "done" (via the `d`
+command) are also added. Previously copied files are filtered out on subsequent
+runs unless `--force` is used.

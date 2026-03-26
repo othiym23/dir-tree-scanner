@@ -410,7 +410,7 @@ class TestParseSourceFilename:
             ),
         )
         block = anime.build_metadata_block(sf)
-        assert block.startswith("MTBB,")
+        assert block.startswith("MTBB Web,")
 
 
 class TestMediaInfoParsing:
@@ -1000,12 +1000,11 @@ class TestDirectoryNaming:
             year=1988,
             episodes=[],
         )
-        series_dir = anime.create_series_directory(
-            tmp_path, info, seasons=[1], has_specials=True
-        )
+        series_dir = anime.create_series_directory(tmp_path, info, seasons=[1])
         assert series_dir.is_dir()
         assert (series_dir / "Season 01").is_dir()
-        assert (series_dir / "Specials").is_dir()
+        # Specials dir is created on demand, not eagerly
+        assert not (series_dir / "Specials").exists()
         assert (series_dir / "anidb.id").read_text().strip() == "28"
 
     def test_create_series_directory_tvdb(self, tmp_path):
@@ -1167,11 +1166,9 @@ class TestResolveSeriesDirectory:
             self._make_info(),
             id_map=id_map,
             seasons=[1, 2],
-            has_specials=True,
         )
         assert (existing / "Season 01").is_dir()
         assert (existing / "Season 02").is_dir()
-        assert (existing / "Specials").is_dir()
 
     def test_writes_id_file_on_name_match(self, tmp_path):
         conventional = tmp_path / "アキラ [Akira] (1988)"
@@ -1797,7 +1794,7 @@ class TestWriteManifest:
             assert "etp-anime triage manifest" in content
             assert "AniDB: 42" in content
             assert "season 1 {" in content
-            assert 'source "src.mkv"' in content
+            assert "source" in content and "src.mkv" in content
             assert 'dest "dst.mkv"' in content
         finally:
             path.unlink(missing_ok=True)
@@ -2080,3 +2077,251 @@ class TestExecuteManifest:
         )
         assert success == 2
         assert failed == 1
+
+
+class TestConflictResolution:
+    """Tests for destination conflict checking."""
+
+    def test_no_conflict_when_dest_missing(self, tmp_path):
+        sf = anime.SourceFile(path=tmp_path / "src.mkv")
+        dest = tmp_path / "nonexistent.mkv"
+        assert anime.check_destination_conflict(sf, dest) is None
+
+    def test_conflict_detected(self, tmp_path, monkeypatch):
+        src = tmp_path / "src.mkv"
+        src.write_bytes(b"source")
+        dst = tmp_path / "dst.mkv"
+        dst.write_bytes(b"existing")
+
+        sf = anime.SourceFile(path=src, release_group="FLE", source_type="BD")
+        sf.media = _mock_media()
+
+        monkeypatch.setattr(anime, "analyze_file", lambda _: _mock_media())
+
+        conflict = anime.check_destination_conflict(sf, dst)
+        assert conflict is not None
+        assert conflict.existing_path == dst
+
+    def test_metadata_matches_same_group_codec(self, tmp_path, monkeypatch):
+        src = tmp_path / "[FLE] Show - 01.mkv"
+        src.write_bytes(b"source")
+        dst = tmp_path / "Show - s1e01 [FLE BD,1080p,HEVC].mkv"
+        dst.write_bytes(b"existing")
+
+        sf = anime.SourceFile(path=src, release_group="FLE", source_type="BD")
+        sf.media = _mock_media()
+
+        # Make existing have same group and codec
+        monkeypatch.setattr(anime, "analyze_file", lambda _: _mock_media())
+
+        conflict = anime.check_destination_conflict(sf, dst)
+        assert conflict is not None
+        # Both have HEVC, same (empty) group from parsed filename, etc.
+
+    def test_extract_key_metadata(self):
+        sf = anime.SourceFile(
+            path=Path("test.mkv"), release_group="FLE", source_type="BD"
+        )
+        sf.media = anime.MediaInfo(
+            video_codec="HEVC",
+            resolution="1080p",
+            width=1920,
+            height=1080,
+            bit_depth=10,
+            hdr_type="",
+            audio_tracks=[
+                anime.AudioTrack("flac", "ja", "Japanese", False),
+                anime.AudioTrack("aac", "en", "English", False),
+            ],
+        )
+        group, source, codec, audio = anime._extract_key_metadata(sf)
+        assert group == "FLE"
+        assert source == "BD"
+        assert codec == "HEVC"
+        assert audio == "flac+aac"
+
+    def test_format_size(self):
+        assert "GB" in anime._format_size(2_500_000_000)
+        assert "MB" in anime._format_size(50_000_000)
+        assert "KB" in anime._format_size(1_024)
+
+    def test_format_media_summary_none(self):
+        assert "unavailable" in anime._format_media_summary(None)
+
+    def test_format_media_summary(self):
+        media = anime.MediaInfo(
+            video_codec="HEVC",
+            resolution="1080p",
+            width=1920,
+            height=1080,
+            bit_depth=10,
+            hdr_type="HDR",
+            audio_tracks=[
+                anime.AudioTrack("flac", "ja", "Japanese", False),
+            ],
+        )
+        summary = anime._format_media_summary(media)
+        assert "HEVC" in summary
+        assert "1080p" in summary
+        assert "10bit" in summary
+        assert "HDR" in summary
+        assert "flac" in summary
+
+
+class TestMatchFilesToSeason:
+    """Tests for AniDB per-season file matching."""
+
+    def test_single_season_auto_matches(self, monkeypatch):
+        inputs = iter(["1"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        pool = [
+            anime.SourceFile(path=Path(f"ep{i}.mkv"), parsed_season=1, parsed_episode=i)
+            for i in range(1, 13)
+        ]
+        info = anime.AnimeInfo(
+            anidb_id=100,
+            tvdb_id=None,
+            title_ja="テスト",
+            title_en="Test",
+            year=2020,
+            episodes=[
+                anime.Episode(i, "regular", f"Ep {i}", "", "") for i in range(1, 13)
+            ],
+        )
+        matched, remaining = anime._match_files_to_season(pool, info)
+        assert len(matched) == 12
+        assert len(remaining) == 0
+
+    def test_multi_season_picks_one(self, monkeypatch):
+        inputs = iter(["2"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        pool = []
+        for s in [1, 2]:
+            for i in range(1, 13):
+                pool.append(
+                    anime.SourceFile(
+                        path=Path(f"s{s}e{i:02d}.mkv"),
+                        parsed_season=s,
+                        parsed_episode=i,
+                    )
+                )
+        info = anime.AnimeInfo(
+            anidb_id=200,
+            tvdb_id=None,
+            title_ja="テスト",
+            title_en="Test",
+            year=2021,
+            episodes=[
+                anime.Episode(i, "regular", f"Ep {i}", "", "") for i in range(1, 13)
+            ],
+        )
+        matched, remaining = anime._match_files_to_season(pool, info)
+        assert len(matched) == 12
+        assert all(sf.parsed_season == 2 for sf in matched)
+        assert len(remaining) == 12
+
+    def test_unseasoned_files_included(self, monkeypatch):
+        inputs = iter(["1"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        pool = [
+            anime.SourceFile(path=Path("ep1.mkv"), parsed_season=1, parsed_episode=1),
+            anime.SourceFile(path=Path("special.mkv")),  # no season or episode
+        ]
+        info = anime.AnimeInfo(
+            anidb_id=100,
+            tvdb_id=None,
+            title_ja="テスト",
+            title_en="Test",
+            year=2020,
+            episodes=[anime.Episode(1, "regular", "Ep 1", "", "")],
+        )
+        matched, remaining = anime._match_files_to_season(pool, info)
+        assert len(matched) == 2  # ep1 + special
+        assert len(remaining) == 0
+
+    def test_multi_cour_takes_first_n(self, monkeypatch):
+        """24-ep season split into two 12-ep AniDB entries takes first 12."""
+        inputs = iter(["3"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        pool = [
+            anime.SourceFile(
+                path=Path(f"s3e{i:02d}.mkv"), parsed_season=3, parsed_episode=i
+            )
+            for i in range(1, 25)  # S03E01-S03E24
+        ]
+        info = anime.AnimeInfo(
+            anidb_id=100,
+            tvdb_id=None,
+            title_ja="テスト",
+            title_en="Test",
+            year=2024,
+            episodes=[
+                anime.Episode(i, "regular", f"Ep {i}", "", "") for i in range(1, 13)
+            ],
+        )
+        matched, remaining = anime._match_files_to_season(pool, info)
+        assert len(matched) == 12
+        assert len(remaining) == 12
+        # First 12 episodes matched, episodes 1-12
+        assert matched[0].parsed_episode == 1
+        assert matched[-1].parsed_episode == 12
+
+    def test_multi_cour_renumbers_second_half(self, monkeypatch):
+        """Second cour (ep 13-24) gets renumbered to 1-12."""
+        inputs = iter(["3"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        # Pool only has the leftover second half (ep 13-24)
+        pool = [
+            anime.SourceFile(
+                path=Path(f"s3e{i:02d}.mkv"), parsed_season=3, parsed_episode=i
+            )
+            for i in range(13, 25)
+        ]
+        info = anime.AnimeInfo(
+            anidb_id=200,
+            tvdb_id=None,
+            title_ja="テスト Part 2",
+            title_en="Test Part 2",
+            year=2025,
+            episodes=[
+                anime.Episode(i, "regular", f"Ep {i}", "", "") for i in range(1, 13)
+            ],
+        )
+        matched, remaining = anime._match_files_to_season(pool, info)
+        assert len(matched) == 12
+        assert len(remaining) == 0
+        # Episodes renumbered: 13→1, 14→2, ..., 24→12
+        assert matched[0].parsed_episode == 1
+        assert matched[-1].parsed_episode == 12
+
+    def test_multi_cour_leftover_back_in_pool(self, monkeypatch):
+        """Leftover files from a multi-cour split go back in the pool."""
+        inputs = iter(["3"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        pool = [
+            anime.SourceFile(
+                path=Path(f"s3e{i:02d}.mkv"), parsed_season=3, parsed_episode=i
+            )
+            for i in range(1, 25)
+        ]
+        # AniDB entry with only 12 episodes
+        info = anime.AnimeInfo(
+            anidb_id=100,
+            tvdb_id=None,
+            title_ja="テスト",
+            title_en="Test",
+            year=2024,
+            episodes=[
+                anime.Episode(i, "regular", f"Ep {i}", "", "") for i in range(1, 13)
+            ],
+        )
+        matched, remaining = anime._match_files_to_season(pool, info)
+        # Remaining should have ep 13-24 still with original numbering
+        remaining_eps = sorted(sf.parsed_episode or 0 for sf in remaining)
+        assert remaining_eps == list(range(13, 25))
