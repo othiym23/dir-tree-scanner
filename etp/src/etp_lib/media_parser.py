@@ -1386,12 +1386,16 @@ class TitleAliasIndex:
             return None
         return self._key_to_titles.get(key)
 
-    def matching_keys(self, series_name: str) -> set[str]:
+    def matching_keys(
+        self, series_name: str, index_keys: set[str] | None = None
+    ) -> set[str]:
         """Return all normalized keys that could identify *series_name*.
 
         Combines direct name variants (raw, parsed, cleaned) with alias
-        expansions from the title index.  The result is the full set of
-        keys to probe when looking up download index entries.
+        expansions from the title index.  When *index_keys* is provided,
+        also includes keys where one is a prefix of the other — this
+        handles short vs long title variants (e.g. downloads use "Hell
+        Mode" while Sonarr uses the full official title).
         """
         keys: set[str] = set()
         for variant in name_variants(series_name):
@@ -1401,6 +1405,15 @@ class TitleAliasIndex:
                 aliases = self._key_to_titles.get(idx_key)
                 if aliases:
                     keys.update(aliases)
+
+        if index_keys is not None:
+            prefix_hits: set[str] = set()
+            for cand in keys:
+                for ik in index_keys:
+                    if ik not in keys and (cand.startswith(ik) or ik.startswith(cand)):
+                        prefix_hits.add(ik)
+            keys.update(prefix_hits)
+
         return keys
 
     @property

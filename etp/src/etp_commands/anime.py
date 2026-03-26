@@ -1647,11 +1647,10 @@ def _match_to_downloads(
     metadata (release group, hash, version, source type) replaces the
     source file's, but the path is kept.
     """
-    # Collect download entries from all matching keys.  A single series
-    # may be split across multiple download index keys (e.g. different
-    # release groups use different romanizations of the same title).
+    # Collect download entries from all matching keys.
+    dl_keys = set(download_index.by_series.keys())
     if title_index is not None:
-        candidate_keys = title_index.matching_keys(series_name)
+        candidate_keys = title_index.matching_keys(series_name, index_keys=dl_keys)
     else:
         candidate_keys = media_parser.name_variants(series_name)
 
@@ -1703,7 +1702,9 @@ def _match_to_downloads(
         # Pass 2: exact-size + matching release group across all entries.
         # Handles DVD→aired order renumbering where episode numbers differ
         # but the file contents (and therefore size) are identical.
-        if best is None and src_group:
+        # Skip for season 0 (specials) — they should only match via
+        # exact episode key, not via size fallback.
+        if best is None and src_group and sf.parsed_season != 0:
             size_candidates = series_by_size.get(src_size, [])
             for dl_path, _dl_season, _dl_ep in size_candidates:
                 dl_sf = parse_source_filename(dl_path.name)

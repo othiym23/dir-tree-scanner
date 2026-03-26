@@ -707,6 +707,64 @@ class TestNormalizeForMatching:
         assert "少女と戦車" in result
 
 
+class TestCleanSeriesTitle:
+    def test_space_separated(self):
+        assert mp.clean_series_title("Show S01-S02 BDRip x265") == "Show"
+
+    def test_dot_separated(self):
+        assert mp.clean_series_title("Show.S02.1080p.BluRay.x265-iAHD") == "Show"
+
+    def test_no_metadata(self):
+        assert mp.clean_series_title("Plain Title") == "Plain Title"
+
+    def test_dual_audio(self):
+        assert (
+            mp.clean_series_title("Show S01-S02+OVA Dual Audio BDRip x265-EMBER")
+            == "Show"
+        )
+
+
+class TestNameVariants:
+    def test_strips_year(self):
+        variants = mp.name_variants("Show Name (2024)")
+        assert "showname" in variants
+
+    def test_includes_clean_title(self):
+        variants = mp.name_variants("Show S01 BDRip x265-GROUP")
+        assert "show" in variants
+
+    def test_plain_name(self):
+        variants = mp.name_variants("Simple Name")
+        assert "simplename" in variants
+
+
+class TestMatchingKeysPrefix:
+    def test_prefix_match_against_index_keys(self):
+        idx = mp.TitleAliasIndex()
+        keys = idx.matching_keys(
+            "Long Title Name Here",
+            index_keys={"longtitle", "otherseries"},
+        )
+        # "longtitlenamehere" starts with "longtitle"
+        assert "longtitle" in keys
+        assert "otherseries" not in keys
+
+    def test_no_prefix_without_index_keys(self):
+        idx = mp.TitleAliasIndex()
+        keys = idx.matching_keys("Long Title Name Here")
+        assert "longtitle" not in keys
+
+
+class TestSceneTrailingGroup:
+    def test_last_group_wins(self):
+        pm = mp.parse_component("Show.S01E01.1080p.BluRay.10-Bit.x265-iAHD.mkv")
+        assert pm.release_group == "iAHD"
+
+    def test_single_group_first_wins(self):
+        pm = mp.parse_component("[FLE] Show - 01 [BD 1080p].mkv")
+        assert pm.release_group == "FLE"
+
+
 # ===================================================================
 # Corpus smoke tests (require NAS mount)
 # ===================================================================

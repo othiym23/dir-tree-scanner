@@ -2404,6 +2404,49 @@ class TestMatchToDownloads:
         assert enriched[0].release_group != "Group"
         assert enriched[0].matched_download is None
 
+    def test_season_zero_does_not_match_regular(self, tmp_path):
+        """Season 0 (TVDB specials) must not match regular season episodes."""
+        src = tmp_path / "source" / "[FLE] Show - s00e01 - Special [BD 1080p].mkv"
+        src.parent.mkdir(parents=True)
+        src.write_bytes(b"x" * 100)
+
+        dl = tmp_path / "dl" / "[FLE] Show - S01E01 [BD 1080p].mkv"
+        dl.parent.mkdir(parents=True)
+        dl.write_bytes(b"x" * 100)
+
+        index = anime._build_download_index(tmp_path / "dl")
+        parsed = anime._parse_files([src])
+        enriched = anime._match_to_downloads(parsed, index, series_name="Show")
+        assert enriched[0].matched_download is None
+
+    def test_size_group_fallback_dvd_order(self, tmp_path):
+        """Size+group fallback matches when episode numbers differ (DVD vs aired)."""
+        # Source: s01e15 (aired order)
+        src = tmp_path / "source" / "[iAHD] Show - s01e15 - Title [iAHD BD-1080p].mkv"
+        src.parent.mkdir(parents=True)
+        src.write_bytes(b"x" * 500)
+
+        # Download: S02E01 (DVD order) — same group, same size
+        dl = tmp_path / "dl" / "Show.S02E01.1080p.Blu-Ray.x265-iAHD.mkv"
+        dl.parent.mkdir(parents=True)
+        dl.write_bytes(b"x" * 500)
+
+        index = anime._build_download_index(tmp_path / "dl")
+        parsed = anime._parse_files([src])
+        enriched = anime._match_to_downloads(parsed, index, series_name="Show")
+        assert enriched[0].matched_download is not None
+        assert enriched[0].matched_download.name == dl.name
+
+    def test_recursive_download_scan(self, tmp_path):
+        """Download index finds files in deeply nested directories."""
+        nested = tmp_path / "dl" / "Batch Release" / "Season 01"
+        nested.mkdir(parents=True)
+        dl = nested / "[G] Show - S01E01 [1080p].mkv"
+        dl.write_bytes(b"x" * 100)
+
+        index = anime._build_download_index(tmp_path / "dl")
+        assert index.file_count == 1
+
     def test_unseasoned_source_not_enriched(self, tmp_path):
         """Files without season/episode are passed through unchanged."""
         src = tmp_path / "special.mkv"
@@ -2544,6 +2587,30 @@ class TestMatchFilesToSeason:
         # Episodes renumbered: 13→1, 14→2, ..., 24→12
         assert matched[0].parsed_episode == 1
         assert matched[-1].parsed_episode == 12
+
+    def test_no_renumber_when_eps_fit(self, monkeypatch):
+        """Ep 12 of a 12-episode entry stays as 12, not renumbered to 1."""
+        inputs = iter(["2"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        pool = [
+            anime.SourceFile(
+                path=Path("s2e12.mkv"), parsed_season=2, parsed_episode=12
+            ),
+        ]
+        info = anime.AnimeInfo(
+            anidb_id=300,
+            tvdb_id=None,
+            title_ja="テスト Season 2",
+            title_en="Test Season 2",
+            year=2026,
+            episodes=[
+                anime.Episode(i, "regular", f"Ep {i}", "", "") for i in range(1, 13)
+            ],
+        )
+        matched, remaining = anime._match_files_to_season(pool, info)
+        assert len(matched) == 1
+        assert matched[0].parsed_episode == 12  # NOT renumbered to 1
 
     def test_multi_cour_leftover_back_in_pool(self, monkeypatch):
         """Leftover files from a multi-cour split go back in the pool."""
