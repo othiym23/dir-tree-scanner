@@ -15,6 +15,8 @@ Cargo workspace with four crates:
 Python porcelain in `etp/`:
 
 - `etp` — git-style dispatcher (`etp <cmd>` → `etp-<cmd>`)
+- `etp-anime` — interactive anime collection manager (triage/series/episode
+  subcommands)
 - `etp-catalog` — KDL-configured catalog orchestrator
 - `kdl/` — vendored `kdl-py` 1.2.0 (KDL 1 parser, no install step needed)
 
@@ -38,6 +40,9 @@ etp-find <pattern> [-R <directory>] [--tree=<file>] [--csv=<file>] [--size] [-i]
 etp tree <directory> [args...]
 etp find <pattern> [-R <directory>] [args...]
 etp catalog [--dry-run] [config.kdl]
+etp anime triage [pattern] [--source DIR] [--dest DIR] [--force] [--dry-run]
+etp anime series [pattern] [--source DIR] [--dest DIR] [--force] [--dry-run]
+etp anime episode <file> --anidb ID | --tvdb ID [--dest DIR] [--dry-run]
 ```
 
 Defaults: output is `<dir>/index.csv`, database is `<dir>/.etp.db`, exclude is
@@ -93,6 +98,9 @@ Install with `cargo install --locked cargo-nextest`.
 - `etp-csv/tests/cmd/` — CSV snapshot tests (4 tests)
 - `etp-tree/tests/cmd/` — tree snapshot tests (3 tests)
 - `etp-find/tests/cmd/` — find snapshot tests (5 tests)
+- `etp/test_anime.py` — anime manager tests (pytest)
+- `etp/test_catalog.py` — catalog orchestrator tests (pytest)
+- `etp/test_paths.py` — path resolution tests (pytest)
 
 ### trycmd tests
 
@@ -142,8 +150,11 @@ subscriber).
 `etp/` contains the current Python porcelain:
 
 - `etp` — git-style dispatcher
+- `etp-anime` — interactive anime collection manager
 - `etp-catalog` — KDL-configured catalog orchestrator
-- `test_catalog.py` — pytest tests
+- `test_anime.py` — anime manager pytest tests
+- `test_catalog.py` — catalog pytest tests
+- `test_paths.py` — path resolution pytest tests
 
 `conf/` contains KDL configuration files:
 

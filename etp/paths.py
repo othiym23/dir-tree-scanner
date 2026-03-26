@@ -64,6 +64,11 @@ def anime_config() -> Path:
     return config_dir() / "anime-ingestion.kdl"
 
 
+def anime_env() -> Path:
+    """Default anime env file: anime.env in the config directory."""
+    return config_dir() / "anime.env"
+
+
 def db_path() -> Path:
     """Default database: metadata.sqlite in the data directory."""
     return data_dir() / "metadata.sqlite"

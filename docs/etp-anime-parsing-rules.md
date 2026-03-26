@@ -1,7 +1,59 @@
 # etp-anime parsing and substitution rules
 
-This document captures all parsing logic and text substitution rules used by
-`etp-anime` when processing filenames, API responses, and output paths.
+This document captures all parsing logic, text substitution rules,
+configuration, and workflow details for `etp-anime`.
+
+## Subcommands
+
+`etp-anime` (invoked via `etp anime`) has three subcommands:
+
+- `etp anime triage [pattern]` — bulk import from downloads directory
+- `etp anime series [pattern]` — sync from Sonarr-managed anime directory
+- `etp anime episode <file> --anidb ID | --tvdb ID` — single-file import
+
+All three share filename construction, directory resolution, conflict handling,
+and file copying logic. See ADR `2026-03-26-01-anime-subcommand-split.md`.
+
+## Configuration
+
+### anime-ingestion.kdl
+
+Loaded from `$XDG_CONFIG_HOME/euterpe-tools/anime-ingestion.kdl` (via
+`paths.anime_config()`). Stores default paths and per-series ID mappings.
+
+```kdl
+paths {
+  downloads-dir "/volume1/docker/pvr/data/downloads"
+  anime-source-dir "/volume1/docker/pvr/data/anime"
+  anime-dest-dir "/volume1/video/anime"
+}
+
+// Multi-ID mappings for multi-season AniDB series
+series "Chained Soldier (2024)" {
+  anidb 17330
+  anidb 18548
+}
+
+series "Re ZERO Starting Life in Another World" {
+  tvdb 305089
+}
+```
+
+Series mappings are saved automatically when the user provides IDs during triage
+or series sync. A series can have multiple IDs (one per AniDB season).
+
+### anime.env
+
+Loaded from `$XDG_CONFIG_HOME/euterpe-tools/anime.env` (via
+`paths.anime_env()`). Simple `KEY=VALUE` format for API credentials:
+
+```
+ANIDB_CLIENT=myapp
+ANIDB_CLIENTVER=1
+TVDB_API_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+```
+
+Existing environment variables are not overwritten.
 
 ## Source filename parsing
 
@@ -11,21 +63,24 @@ field.
 
 ### Release group
 
-Three patterns are tried in priority order:
+Four patterns are tried in priority order:
 
 1. **Bracket at start**: `^\[([^\]]+)\]` — fansub convention
    - `[Cyan] Show - 05.mkv` → `Cyan`
    - `[FLE] Re ZERO ... [4CC4766E].mkv` → `FLE`
 2. **Scene trailing dash**: `-([A-Za-z][A-Za-z0-9]+)` before the file extension
    - `Show.S03E09.1080p.WEB-DL.DUAL-VARYG.mkv` → `VARYG`
-3. **Bracket anywhere** (fallback): `\[([A-Za-z]{2,6})\]` — short all-alpha tags
+3. **Sonarr metadata block**: `\[GROUP QUALITY-res,...]` where the first word
+   before a quality keyword is the release group
+   - `Show - s01e01 - Title [VARYG WEBDL-1080p,8bit,x264,AAC].mkv` → `VARYG`
+   - `Show - s01e07 [Erai-raws WEBDL-1080p,...].mkv` → `Erai-raws`
+   - Quality keywords: `WEBDL`, `WEB-DL`, `Bluray`, `HDTV`, `DVD`, `SDTV`, `Raw`
+4. **Bracket anywhere** (fallback): `\[([A-Za-z]{2,6})\]` — short all-alpha tags
    that aren't CRC32 hashes (which are 8 hex chars)
    - `Re ZERO ... [Dual Audio] [PMR].mkv` → `PMR`
-   - Won't match `[Dual Audio]` (space), `[1080p]` (digits), or `[4CC4766E]` (8
-     hex chars, matched as hash instead)
 
 When no release group is detected, the user is prompted in interactive mode. In
-batch triage mode, the metadata block omits the group.
+batch mode, the metadata block omits the group.
 
 ### Episode number
 
@@ -44,7 +99,7 @@ an optional `v\d+` version suffix (e.g., `05v2`).
    - `Show EP12 [720p].mkv` → episode 12
 
 When no episode number is detected, the user is prompted interactively. In batch
-triage mode, the entry is marked with a `(todo)` tag.
+mode, the entry is marked with a `(todo)` tag.
 
 ### Version
 
@@ -58,8 +113,6 @@ Pattern: `\[([0-9A-Fa-f]{8})\]`
 
 Matches an 8-character hex string in brackets anywhere in the filename.
 
-- `[Cyan] Show - 08 [D98B31F3].mkv` → hash `D98B31F3`
-
 ### CRC32 verification
 
 When a hash is present, it is verified against the actual file contents before
@@ -68,9 +121,8 @@ result and the computed hash (avoiding a redundant re-read on mismatch).
 
 - **Match**: hash is preserved in the destination filename
 - **Mismatch**: in interactive mode, the user is prompted; in batch mode, a
-  `// CRC32 MISMATCH` comment is added to the manifest. In both cases, if the
-  copy proceeds, the hash is **stripped** from the destination filename by
-  clearing `source.hash_code` before `format_episode_filename` is called.
+  `// CRC32 MISMATCH` comment is added to the manifest. If the copy proceeds,
+  the hash is **stripped** from the destination filename.
 
 ### Source type
 
@@ -85,8 +137,15 @@ Pattern: `REMUX` (case-insensitive). Sets `is_remux = True`.
 
 ### Series name extraction
 
-`_strip_series_name` extracts a candidate series name by stripping metadata from
-the filename stem, applied in order:
+For grouping files by series in triage mode, `_extract_group_name` determines
+the series name:
+
+- **Files in subdirectories**: uses the immediate subdirectory name (batch
+  releases typically share a directory, e.g.,
+  `[FLE] Re ZERO S01 (BD 1080p)/[FLE] Re ZERO S01E01...`)
+- **Files directly in a source directory**: uses the filename
+
+In both cases, `_strip_series_name` strips release metadata from the stem:
 
 1. Strip leading release group: `[Group] ` prefix
 2. Strip trailing CRC32 hash: ` [ABCD1234]`
@@ -94,6 +153,7 @@ the filename stem, applied in order:
    - ` - 05 [...` (dash-episode followed by metadata)
    - ` - S01E05...` (dash then SxEy)
    - `.S01E05...` (dot then SxEy, scene naming)
+   - ` S01E05...` (space then SxEy, no separator)
    - ` - 05` at end of string (trailing dash-episode, no metadata)
 4. Strip trailing whitespace
 
@@ -127,13 +187,8 @@ in a single pass, then selected by priority:
 
 For each episode element, titles are extracted from child `<title>` elements:
 
-- `lang="en"` → `title_en` (first match)
+- `lang="en"` → `title_en` (first match; backticks replaced with apostrophes)
 - `lang="ja"` → `title_ja` (first match)
-
-### Episode title substitutions
-
-- **English titles only**: backtick (`` ` ``) is replaced with straight
-  apostrophe (`'`)
 
 ### Episode type mapping
 
@@ -169,20 +224,16 @@ when listed in the series' `nameTranslations` array.
 1. Canonical `eng` translation (from translations endpoint)
 2. First alias with `language: "eng"` from the `aliases` array
 
-Translations are cached alongside the series and episode data in
-`$XDG_CACHE_HOME/etp/tvdb/{series_id}.json`.
-
 ### Episode titles
 
 Episodes are fetched from `/series/{id}/episodes/default/eng` to get
-English-language episode names. The `name` field from each episode object is
-used as `title_en`. No Japanese episode titles are available from this endpoint
-(`title_ja` is set to empty string).
+English-language episode names. Episode matching uses both episode number and
+season number to avoid cross-season title mismatches.
 
 ### Episode type mapping
 
 Episodes with `seasonNumber == 0` are classified as specials (tag `S{number}`).
-All other episodes are regular.
+All other episodes are regular, with the `season` field preserved for matching.
 
 ## Path sanitization
 
@@ -196,12 +247,13 @@ directory names or filenames:
 
 `_strip_redundant_year` removes a trailing ` (YYYY)` suffix from a title when
 the year matches the series release year, to avoid duplication in directory
-names that already include the year:
+names that already include the year.
 
-- `鋼の錬金術師 (2009)` with year 2009 → `鋼の錬金術師`
-- `鋼の錬金術師 (2003)` with year 2009 → kept as-is (years differ)
+## KDL string escaping
 
-This is applied to both Japanese and English titles in `format_series_dirname`.
+`_escape_kdl` escapes `\` and `"` in strings written to KDL files (manifests and
+config). Used for filenames, paths, and series names that may contain special
+characters (e.g., episode titles with quotes).
 
 ## Output format reference
 
@@ -219,14 +271,6 @@ empty, or both titles are identical after sanitization):
 ```
 {title} ({year})
 ```
-
-The English title is preferred for the single-title format; the Japanese title
-is used as a fallback when no English title exists. Both titles have path
-sanitization and redundant year stripping applied before formatting.
-
-Japanese character detection uses a regex matching Hiragana (U+3040–309F),
-Katakana (U+30A0–30FF), CJK Unified Ideographs (U+4E00–9FFF), and CJK Extension
-A (U+3400–4DBF).
 
 ### Episode filename
 
@@ -248,8 +292,7 @@ Format: `{prefix},{technical fields}`
 **Prefix** (space-separated):
 
 - Release group with optional version: `MTBB(v2)` or `MTBB`
-- Source type: `BD` or `Web` (defaults to `Web` when not detected, ensuring the
-  space separator between group and tech fields is always present)
+- Source type: `BD` or `Web` (defaults to `Web` when not detected)
 
 **Technical fields** (comma-separated, in order):
 
@@ -261,15 +304,14 @@ Format: `{prefix},{technical fields}`
 6. Encoding library (e.g., `x264`, `x265`) — if detected
 7. Audio codecs joined by `+` (e.g., `flac+aac`)
 8. Audio language: `dual-audio` (ja+en), `multi-audio` (ja+en+other), or omitted
-   (single language)
 
 Example: `MTBB(v2) BD,REMUX,1080p,HEVC,10bit,x265,flac+aac,dual-audio`
 
-## Batch triage manifest (KDL format)
+## Batch manifest (KDL format)
 
-In `--triage` mode, the script generates a KDL manifest file grouped by season,
-with source and destination filenames on separate lines for readability. The
-manifest is opened in `$VISUAL` / `$EDITOR` / `vi` for editing.
+Both `triage` and `series` subcommands generate a KDL manifest file grouped by
+season, with source and destination filenames on separate lines. The manifest is
+opened in `$VISUAL` / `$EDITOR` / `vi` for editing.
 
 ```kdl
 // etp-anime triage manifest
@@ -279,96 +321,86 @@ manifest is opened in `$VISUAL` / `$EDITOR` / `vi` for editing.
 
 season 1 {
   episode 1 {
-    source "[FLE] Show - S01E01 ... [4CC4766E].mkv"
+    source "/volume1/.../[FLE] Show - S01E01 ... [4CC4766E].mkv"
+    downloaded "/volume1/.../[FLE] Show - 01 [BD 1080p] [4CC4766E].mkv"
     dest "Show - s1e01 - Episode Title [FLE BD,...] [4CC4766E].mkv"
-  }
-}
-
-season 3 {
-  // CRC32 MISMATCH — hash stripped from destination
-  episode 1 {
-    source "Show - S03E01v2 ... [PMR].mkv"
-    dest "Show - s3e01 - Episode Title [PMR(v2) BD,...].mkv"
-  }
-  (todo)episode 0 {
-    source "unmatched_file.mkv"
-    dest "Show - s1eXX - EPISODE_NAME [...].mkv"
   }
 }
 ```
 
 - Entries are sorted by episode number within each season group
-- `source` is the full path to the original file (read-only reference)
+- `source` is the full path to the source file (read-only reference)
+- `downloaded` is the matched download file path (read-only, present when
+  `series` mode enriches metadata from downloads)
 - `dest` is the target filename (editable)
 - Season/specials directory is derived from the parent node
-- `/- episode ...` (KDL slashdash) skips an entry — the parser excludes it
+- `/- episode ...` (KDL slashdash) skips an entry
 - `(todo)` tagged entries are rejected at parse time until resolved
 - `// CRC32 MISMATCH` comments mark files where the hash was stripped
+- Strings containing `"` or `\` are escaped in the KDL output
 
-## AniDB per-season triage
+## Download index matching (series mode)
 
-AniDB assigns separate IDs per season. In triage mode, the script processes one
-AniDB ID at a time against a shrinking pool of remaining files:
+The `series` subcommand builds a `DownloadIndex` from the downloads directory to
+enrich Sonarr-renamed files with original release metadata:
 
-1. Show all files in the group
-2. Prompt for an AniDB ID (or TVDB ID with `t` prefix, `s` to skip, `d` to mark
-   done)
-3. Fetch metadata and match files by season number
-4. Generate a KDL manifest for the matched files
-5. Remove matched files from the pool and loop
+- **`by_series`**: normalized series name → list of
+  `(season, episode, path, size)`. Uses parent directory name for batch
+  releases.
+- **`by_episode`**: `(season, episode)` → `(path, size)` as a global fallback.
 
-Each AniDB ID gets its own series directory with `s1eYY` numbering (AniDB treats
-each season as its own show). The user can override the directory name at the
-prompt.
+For each source file, `_match_to_downloads` tries series-specific matching
+first, then falls back to the global index. When multiple candidates exist, the
+closest file size is used as a tiebreaker. File sizes are cached at index build
+time to avoid repeated stat calls on NAS spinning disks.
 
-### File-to-season matching
+The matched download's release group, CRC32 hash, version, and source type
+replace the Sonarr-reformatted values on the source file.
 
-When the user provides an AniDB ID, files are matched as follows:
+## AniDB per-season handling
 
-1. Group remaining pool files by parsed season number
-2. Show candidate seasons with file counts
-3. User picks which season maps to this AniDB ID
-4. Sort the chosen season's files by episode number
-5. If the season has more files than the AniDB entry has regular episodes, take
-   only the first N and leave the rest in the pool for the next AniDB ID
-6. Renumber episodes to start at 1 if the first episode isn't already 1 (e.g.,
-   S03E13 → s1e01 for a second cour)
+AniDB assigns separate IDs per season. Both `triage` and `series` subcommands
+process one AniDB ID at a time against a shrinking pool of files:
 
-The split only happens when the AniDB episode count is known and the file count
-exceeds it. A 24-episode AniDB entry with 24 files is not split. The number of
-episodes in a season cannot be determined from the files alone — it requires the
-AniDB metadata.
+1. Show candidate seasons with file counts
+2. User picks which season maps to this AniDB ID
+3. Sort the season's files by episode number
+4. If the season has more files than the AniDB entry's episode count, take only
+   the first N and leave the rest for the next AniDB ID
+5. Renumber episodes to start at 1 if needed (e.g., S03E13 → s1e01)
 
-Example: BEASTARS S03 (24 files) split across two AniDB entries — "FINAL SEASON"
-(12 eps) and "FINAL SEASON Part 2" (12 eps). First AniDB ID takes S03E01–E12 as
-s1e01–s1e12. Second AniDB ID takes S03E13–E24, renumbers to s1e01–s1e12. Each
-gets its own series directory.
+Each AniDB ID gets its own series directory with `s1eYY` numbering. The config
+file stores multiple IDs per series for subsequent runs.
 
 ### Specials handling
 
 Specials may use AniDB naming (S1, NCOP1a, T1, O01), TVDB naming (S00EYY), or
-have no clear numbering. Files without a detected episode number are included in
-the manifest with `(todo)` tag for the user to resolve manually.
+have no clear numbering. Ambiguous files are included with `(todo)` tag.
 
 ## Destination conflict resolution
 
-Before copying, the script checks if the destination file already exists:
+Before copying, the script checks for existing files at the destination:
+
+1. **Exact path match**: checks if `dest_path` exists
+2. **Fuzzy episode match**: scans the destination directory for a file with the
+   same episode tag (by parsing `sXeYY` as integers), handling different
+   zero-padding conventions (e.g., `s1e01` finds `s01e01`)
+
+When a conflict is found:
 
 - **Same metadata** (release group, source type, video codec, audio codecs):
-  - File sizes compared first (short-circuit if different)
+  - File sizes compared first (short-circuit)
   - If sizes match, CRC32 computed for both files
-  - CRC32 match → auto-replace silently (same encode, fixing naming)
+  - CRC32 match → auto-replace silently (fixing naming)
   - CRC32 mismatch → prompt user
-- **Different metadata**: show both filenames with mediainfo summaries and file
-  sizes, prompt `[k]eep existing / [r]eplace / [s]kip`
-
-Either way, the file is marked as triaged after the decision. Mediainfo is run
-on the existing file during conflict detection to ensure symmetric metadata
-comparison (both files analyzed the same way).
+- **Different metadata**: show both filenames (using the intended dest name, not
+  the source name) with mediainfo summaries and file sizes, prompt
+  `[k]eep / [r]eplace / [s]kip`
 
 ## Triage copy tracking
 
-Successfully copied files are tracked in a JSON manifest at
-`$XDG_CACHE_HOME/etp/triage/copied.json`. Files marked as "done" (via the `d`
-command) are also added. Previously copied files are filtered out on subsequent
-runs unless `--force` is used.
+Processed files are tracked in a JSON manifest at
+`$XDG_CACHE_HOME/etp/triage/copied.json`. Files copied, kept, skipped, or marked
+"done" (via the `d` command) are all recorded. Previously processed files are
+filtered out on subsequent runs unless `--force` is used. The `q` command saves
+progress and exits.

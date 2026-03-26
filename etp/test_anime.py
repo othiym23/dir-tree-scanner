@@ -321,7 +321,7 @@ class TestParseSourceFilename:
 
     def test_sonarr_format(self):
         sf = anime.parse_source_filename(
-            "BEASTARS - s01e01 - The Moon and the Beast "
+            "BEASTARS - s1e01 - The Moon and the Beast "
             "[NH Bluray-1080p,10bit,x264,AAC].mkv"
         )
         assert sf.parsed_season == 1
@@ -355,6 +355,21 @@ class TestParseSourceFilename:
         assert sf.parsed_season == 3
         assert sf.parsed_episode == 1
         assert sf.version == 2
+
+    def test_sonarr_metadata_block_group(self):
+        """Sonarr-style metadata block '[GROUP QUALITY-res,...]' extracts group."""
+        sf = anime.parse_source_filename(
+            "You and I Are Polar Opposites - s01e01 - You, My Polar Opposite "
+            "[VARYG WEBDL-1080p,8bit,x264,AAC].mkv"
+        )
+        assert sf.release_group == "VARYG"
+
+    def test_sonarr_metadata_block_erai_raws(self):
+        """Sonarr metadata block with hyphenated group name."""
+        sf = anime.parse_source_filename(
+            "Show - s01e11 - Title [Erai-raws WEBDL-1080p,8bit,x264,AAC].mkv"
+        )
+        assert sf.release_group == "Erai-raws"
 
     def test_bracket_group_not_crc32(self):
         """8-char hex in brackets is a CRC32 hash, not a release group."""
@@ -1287,8 +1302,8 @@ class TestAnimeConfig:
             encoding="utf-8",
         )
         config = anime.load_anime_config(cfg)
-        assert config.series_mappings["BEASTARS"] == ("anidb", 14659)
-        assert config.series_mappings["Re ZERO"] == ("tvdb", 305089)
+        assert config.series_mappings["BEASTARS"] == [("anidb", 14659)]
+        assert config.series_mappings["Re ZERO"] == [("tvdb", 305089)]
 
     def test_save_series_mapping(self, tmp_path):
         cfg = tmp_path / "config.kdl"
@@ -1299,13 +1314,25 @@ class TestAnimeConfig:
         assert "anidb 12345" in content
         # Verify it's loadable
         config = anime.load_anime_config(cfg)
-        assert config.series_mappings["Test Show"] == ("anidb", 12345)
+        assert config.series_mappings["Test Show"] == [("anidb", 12345)]
 
     def test_lookup_case_insensitive(self):
-        config = anime.AnimeConfig(series_mappings={"BEASTARS": ("anidb", 14659)})
-        assert anime.lookup_series_id("beastars", config) == ("anidb", 14659)
-        assert anime.lookup_series_id("BEASTARS", config) == ("anidb", 14659)
-        assert anime.lookup_series_id("unknown", config) is None
+        config = anime.AnimeConfig(series_mappings={"BEASTARS": [("anidb", 14659)]})
+        assert anime.lookup_series_ids("beastars", config) == [("anidb", 14659)]
+        assert anime.lookup_series_ids("BEASTARS", config) == [("anidb", 14659)]
+        assert anime.lookup_series_ids("unknown", config) == []
+
+    def test_multiple_ids_per_series(self, tmp_path):
+        cfg = tmp_path / "config.kdl"
+        cfg.write_text(
+            'series "Chained Soldier" {\n  anidb 17330\n  anidb 18548\n}\n',
+            encoding="utf-8",
+        )
+        config = anime.load_anime_config(cfg)
+        ids = config.series_mappings["Chained Soldier"]
+        assert len(ids) == 2
+        assert ("anidb", 17330) in ids
+        assert ("anidb", 18548) in ids
 
 
 class TestExtractSeriesName:
@@ -1319,7 +1346,7 @@ class TestExtractSeriesName:
 
     def test_sonarr_format(self):
         name = anime._extract_series_name(
-            "BEASTARS - s01e01 - The Moon and the Beast "
+            "BEASTARS - s1e01 - The Moon and the Beast "
             "[NH Bluray-1080p,10bit,x264,AAC].mkv"
         )
         assert name == "BEASTARS"
@@ -1442,7 +1469,7 @@ class TestExtractConciseName:
     def test_sonarr_format(self):
         sf = anime.SourceFile(
             path=Path(
-                "BEASTARS - s01e01 - The Moon and the Beast "
+                "BEASTARS - s1e01 - The Moon and the Beast "
                 "[NH Bluray-1080p,10bit,x264,AAC].mkv"
             )
         )
@@ -1962,6 +1989,72 @@ class TestWriteManifest:
         finally:
             path.unlink(missing_ok=True)
 
+    def test_quotes_in_episode_title(self, tmp_path):
+        """Regression: quotes in episode titles must be escaped in KDL output."""
+        sf = anime.SourceFile(
+            path=tmp_path / "src.mkv", parsed_episode=8, parsed_season=2
+        )
+        # Dest filename contains double quotes (from TVDB episode title)
+        dest_path = (
+            tmp_path
+            / "series"
+            / "Season 02"
+            / 'Show - s2e08 - "Okonomiyaki" Means "I Love You" [G Web].mkv'
+        )
+        entry = anime.ManifestEntry(source=sf, dest_path=dest_path)
+        info = anime.AnimeInfo(
+            anidb_id=1,
+            tvdb_id=None,
+            title_ja="テスト",
+            title_en="Test",
+            year=2024,
+            episodes=[],
+        )
+        path = anime._write_manifest([entry], info, "Test", tmp_path / "series")
+        try:
+            content = path.read_text(encoding="utf-8")
+            # Must be valid KDL — parsing should not raise
+            import kdl
+
+            kdl.parse(content)
+            # Escaped quotes should be present
+            assert '\\"Okonomiyaki\\"' in content
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_quotes_roundtrip(self, tmp_path):
+        """Manifest with quoted episode titles survives write→parse roundtrip."""
+        sf = anime.SourceFile(
+            path=tmp_path / "src.mkv", parsed_episode=1, parsed_season=1
+        )
+        dest_name = 'Show - s1e01 - "Hello" World [G Web].mkv'
+        dest_path = tmp_path / "series" / "Season 01" / dest_name
+        entry = anime.ManifestEntry(source=sf, dest_path=dest_path)
+        info = anime.AnimeInfo(
+            anidb_id=1,
+            tvdb_id=None,
+            title_ja="テスト",
+            title_en="Test",
+            year=2024,
+            episodes=[],
+        )
+        manifest_path = anime._write_manifest(
+            [entry], info, "Test", tmp_path / "series"
+        )
+        try:
+            series_dir = tmp_path / "series"
+            entries, errors = anime._parse_manifest(
+                manifest_path,
+                {str(sf.path): sf},
+                series_dir,
+            )
+            assert len(errors) == 0
+            assert len(entries) == 1
+            # The parsed dest filename should have the quotes restored
+            assert '"Hello"' in entries[0][1].name
+        finally:
+            manifest_path.unlink(missing_ok=True)
+
 
 class TestParseManifest:
     """Tests for KDL manifest parsing."""
@@ -2214,6 +2307,125 @@ class TestConflictResolution:
         assert "10bit" in summary
         assert "HDR" in summary
         assert "flac" in summary
+
+
+class TestMatchToDownloads:
+    """Tests for enriching source files with download metadata."""
+
+    def test_enriches_release_group(self, tmp_path):
+        # Source file (Sonarr name, weak metadata)
+        src = tmp_path / "source" / "Show - s01e01 - Title [VARYG WEBDL-1080p].mkv"
+        src.parent.mkdir(parents=True)
+        src.write_bytes(b"x" * 100)
+
+        # Download file (original name, rich metadata)
+        dl = tmp_path / "downloads" / "[FLE] Show - 01 [BD 1080p] [ABCD1234].mkv"
+        dl.parent.mkdir(parents=True)
+        dl.write_bytes(b"x" * 100)  # same size
+
+        index = anime._build_download_index(tmp_path / "downloads")
+        parsed = anime._parse_files([src])
+        enriched = anime._match_to_downloads(parsed, index, series_name="Show")
+
+        assert len(enriched) == 1
+        assert enriched[0].release_group == "FLE"
+        assert enriched[0].hash_code == "ABCD1234"
+        # Path still points to source
+        assert enriched[0].path == src
+
+    def test_picks_closest_size(self, tmp_path):
+        src = tmp_path / "source" / "Show - s01e01 - Title.mkv"
+        src.parent.mkdir(parents=True)
+        src.write_bytes(b"x" * 1000)
+
+        # Two downloads for same episode, different sizes
+        dl1 = tmp_path / "dl" / "[A] Show - 01 [720p].mkv"
+        dl1.parent.mkdir(parents=True)
+        dl1.write_bytes(b"x" * 500)  # wrong size
+
+        dl2 = tmp_path / "dl" / "[B] Show - 01 [1080p].mkv"
+        dl2.write_bytes(b"x" * 1000)  # same size
+
+        index = anime._build_download_index(tmp_path / "dl")
+        parsed = anime._parse_files([src])
+        enriched = anime._match_to_downloads(parsed, index, series_name="Show")
+
+        assert enriched[0].release_group == "B"
+
+    def test_no_match_preserves_original(self, tmp_path):
+        src = tmp_path / "Show - s01e05 - Title.mkv"
+        src.write_bytes(b"data")
+
+        parsed = anime._parse_files([src])
+        original_group = parsed[0].release_group
+        enriched = anime._match_to_downloads(parsed, anime.DownloadIndex())
+
+        assert enriched[0].release_group == original_group
+        assert enriched[0].path == src
+
+    def test_build_download_index(self, tmp_path):
+        (tmp_path / "[G] Show - S01E01.mkv").write_bytes(b"a")
+        (tmp_path / "[G] Show - S01E02.mkv").write_bytes(b"b")
+        (tmp_path / "[G] Show - S02E01.mkv").write_bytes(b"c")
+        (tmp_path / "not-media.txt").write_bytes(b"d")
+
+        index = anime._build_download_index(tmp_path)
+        assert index.file_count == 3
+        assert len(index.by_series) > 0
+
+    def test_download_index_file_count(self, tmp_path):
+        """Regression: file_count must be accessible for progress display."""
+        (tmp_path / "[G] Show - S01E01.mkv").write_bytes(b"a")
+        (tmp_path / "[G] Show - S01E02.mkv").write_bytes(b"b")
+        index = anime._build_download_index(tmp_path)
+        assert index.file_count == 2
+
+    def test_series_aware_matching(self, tmp_path):
+        """Series-specific match is preferred over global episode match."""
+        src = tmp_path / "source" / "ShowA - s01e01 - Title.mkv"
+        src.parent.mkdir(parents=True)
+        src.write_bytes(b"x" * 100)
+
+        # Download for ShowA
+        dl_a = tmp_path / "dl" / "[GroupA] ShowA - 01 [1080p].mkv"
+        dl_a.parent.mkdir(parents=True)
+        dl_a.write_bytes(b"x" * 100)
+
+        # Download for ShowB (same episode number, same size)
+        dl_b = tmp_path / "dl" / "[GroupB] ShowB - 01 [1080p].mkv"
+        dl_b.write_bytes(b"x" * 100)
+
+        index = anime._build_download_index(tmp_path / "dl")
+        parsed = anime._parse_files([src])
+        enriched = anime._match_to_downloads(parsed, index, series_name="ShowA")
+        assert enriched[0].release_group == "GroupA"
+
+    def test_no_cross_series_match(self, tmp_path):
+        """Regression: downloads from a different series must not match."""
+        src = tmp_path / "source" / "ShowA - s01e01 - Title.mkv"
+        src.parent.mkdir(parents=True)
+        src.write_bytes(b"x" * 100)
+
+        # Download is for a different show with same episode number
+        dl = tmp_path / "dl" / "[Group] ShowB - S01E01 [1080p].mkv"
+        dl.parent.mkdir(parents=True)
+        dl.write_bytes(b"x" * 100)  # same size
+
+        index = anime._build_download_index(tmp_path / "dl")
+        parsed = anime._parse_files([src])
+        enriched = anime._match_to_downloads(parsed, index, series_name="ShowA")
+        # Should NOT pick up ShowB's release group
+        assert enriched[0].release_group != "Group"
+        assert enriched[0].matched_download is None
+
+    def test_unseasoned_source_not_enriched(self, tmp_path):
+        """Files without season/episode are passed through unchanged."""
+        src = tmp_path / "special.mkv"
+        src.write_bytes(b"data")
+
+        parsed = anime._parse_files([src])
+        enriched = anime._match_to_downloads(parsed, anime.DownloadIndex())
+        assert len(enriched) == 1
 
 
 class TestMatchFilesToSeason:
