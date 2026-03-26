@@ -1,0 +1,364 @@
+"""KDL manifest writing, parsing, and execution for batch triage."""
+
+from __future__ import annotations
+
+import errno
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+import kdl
+
+from etp_lib.conflicts import (
+    copy_reflink,
+    handle_conflict,
+    prompt_value,
+    verify_hash,
+)
+from etp_lib.naming import format_episode_filename, format_series_dirname
+from etp_lib.types import AnimeInfo, ManifestEntry, SourceFile
+
+
+def escape_kdl(s: str) -> str:
+    """Escape a string for use inside a KDL quoted value."""
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+_MAX_FILENAME_BYTES = 255  # ext4/Btrfs filename length limit
+
+
+def build_manifest_entries(
+    parsed: list[SourceFile],
+    info: AnimeInfo,
+    concise_name: str,
+    series_dir: Path,
+    verbose: bool,
+    analyze_file_fn=None,
+) -> list[ManifestEntry]:
+    """Build manifest entries for all files without per-file prompts.
+
+    Runs mediainfo, verifies CRC32 hashes, matches episodes, and constructs
+    destination paths using defaults.
+    """
+    entries: list[ManifestEntry] = []
+    total = len(parsed)
+    for i, sf in enumerate(parsed, 1):
+        print(f"  Analyzing {i}/{total}: {sf.path.name}")
+
+        # Analyze with mediainfo
+        try:
+            if analyze_file_fn is not None:
+                sf.media = analyze_file_fn(sf.path)
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            if verbose:
+                print(f"    warning: mediainfo failed: {e}")
+
+        # Verify CRC32 hash -- on mismatch, clear hash so it's stripped from dest
+        hash_failed = False
+        hash_result = verify_hash(sf)
+        if hash_result is not None:
+            ok, actual = hash_result
+            if not ok:
+                print(f"    CRC32 MISMATCH: expected {sf.hash_code}, got {actual}")
+                sf.hash_code = ""
+                hash_failed = True
+            elif verbose:
+                print(f"    CRC32 verified: {sf.hash_code}")
+
+        # Match episode
+        ep_number = sf.parsed_episode
+        season = sf.parsed_season or 1
+        is_special = False
+        special_tag = ""
+        episode_name = ""
+
+        if ep_number is not None:
+            episode_name = info.find_episode_title(ep_number, season)
+
+        # Build destination path
+        if ep_number is None:
+            # Can't auto-match -- mark as TODO
+            placeholder = format_episode_filename(
+                concise_name=concise_name,
+                season=season,
+                episode=0,
+                episode_name="EPISODE_NAME",
+                source=sf,
+                is_special=is_special,
+                special_tag=special_tag,
+            )
+            placeholder = placeholder.replace("s1e00", "s1eXX")
+            dest_dir = series_dir / f"Season {season:02d}"
+            entries.append(
+                ManifestEntry(
+                    source=sf,
+                    dest_path=dest_dir / placeholder,
+                    is_todo=True,
+                    hash_failed=hash_failed,
+                )
+            )
+        else:
+            filename = format_episode_filename(
+                concise_name=concise_name,
+                season=season,
+                episode=ep_number,
+                episode_name=episode_name,
+                source=sf,
+                is_special=is_special,
+                special_tag=special_tag,
+            )
+            if is_special:
+                dest_dir = series_dir / "Specials"
+            else:
+                dest_dir = series_dir / f"Season {season:02d}"
+            entries.append(
+                ManifestEntry(
+                    source=sf,
+                    dest_path=dest_dir / filename,
+                    hash_failed=hash_failed,
+                )
+            )
+
+    return entries
+
+
+def write_manifest(
+    entries: list[ManifestEntry],
+    info: AnimeInfo,
+    concise_name: str,
+    series_dir: Path,
+) -> Path:
+    """Write manifest entries to a KDL file for editing."""
+    provider = ""
+    if info.anidb_id is not None:
+        provider = f"AniDB: {info.anidb_id}"
+    elif info.tvdb_id is not None:
+        provider = f"TheTVDB: {info.tvdb_id}"
+
+    dirname = format_series_dirname(info.title_ja, info.title_en, info.year)
+
+    # Group entries by season/specials
+    groups: dict[str, list[ManifestEntry]] = {}
+    for entry in entries:
+        # Determine group key from the destination path
+        dest_parent = entry.dest_path.parent.name
+        if dest_parent == "Specials":
+            key = "specials"
+        else:
+            # "Season 01" -> season number
+            key = dest_parent
+        groups.setdefault(key, []).append(entry)
+
+    # Build KDL document as text (easier than constructing Node objects
+    # for the header comments)
+    lines: list[str] = []
+    lines.append("// etp-anime triage manifest")
+    lines.append(f"// Series: {dirname}")
+    if provider:
+        lines.append(f"// {provider}")
+    lines.append(f"// Series dir: {series_dir}")
+    lines.append("//")
+    lines.append(
+        "// Edit destination filenames. Delete or /- comment out entries to skip."
+    )
+    lines.append("// Source filenames are for reference only — only dest is used.")
+    lines.append("")
+
+    for group_key in sorted(groups.keys()):
+        group_entries = sorted(
+            groups[group_key], key=lambda e: e.source.parsed_episode or 0
+        )
+        if group_key == "specials":
+            lines.append("specials {")
+        else:
+            # "Season 01" -> season 1
+            season_num = group_key.replace("Season ", "").lstrip("0") or "0"
+            lines.append(f"season {season_num} {{")
+
+        for entry in group_entries:
+            ep_num = entry.source.parsed_episode or 0
+            tag = "(todo)" if entry.is_todo else ""
+            if entry.hash_failed:
+                lines.append("  // CRC32 MISMATCH — hash stripped from destination")
+            lines.append(f"  {tag}episode {ep_num} {{")
+            lines.append(f'    source "{escape_kdl(str(entry.source.path))}"')
+            if entry.source.matched_download is not None:
+                lines.append(
+                    f'    downloaded "{escape_kdl(str(entry.source.matched_download))}"'
+                )
+            dest_name = entry.dest_path.name
+            if len(dest_name.encode("utf-8")) > _MAX_FILENAME_BYTES:
+                lines.append(
+                    f"    // WARNING: filename is"
+                    f" {len(dest_name.encode('utf-8'))} bytes"
+                    f" (max {_MAX_FILENAME_BYTES}) — shorten before saving"
+                )
+            lines.append(f'    dest "{escape_kdl(dest_name)}"')
+            lines.append("  }")
+
+        lines.append("}")
+        lines.append("")
+
+    fd, path = tempfile.mkstemp(suffix=".kdl", prefix="etp-triage-")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+        f.write("\n")
+
+    return Path(path)
+
+
+def open_editor(manifest_path: Path) -> bool:
+    """Open the manifest in the user's editor. Returns True on success."""
+    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+    try:
+        result = subprocess.run([editor, str(manifest_path)])
+        return result.returncode == 0
+    except FileNotFoundError:
+        print(f"  error: editor '{editor}' not found")
+        return False
+
+
+def parse_manifest(
+    manifest_path: Path,
+    known_sources: dict[str, SourceFile],
+    series_dir: Path,
+) -> tuple[list[tuple[SourceFile, Path]], list[str]]:
+    """Parse an edited KDL manifest file.
+
+    Returns ``(entries, errors)``. If errors is non-empty, the manifest has
+    problems the user should fix.
+    """
+    text = manifest_path.read_text(encoding="utf-8")
+    try:
+        doc = kdl.parse(text)
+    except kdl.ParseError as e:
+        return [], [f"  KDL parse error: {e}"]
+
+    entries: list[tuple[SourceFile, Path]] = []
+    errors: list[str] = []
+
+    for group_node in doc.nodes:
+        # Determine destination subdirectory
+        if group_node.name == "specials":
+            dest_subdir = series_dir / "Specials"
+        elif group_node.name == "season" and group_node.args:
+            season_num = int(group_node.args[0])
+            dest_subdir = series_dir / f"Season {season_num:02d}"
+        else:
+            continue
+
+        for ep_node in group_node.nodes:
+            if ep_node.name != "episode":
+                continue
+
+            # Check for (todo) tag
+            if ep_node.tag == "todo":
+                errors.append(
+                    f"  episode {ep_node.args[0] if ep_node.args else '?'}"
+                    f" in {group_node.name}: unresolved (todo) entry"
+                )
+                continue
+
+            # Extract source and dest from children
+            source_name = ""
+            dest_name = ""
+            for child in ep_node.nodes:
+                if child.name == "source" and child.args:
+                    source_name = str(child.args[0])
+                elif child.name == "dest" and child.args:
+                    dest_name = str(child.args[0])
+
+            if not dest_name:
+                errors.append(
+                    f"  episode {ep_node.args[0] if ep_node.args else '?'}"
+                    f" in {group_node.name}: missing dest"
+                )
+                continue
+
+            sf = known_sources.get(source_name)
+            if sf is None:
+                errors.append(
+                    f"  episode in {group_node.name}: unknown source '{source_name}'"
+                )
+                continue
+
+            entries.append((sf, dest_subdir / dest_name))
+
+    return entries, errors
+
+
+def _check_filename_length(dest_path: Path) -> Path:
+    """Check if the destination filename exceeds the filesystem limit.
+
+    If too long, prompts the user to edit the filename until it fits.
+    Returns the (possibly updated) destination path.
+    """
+    while len(dest_path.name.encode("utf-8")) > _MAX_FILENAME_BYTES:
+        name_len = len(dest_path.name.encode("utf-8"))
+        print(f"\n  ERROR: filename is {name_len} bytes (max {_MAX_FILENAME_BYTES}):")
+        print(f"    {dest_path.name}")
+        new_name = prompt_value("  Enter shorter filename", dest_path.name)
+        dest_path = dest_path.parent / new_name
+    return dest_path
+
+
+def execute_manifest(
+    entries: list[tuple[SourceFile, Path]],
+    dry_run: bool,
+    verbose: bool,
+    parse_source_filename_fn=None,
+    analyze_file_fn=None,
+) -> tuple[int, int, list[Path]]:
+    """Execute the parsed manifest: copy each file to its destination.
+
+    Returns ``(success, failed, triaged_paths)`` -- triaged_paths includes
+    files that were kept, skipped, or copied (all are marked as processed).
+    """
+    success = 0
+    failed = 0
+    triaged_paths: list[Path] = []
+
+    for sf, dest_path in entries:
+        # Check filename length before attempting any operations
+        dest_path = _check_filename_length(dest_path)
+
+        if verbose:
+            print(f"  {sf.path.name} -> {dest_path}")
+
+        # Check for existing file at destination
+        if not dry_run:
+            action = handle_conflict(
+                sf,
+                dest_path,
+                parse_source_filename_fn=parse_source_filename_fn,
+                analyze_file_fn=analyze_file_fn,
+            )
+            if action in ("keep", "skip"):
+                triaged_paths.append(sf.path)
+                if action == "skip":
+                    failed += 1
+                else:
+                    success += 1
+                continue
+
+        try:
+            if copy_reflink(sf.path, dest_path, dry_run=dry_run):
+                success += 1
+                triaged_paths.append(sf.path)
+            else:
+                failed += 1
+        except OSError as e:
+            if e.errno == errno.ENAMETOOLONG:
+                dest_path = _check_filename_length(dest_path)
+                if copy_reflink(sf.path, dest_path, dry_run=dry_run):
+                    success += 1
+                    triaged_paths.append(sf.path)
+                else:
+                    failed += 1
+            else:
+                print(f"  error: {e}", file=sys.stderr)
+                failed += 1
+
+    return success, failed, triaged_paths

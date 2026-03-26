@@ -1477,7 +1477,7 @@ def _load_anidb_titles(xml_path: str) -> list[str]:
 
     try:
         tree = ET.parse(xml_path)
-    except (ET.ParseError, OSError):
+    except ET.ParseError, OSError:
         return []
 
     root = tree.getroot()
@@ -1497,7 +1497,7 @@ def _load_tvdb_titles(json_path: str) -> list[str]:
     try:
         with open(json_path, encoding="utf-8") as f:
             data = json.load(f)
-    except (ValueError, OSError):
+    except ValueError, OSError:
         return []
 
     titles: list[str] = []

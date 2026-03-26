@@ -16,32 +16,56 @@ Environment:   ~/.config/euterpe-tools/anime.env (API credentials)
 from __future__ import annotations
 
 import argparse
-import errno
-import gzip
 import json
 import os
-import platform
 import re
 import shutil
 import subprocess
 import sys
-import tempfile
-import time
-import urllib.error
-import urllib.request
-import xml.etree.ElementTree as ET
-import zlib
 from collections import Counter
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import kdl
 
 from etp_lib import media_parser
+from etp_lib.anidb import fetch_anidb_anime
+from etp_lib.conflicts import (
+    copy_reflink,
+    handle_conflict,
+    prompt_confirm,
+    prompt_value,
+    verify_hash,
+)
+from etp_lib.manifest import (
+    build_manifest_entries,
+    escape_kdl,
+    execute_manifest,
+    open_editor,
+    parse_manifest,
+    write_manifest,
+)
+from etp_lib.mediainfo import analyze_file
+from etp_lib.naming import (
+    build_metadata_block,  # noqa: F401 (re-export for tests)
+    format_episode_filename,
+    format_series_dirname,
+)
+from etp_lib.paths import cache_dir as _cache_dir
+from etp_lib.tvdb import fetch_tvdb_series
+from etp_lib.types import (
+    AnimeConfig,
+    AnimeInfo,
+    DEFAULT_ANIME_SOURCE_DIR,  # noqa: F401 (re-export for tests)
+    DEFAULT_DEST_DIR,  # noqa: F401 (re-export for tests)
+    DEFAULT_DOWNLOADS_DIR,  # noqa: F401 (re-export for tests)
+    DownloadIndex,
+    Episode,  # noqa: F401 (re-export for tests)
+    GroupDefaults,
+    MediaInfo,  # noqa: F401 (re-export for tests)
+    SourceFile,
+)
 
 VERSION = "0.1.0"
-
-_IS_LINUX = platform.system() == "Linux"
 
 
 def _load_env_file() -> None:
@@ -66,118 +90,9 @@ def _load_env_file() -> None:
             os.environ.setdefault(key.strip(), value.strip())
 
 
-_CACHE_MAX_AGE_SECONDS = 86400  # 24 hours
-_TVDB_MAX_PAGES = 100  # safety limit for paginated fetches
-
-# ---------------------------------------------------------------------------
-# Default paths (NAS layout)
-# ---------------------------------------------------------------------------
-
-DEFAULT_DOWNLOADS_DIR = Path("/volume1/docker/pvr/data/downloads")
-DEFAULT_ANIME_SOURCE_DIR = Path("/volume1/docker/pvr/data/anime")
-DEFAULT_DEST_DIR = Path("/volume1/video/anime")
-
-# ---------------------------------------------------------------------------
-# Data classes
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class Episode:
-    number: int
-    ep_type: str  # "regular", "special", "credit", "trailer", "parody", "other"
-    title_en: str
-    title_ja: str
-    special_tag: str  # "S1", "CM01", "NCOP1", "NCED3", "T1", etc.
-    season: int = 1  # TVDB season number (AniDB is always 1)
-
-
-@dataclass
-class AnimeInfo:
-    anidb_id: int | None
-    tvdb_id: int | None
-    title_ja: str
-    title_en: str
-    year: int
-    episodes: list[Episode] = field(default_factory=list)
-
-
-@dataclass
-class AudioTrack:
-    codec: str  # Normalized: "aac", "flac", "opus", "AC3", "DTS", etc.
-    language: str  # ISO 639: "ja", "en", etc.
-    title: str
-    is_commentary: bool
-
-
-@dataclass
-class MediaInfo:
-    video_codec: str  # "HEVC", "AVC", "AV1", "XviD"
-    resolution: str  # "1080p", "720p", "2160p", etc.
-    width: int
-    height: int
-    bit_depth: int
-    hdr_type: str  # "", "HDR", "UHD", "DoVi"
-    audio_tracks: list[AudioTrack] = field(default_factory=list)
-    encoding_lib: str = ""  # "x264", "x265", or ""
-
-
-@dataclass
-class SourceFile:
-    path: Path
-    release_group: str = ""
-    source_type: str = ""  # "BD", "Web"
-    is_remux: bool = False
-    hash_code: str = ""  # e.g. "ABCD1234"
-    parsed_episode: int | None = None
-    parsed_season: int | None = None
-    version: int | None = None  # e.g. 2 for "v2" releases
-    media: MediaInfo | None = None
-    matched_download: Path | None = None  # download file that enriched this entry
-
-
-@dataclass
-class GroupDefaults:
-    """Sticky defaults that carry across files within a group.
-
-    When processing multiple files together (e.g. triage mode), values
-    confirmed for one file become the defaults offered for the next.
-    """
-
-    release_group: str = ""
-    source_type: str = ""
-
-
-@dataclass
-class ManifestEntry:
-    """One line in the triage manifest: source file to destination path."""
-
-    source: SourceFile
-    dest_path: Path
-    is_todo: bool = False
-    hash_failed: bool = False
-
-
-@dataclass
-class AnimeConfig:
-    """Configuration loaded from anime-ingestion.kdl."""
-
-    downloads_dir: Path = field(default_factory=lambda: DEFAULT_DOWNLOADS_DIR)
-    anime_source_dir: Path = field(default_factory=lambda: DEFAULT_ANIME_SOURCE_DIR)
-    anime_dest_dir: Path = field(default_factory=lambda: DEFAULT_DEST_DIR)
-    series_mappings: dict[str, list[tuple[str, int]]] = field(default_factory=dict)
-    # series directory name → concise name from parser (for title matching)
-    concise_names: dict[str, str] = field(default_factory=dict)
-
-
 # ---------------------------------------------------------------------------
 # Configuration (anime-ingestion.kdl)
 # ---------------------------------------------------------------------------
-
-
-def _escape_kdl(s: str) -> str:
-    """Escape a string for use inside a KDL quoted value."""
-    return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def load_anime_config(path: Path | None = None) -> AnimeConfig:
@@ -239,7 +154,7 @@ def save_series_mapping(
     concise_name: str = "",
     path: Path | None = None,
 ) -> None:
-    """Append a series→ID mapping to the config file.
+    """Append a series->ID mapping to the config file.
 
     *concise_name* is the parser-extracted series name (without year,
     quality tags, etc.) stored as a ``concise`` property so that future
@@ -254,10 +169,10 @@ def save_series_mapping(
 
     concise_line = ""
     if concise_name and concise_name != name:
-        concise_line = f'\n  concise "{_escape_kdl(concise_name)}"'
+        concise_line = f'\n  concise "{escape_kdl(concise_name)}"'
 
     line = (
-        f'\nseries "{_escape_kdl(name)}" {{\n'
+        f'\nseries "{escape_kdl(name)}" {{\n'
         f"  {provider} {provider_id}{concise_line}\n"
         f"}}\n"
     )
@@ -268,7 +183,7 @@ def save_series_mapping(
 def lookup_series_ids(name: str, config: AnimeConfig) -> list[tuple[str, int]]:
     """Look up series IDs from config mappings by name (case-insensitive).
 
-    Returns a list of ``(provider, id)`` tuples — multiple entries for
+    Returns a list of ``(provider, id)`` tuples -- multiple entries for
     multi-season AniDB series.
     """
     name_lower = name.lower()
@@ -299,7 +214,7 @@ def _maybe_save_mapping(
     dry_run: bool,
     concise_name: str = "",
 ) -> None:
-    """Save a series→ID mapping to config if this specific ID is not already saved."""
+    """Save a series->ID mapping to config if this specific ID is not already saved."""
     if dry_run:
         return
     entry = (provider, pid)
@@ -311,180 +226,8 @@ def _maybe_save_mapping(
 
 
 # ---------------------------------------------------------------------------
-# Mediainfo parsing
-# ---------------------------------------------------------------------------
-
-# Map mediainfo Format values to our normalized codec names
-_VIDEO_CODEC_MAP: dict[str, str] = {
-    "HEVC": "HEVC",
-    "AVC": "AVC",
-    "AV1": "AV1",
-    "MPEG-4 Visual": "XviD",  # Usually XviD for anime
-    "VP9": "VP9",
-    "MPEG Video": "MPEG2",
-}
-
-# Audio codec normalization: open-source lowercase, proprietary uppercase
-_AUDIO_CODEC_MAP: dict[str, str] = {
-    "AAC": "aac",
-    "FLAC": "flac",
-    "Opus": "opus",
-    "Vorbis": "vorbis",
-    "PCM": "pcm",
-    "AC-3": "AC3",
-    "E-AC-3": "AC3",
-    "DTS": "DTS",
-    "DTS-HD": "DTS",
-    "DTS-HD MA": "DTS",
-    "DTS-HD Master Audio": "DTS",
-    "MLP FBA": "DTS",  # TrueHD/Atmos shows as MLP FBA in some cases
-    "TrueHD": "AC3",  # Dolby TrueHD → treat as AC3 family
-    "MP3": "mp3",
-    "MPEG Audio": "mp3",
-    "mp2": "mp2",
-}
-
-
-def _resolution_shorthand(width: int, height: int) -> str:
-    """Convert width x height to shorthand like '1080p', '720p', '4K'."""
-    if height >= 2160 or width >= 3840:
-        return "4K"
-    if height >= 1080 or width >= 1920:
-        return "1080p"
-    if height >= 720 or width >= 1280:
-        return "720p"
-    if height >= 540 or width >= 960:
-        return "540p"
-    if height >= 480 or width >= 720:
-        return "480p"
-    return f"{height}p"
-
-
-def _detect_hdr(video_track: dict) -> str:
-    """Detect HDR type from mediainfo video track."""
-    hdr_format = video_track.get("HDR_Format", "")
-    hdr_compat = video_track.get("HDR_Format_Compatibility", "")
-    transfer = video_track.get("transfer_characteristics", "")
-
-    if "Dolby Vision" in hdr_format:
-        if "HDR10" in hdr_compat:
-            return "DoVi,HDR"
-        return "DoVi"
-
-    if "HDR10+" in hdr_format or "HDR10" in hdr_format:
-        return "HDR"
-
-    if "SMPTE ST 2084" in transfer or "PQ" in transfer:
-        return "HDR"
-
-    if "HLG" in hdr_format or "HLG" in transfer:
-        return "HDR"
-
-    # For 4K content without explicit HDR metadata
-    return ""
-
-
-def _normalize_audio_codec(format_str: str) -> str:
-    """Normalize mediainfo audio Format to our naming convention."""
-    # Try exact match first
-    if format_str in _AUDIO_CODEC_MAP:
-        return _AUDIO_CODEC_MAP[format_str]
-
-    # Try prefix matching for variants like "DTS XLL" etc.
-    for prefix in ("DTS", "AC-3", "E-AC-3", "AAC", "MLP"):
-        if format_str.startswith(prefix):
-            return _AUDIO_CODEC_MAP.get(prefix, format_str)
-
-    return format_str.lower()
-
-
-def _detect_encoding_lib(video_track: dict) -> str:
-    """Detect x264/x265 from encoding library metadata."""
-    lib_name = video_track.get("Encoded_Library_Name", "")
-    lib_full = video_track.get("Encoded_Library", "")
-    writing_lib = video_track.get("Writing_library", "")
-
-    for field_val in (lib_name, lib_full, writing_lib):
-        val = field_val.lower()
-        if "x264" in val or "libx264" in val:
-            return "x264"
-        if "x265" in val or "libx265" in val:
-            return "x265"
-
-    return ""
-
-
-def parse_mediainfo_json(data: dict) -> MediaInfo:
-    """Parse mediainfo JSON output into a MediaInfo dataclass."""
-    tracks = data.get("media", {}).get("track", [])
-
-    video_codec = ""
-    resolution = ""
-    width = 0
-    height = 0
-    bit_depth = 8
-    hdr_type = ""
-    encoding_lib = ""
-    audio_tracks: list[AudioTrack] = []
-
-    for track in tracks:
-        track_type = track.get("@type", "")
-
-        if track_type == "Video":
-            raw_format: str = track.get("Format", "")
-            video_codec = _VIDEO_CODEC_MAP.get(raw_format, raw_format)
-            width = int(track.get("Width", 0))
-            height = int(track.get("Height", 0))
-            bit_depth = int(track.get("BitDepth", 8))
-            resolution = _resolution_shorthand(width, height)
-            hdr_type = _detect_hdr(track)
-            encoding_lib = _detect_encoding_lib(track)
-
-        elif track_type == "Audio":
-            raw_format = track.get("Format", "")
-            codec = _normalize_audio_codec(raw_format)
-            language = track.get("Language", "")
-            title = track.get("Title", "")
-            is_commentary = bool(_RE_COMMENTARY.search(title))
-            audio_tracks.append(
-                AudioTrack(
-                    codec=codec,
-                    language=language,
-                    title=title,
-                    is_commentary=is_commentary,
-                )
-            )
-
-    return MediaInfo(
-        video_codec=video_codec,
-        resolution=resolution,
-        width=width,
-        height=height,
-        bit_depth=bit_depth,
-        hdr_type=hdr_type,
-        audio_tracks=audio_tracks,
-        encoding_lib=encoding_lib,
-    )
-
-
-def analyze_file(path: Path) -> MediaInfo:
-    """Run mediainfo on a file and return parsed MediaInfo."""
-    result = subprocess.run(
-        ["mediainfo", "--Output=JSON", str(path)],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    data = json.loads(result.stdout)
-    return parse_mediainfo_json(data)
-
-
-# ---------------------------------------------------------------------------
 # Source filename parsing
 # ---------------------------------------------------------------------------
-
-# Match: "commentary" as a whole word in audio track titles → no groups
-_RE_COMMENTARY = re.compile(r"\bcommentary\b", re.IGNORECASE)
 
 # Media file extensions (canonical set in media_parser)
 _MEDIA_EXTENSIONS = media_parser._MEDIA_EXTENSIONS
@@ -508,213 +251,8 @@ def parse_source_filename(filename: str) -> SourceFile:
 
 
 # ---------------------------------------------------------------------------
-# Metadata block and episode filename formatting
+# Directory management
 # ---------------------------------------------------------------------------
-
-
-def _unique_audio_codecs(tracks: list[AudioTrack]) -> list[str]:
-    """Return deduplicated non-commentary audio codec names in order."""
-    seen: set[str] = set()
-    codecs: list[str] = []
-    for t in tracks:
-        if not t.is_commentary and t.codec not in seen:
-            seen.add(t.codec)
-            codecs.append(t.codec)
-    return codecs
-
-
-def build_metadata_block(source: SourceFile) -> str:
-    """Build the [...] metadata block for an episode filename.
-
-    Format: ``release-group source,(REMUX,)res,codec,...``
-    The release group and source type are space-separated; all subsequent
-    fields are comma-separated.
-    """
-    if source.media is None:
-        return ""
-
-    media = source.media
-
-    # Prefix part: "group source" (space-separated)
-    # Append version to release group: "MTBB" + v2 → "MTBB(v2)"
-    prefix_parts: list[str] = []
-    if source.release_group:
-        group = source.release_group
-        if source.version is not None:
-            group = f"{group}(v{source.version})"
-        prefix_parts.append(group)
-    # Default to "Web" when no source type detected — ensures the space
-    # separator between group and tech fields is always present
-    source_type = source.source_type or "Web"
-    prefix_parts.append(source_type)
-    prefix = " ".join(prefix_parts)
-
-    # Comma-separated technical metadata
-    tech: list[str] = []
-
-    # REMUX
-    if source.is_remux:
-        tech.append("REMUX")
-
-    # Resolution
-    if media.resolution:
-        tech.append(media.resolution)
-
-    # Video codec
-    if media.video_codec:
-        tech.append(media.video_codec)
-
-    # HDR/UHD/DoVi
-    if media.hdr_type:
-        tech.append(media.hdr_type)
-
-    # 10bit (always for HEVC, also for other codecs with 10-bit)
-    if media.bit_depth >= 10:
-        tech.append("10bit")
-
-    # Encoding library (x264/x265) — only when detected
-    if media.encoding_lib:
-        tech.append(media.encoding_lib)
-
-    # Audio codecs and language detection
-    non_commentary = [t for t in media.audio_tracks if not t.is_commentary]
-    if non_commentary:
-        codecs = _unique_audio_codecs(media.audio_tracks)
-        languages: set[str] = set()
-        for t in non_commentary:
-            if t.language:
-                languages.add(t.language)
-        tech.append("+".join(codecs))
-
-        has_ja = "ja" in languages or "jpn" in languages
-        has_en = "en" in languages or "eng" in languages
-        other_langs = languages - {"ja", "jpn", "en", "eng"}
-
-        if has_ja and has_en and other_langs:
-            tech.append("multi-audio")
-        elif has_ja and has_en:
-            tech.append("dual-audio")
-
-    tech_str = ",".join(tech)
-
-    if prefix and tech_str:
-        return f"{prefix},{tech_str}"
-    return prefix or tech_str
-
-
-def _sanitize_path(name: str) -> str:
-    """Sanitize a string for use in file/directory names.
-
-    Replaces ``/`` with `` - `` and ``:`` with ``-``.
-    """
-    return name.replace("/", " - ").replace(":", "-")
-
-
-def format_episode_filename(
-    concise_name: str,
-    season: int,
-    episode: int,
-    episode_name: str,
-    source: SourceFile,
-    is_movie: bool = False,
-    movie_dir_name: str = "",
-    is_special: bool = False,
-    special_tag: str = "",
-) -> str:
-    """Build the full episode filename."""
-    ext = source.path.suffix or ".mkv"
-    metadata = build_metadata_block(source)
-    meta_str = f" [{metadata}]" if metadata else ""
-    hash_str = f" [{source.hash_code}]" if source.hash_code else ""
-
-    concise_name = _sanitize_path(concise_name)
-    episode_name = _sanitize_path(episode_name)
-    movie_dir_name = _sanitize_path(movie_dir_name)
-
-    if is_movie and not is_special:
-        # Single-file movie: `DirName - complete movie [metadata] [hash].ext`
-        return f"{movie_dir_name} - complete movie{meta_str}{hash_str}{ext}"
-
-    if is_special:
-        # Special: `Name - TAG - Episode Name [metadata] [hash].ext`
-        if episode_name:
-            return (
-                f"{concise_name} - {special_tag} - "
-                f"{episode_name}{meta_str}{hash_str}{ext}"
-            )
-        return f"{concise_name} - {special_tag}{meta_str}{hash_str}{ext}"
-
-    # Regular episode: `Name - sXeYY - Episode Name [metadata] [hash].ext`
-    ep_tag = f"s{season}e{episode:02d}"
-    if episode_name:
-        return f"{concise_name} - {ep_tag} - {episode_name}{meta_str}{hash_str}{ext}"
-    return f"{concise_name} - {ep_tag}{meta_str}{hash_str}{ext}"
-
-
-# ---------------------------------------------------------------------------
-# Interactive prompts
-# ---------------------------------------------------------------------------
-
-
-def prompt_value(label: str, default: str = "") -> str:
-    """Prompt for a value with an optional default."""
-    if default:
-        raw = input(f"{label} [{default}]: ").strip()
-        return raw if raw else default
-    return input(f"{label}: ").strip()
-
-
-def prompt_confirm(message: str, default: bool = True) -> bool:
-    """Prompt for yes/no confirmation."""
-    suffix = "[Y/n]" if default else "[y/N]"
-    raw = input(f"{message} {suffix}: ").strip().lower()
-    if not raw:
-        return default
-    return raw in ("y", "yes")
-
-
-# ---------------------------------------------------------------------------
-# Directory naming
-# ---------------------------------------------------------------------------
-
-
-def _strip_redundant_year(title: str, year: int) -> str:
-    """Strip a trailing `` (YYYY)`` suffix if it matches the series year."""
-    suffix = f" ({year})"
-    if title.endswith(suffix):
-        return title[: -len(suffix)]
-    return title
-
-
-# Hiragana, Katakana, CJK Unified Ideographs, CJK Extension A
-_RE_JAPANESE = re.compile(r"[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBF]")
-
-
-def _has_japanese(text: str) -> bool:
-    """Return True if *text* contains any CJK, hiragana, or katakana characters."""
-    return bool(_RE_JAPANESE.search(text))
-
-
-def format_series_dirname(title_ja: str, title_en: str, year: int) -> str:
-    """Build the series directory name.
-
-    Format is ``JA [EN] (YYYY)`` when both a native Japanese title and a
-    distinct English title exist.  Falls back to ``TITLE (YYYY)`` when:
-    - The Japanese title is empty or romaji (no kanji/kana)
-    - The English title is empty
-    - Both titles are identical
-    """
-    ja = _sanitize_path(_strip_redundant_year(title_ja, year))
-    en = _sanitize_path(_strip_redundant_year(title_en, year))
-
-    ja_is_native = bool(ja) and _has_japanese(ja)
-
-    if ja_is_native and en and ja != en:
-        return f"{ja} [{en}] ({year})"
-
-    # Use whichever title is available; prefer English for readability
-    title = en or ja
-    return f"{title} ({year})"
 
 
 def scan_dest_ids(dest: Path) -> dict[tuple[str, int], Path]:
@@ -737,7 +275,7 @@ def scan_dest_ids(dest: Path) -> dict[tuple[str, int], Path]:
                     raw = id_file.read_text(encoding="utf-8").strip()
                     if raw:
                         result[(provider, int(raw))] = entry
-                except (ValueError, OSError):
+                except ValueError, OSError:
                     pass
     return result
 
@@ -749,7 +287,7 @@ def _ensure_subdirs(
 ) -> None:
     """Create season subdirectories if they don't already exist.
 
-    The Specials directory is not created here — it is created on demand
+    The Specials directory is not created here -- it is created on demand
     by ``copy_reflink`` when a file is actually destined for it.
     """
     if seasons is None:
@@ -806,7 +344,7 @@ def resolve_series_directory(
 ) -> Path:
     """Find or create the series directory using a 3-step lookup.
 
-    1. Check *id_map* for a matching AniDB/TheTVDB ID → use that directory
+    1. Check *id_map* for a matching AniDB/TheTVDB ID -> use that directory
     2. Check if the conventionally-named directory already exists
     3. Prompt the user to pick an existing directory or create a new one
     """
@@ -834,7 +372,7 @@ def resolve_series_directory(
         _write_id_file(conventional, info, dry_run)
         return conventional
 
-    # Step 3: prompt user — can enter an existing directory name or a new name
+    # Step 3: prompt user -- can enter an existing directory name or a new name
     print(f"\n  No existing directory found for: {dirname}")
     raw = prompt_value(
         "  Directory name, path to existing, or Enter to create default", ""
@@ -857,36 +395,8 @@ def resolve_series_directory(
 
 
 # ---------------------------------------------------------------------------
-# AniDB HTTP API client
+# Triage tracking manifest
 # ---------------------------------------------------------------------------
-
-_ANIDB_API_URL = "http://api.anidb.net:9001/httpapi"
-_anidb_last_request: float = 0.0
-
-# AniDB episode type constants
-_ANIDB_EP_REGULAR = "1"
-_ANIDB_EP_SPECIAL = "2"
-_ANIDB_EP_CREDIT = "3"
-_ANIDB_EP_TRAILER = "4"
-_ANIDB_EP_PARODY = "5"
-_ANIDB_EP_OTHER = "6"
-
-_ANIDB_EP_TYPE_MAP = {
-    _ANIDB_EP_REGULAR: "regular",
-    _ANIDB_EP_SPECIAL: "special",
-    _ANIDB_EP_CREDIT: "credit",
-    _ANIDB_EP_TRAILER: "trailer",
-    _ANIDB_EP_PARODY: "parody",
-    _ANIDB_EP_OTHER: "other",
-}
-
-
-def _cache_dir(provider: str) -> Path:
-    """Return a cache directory under $XDG_CACHE_HOME/etp/<provider>."""
-    base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    cache = base / "etp" / provider
-    cache.mkdir(parents=True, exist_ok=True)
-    return cache
 
 
 def _triage_manifest_path() -> Path:
@@ -900,7 +410,7 @@ def _load_triage_manifest() -> set[str]:
     if path.exists():
         try:
             return set(json.loads(path.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, TypeError):
+        except json.JSONDecodeError, TypeError:
             return set()
     return set()
 
@@ -909,595 +419,6 @@ def _save_triage_manifest(copied: set[str]) -> None:
     """Persist the set of copied file paths."""
     path = _triage_manifest_path()
     path.write_text(json.dumps(sorted(copied), ensure_ascii=False), encoding="utf-8")
-
-
-def _anidb_rate_limit() -> None:
-    """Enforce minimum 2-second gap between AniDB requests."""
-    global _anidb_last_request
-    now = time.monotonic()
-    elapsed = now - _anidb_last_request
-    if _anidb_last_request > 0 and elapsed < 2.0:
-        time.sleep(2.0 - elapsed)
-    _anidb_last_request = time.monotonic()
-
-
-def _parse_anidb_xml(xml_text: str, aid: int) -> AnimeInfo:
-    """Parse AniDB anime XML into an AnimeInfo."""
-    root = ET.fromstring(xml_text)
-
-    # Check for error
-    if root.tag == "error":
-        raise ValueError(f"AniDB API error: {root.text}")
-
-    # Titles — collect candidates in a single pass, then pick by priority.
-    # Japanese: ja official > ja main > x-jat main > main fallback
-    # English:  en official > en main
-    ja_official = ""
-    ja_main = ""
-    jat_main = ""
-    en_official = ""
-    en_main = ""
-    main_title_fallback = ""
-    for title_elem in root.findall("titles/title"):
-        lang = title_elem.get("{http://www.w3.org/XML/1998/namespace}lang", "")
-        ttype = title_elem.get("type", "")
-        text = (title_elem.text or "").strip()
-
-        if ttype == "main" and not main_title_fallback:
-            main_title_fallback = text
-
-        if lang == "ja" and ttype == "official" and not ja_official:
-            ja_official = text
-        elif lang == "ja" and ttype == "main" and not ja_main:
-            ja_main = text
-        elif lang == "x-jat" and ttype == "main" and not jat_main:
-            jat_main = text
-
-        if lang == "en" and ttype == "official" and not en_official:
-            en_official = text
-        elif lang == "en" and ttype == "main" and not en_main:
-            en_main = text
-
-    title_ja = ja_official or ja_main or jat_main or main_title_fallback
-    title_en = en_official or en_main
-
-    # Year from startdate
-    year = 0
-    startdate = root.findtext("startdate", "")
-    if startdate and len(startdate) >= 4:
-        try:
-            year = int(startdate[:4])
-        except ValueError:
-            pass
-
-    # Episodes
-    episodes: list[Episode] = []
-    for ep_elem in root.findall("episodes/episode"):
-        epno_elem = ep_elem.find("epno")
-        if epno_elem is None:
-            continue
-
-        ep_type_str = epno_elem.get("type", _ANIDB_EP_REGULAR)
-        ep_type = _ANIDB_EP_TYPE_MAP.get(ep_type_str, "other")
-        epno_text = (epno_elem.text or "").strip()
-
-        # Parse episode number
-        ep_number = 0
-        # Regular episodes are just numbers; specials have letter prefixes
-        num_match = re.search(r"(\d+)", epno_text)
-        if num_match:
-            ep_number = int(num_match.group(1))
-
-        # Build special tag
-        special_tag = ""
-        if ep_type_str != _ANIDB_EP_REGULAR:
-            # Use the raw epno text as the tag (e.g., "S1", "C1", "T1")
-            special_tag = epno_text
-
-        # Episode titles
-        title_en_ep = ""
-        title_ja_ep = ""
-        for title_elem in ep_elem.findall("title"):
-            lang = title_elem.get("{http://www.w3.org/XML/1998/namespace}lang", "")
-            text = (title_elem.text or "").strip()
-            if lang == "en" and not title_en_ep:
-                title_en_ep = text.replace("`", "'")
-            elif lang == "ja" and not title_ja_ep:
-                title_ja_ep = text
-
-        episodes.append(
-            Episode(
-                number=ep_number,
-                ep_type=ep_type,
-                title_en=title_en_ep,
-                title_ja=title_ja_ep,
-                special_tag=special_tag,
-            )
-        )
-
-    # Sort episodes: regulars by number, then specials by tag
-    episodes.sort(key=lambda e: (e.ep_type != "regular", e.number))
-
-    return AnimeInfo(
-        anidb_id=aid,
-        tvdb_id=None,
-        title_ja=title_ja,
-        title_en=title_en,
-        year=year,
-        episodes=episodes,
-    )
-
-
-def fetch_anidb_anime(
-    aid: int,
-    client: str,
-    clientver: int,
-    no_cache: bool = False,
-) -> AnimeInfo:
-    """Fetch anime info from AniDB HTTP API with caching."""
-    cache_file = _cache_dir("anidb") / f"{aid}.xml"
-
-    # Check cache (24h validity)
-    if not no_cache and cache_file.exists():
-        age = time.time() - cache_file.stat().st_mtime
-        if age < _CACHE_MAX_AGE_SECONDS:
-            xml_text = cache_file.read_text(encoding="utf-8")
-            return _parse_anidb_xml(xml_text, aid)
-
-    # Fetch from API
-    _anidb_rate_limit()
-
-    params = f"request=anime&client={client}&clientver={clientver}&protover=1&aid={aid}"
-    url = f"{_ANIDB_API_URL}?{params}"
-
-    req = urllib.request.Request(url)
-    req.add_header("Accept-Encoding", "gzip")
-
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        raw = resp.read()
-        # Decompress if gzip
-        if resp.headers.get("Content-Encoding") == "gzip":
-            raw = gzip.decompress(raw)
-        xml_text = raw.decode("utf-8")
-
-    # Cache the response
-    cache_file.write_text(xml_text, encoding="utf-8")
-
-    return _parse_anidb_xml(xml_text, aid)
-
-
-# ---------------------------------------------------------------------------
-# TheTVDB v4 API client
-# ---------------------------------------------------------------------------
-
-_TVDB_API_BASE = "https://api4.thetvdb.com/v4"
-
-
-def _tvdb_request(endpoint: str, token: str) -> dict:
-    """Make an authenticated GET request to TheTVDB v4 API."""
-    url = f"{_TVDB_API_BASE}{endpoint}"
-    req = urllib.request.Request(url)
-    req.add_header("Authorization", f"Bearer {token}")
-    req.add_header("Accept", "application/json")
-
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def tvdb_login(api_key: str) -> str:
-    """Authenticate with TheTVDB and return a bearer token."""
-    url = f"{_TVDB_API_BASE}/login"
-    payload = json.dumps({"apikey": api_key}).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Accept", "application/json")
-
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    return data["data"]["token"]
-
-
-def _parse_tvdb_json(
-    series_data: dict,
-    episodes_data: list[dict],
-    series_id: int,
-    translations: dict[str, str] | None = None,
-) -> AnimeInfo:
-    """Parse TheTVDB series + episodes JSON into AnimeInfo.
-
-    *translations* is an optional ``{lang: name}`` dict from the
-    ``/series/{id}/translations/{lang}`` endpoint.  When present these
-    canonical names take priority over the primary name and alias list.
-    """
-    name = series_data.get("name", "")
-    aliases = series_data.get("aliases", [])
-    translations = translations or {}
-
-    # Canonical translations are preferred; fall back to primary name / aliases.
-    title_ja = translations.get("jpn") or name
-    title_en = translations.get("eng", "")
-    if not title_en:
-        for alias in aliases:
-            if alias.get("language") == "eng":
-                title_en = alias.get("name", "")
-                break
-
-    year_str = series_data.get("year", "")
-    year = int(year_str) if year_str else 0
-
-    # First aired date as fallback for year
-    if not year:
-        first_aired = series_data.get("firstAired", "")
-        if first_aired and len(first_aired) >= 4:
-            try:
-                year = int(first_aired[:4])
-            except ValueError:
-                pass
-
-    episodes: list[Episode] = []
-    for ep in episodes_data:
-        season_num = ep.get("seasonNumber", 1)
-        ep_num = ep.get("number", 0)
-        ep_name = ep.get("name", "")
-
-        is_special = season_num == 0
-        ep_type = "special" if is_special else "regular"
-        special_tag = f"S{ep_num}" if is_special else ""
-
-        episodes.append(
-            Episode(
-                number=ep_num,
-                ep_type=ep_type,
-                title_en=ep_name,
-                title_ja="",
-                special_tag=special_tag,
-                season=season_num,
-            )
-        )
-
-    episodes.sort(key=lambda e: (e.ep_type != "regular", e.number))
-
-    return AnimeInfo(
-        anidb_id=None,
-        tvdb_id=series_id,
-        title_ja=title_ja,
-        title_en=title_en,
-        year=year,
-        episodes=episodes,
-    )
-
-
-def _fetch_tvdb_translations(
-    series_id: int, token: str, languages: list[str]
-) -> dict[str, str]:
-    """Fetch canonical translated names for a series.
-
-    Returns ``{lang: name}`` for each language that has a translation.
-    Silently skips languages that 404 or have no name.
-    """
-    result: dict[str, str] = {}
-    for lang in languages:
-        try:
-            resp = _tvdb_request(f"/series/{series_id}/translations/{lang}", token)
-            name = resp.get("data", {}).get("name", "")
-            if name:
-                result[lang] = name
-        except urllib.error.HTTPError:
-            pass
-    return result
-
-
-def fetch_tvdb_series(
-    series_id: int,
-    api_key: str,
-    no_cache: bool = False,
-) -> AnimeInfo:
-    """Fetch series info from TheTVDB with caching."""
-    cache_file = _cache_dir("tvdb") / f"{series_id}.json"
-
-    # Check cache (24h validity)
-    if not no_cache and cache_file.exists():
-        age = time.time() - cache_file.stat().st_mtime
-        if age < _CACHE_MAX_AGE_SECONDS:
-            cached = json.loads(cache_file.read_text(encoding="utf-8"))
-            return _parse_tvdb_json(
-                cached["series"],
-                cached["episodes"],
-                series_id,
-                translations=cached.get("translations"),
-            )
-
-    # Login and fetch
-    token = tvdb_login(api_key)
-
-    series_resp = _tvdb_request(f"/series/{series_id}", token)
-    series_data = series_resp.get("data", {})
-
-    # Fetch canonical translations for English and Japanese titles
-    available = series_data.get("nameTranslations", [])
-    want = [lang for lang in ("eng", "jpn") if lang in available]
-    translations = _fetch_tvdb_translations(series_id, token, want)
-
-    # Fetch episodes with English translations when available
-    all_episodes: list[dict] = []
-    page = 0
-    while page < _TVDB_MAX_PAGES:
-        ep_resp = _tvdb_request(
-            f"/series/{series_id}/episodes/default/eng?page={page}", token
-        )
-        ep_data = ep_resp.get("data", {})
-        ep_list = ep_data.get("episodes", [])
-        if not ep_list:
-            break
-        all_episodes.extend(ep_list)
-        page += 1
-
-    # Cache the response (including translations)
-    cache_data = {
-        "series": series_data,
-        "episodes": all_episodes,
-        "translations": translations,
-    }
-    cache_file.write_text(json.dumps(cache_data, ensure_ascii=False), encoding="utf-8")
-
-    return _parse_tvdb_json(series_data, all_episodes, series_id, translations)
-
-
-# ---------------------------------------------------------------------------
-# File operations
-# ---------------------------------------------------------------------------
-
-
-def compute_crc32(path: Path) -> str:
-    """Compute the CRC32 hash of a file, returned as uppercase hex."""
-    crc = 0
-    with path.open("rb") as f:
-        while chunk := f.read(1 << 20):  # 1 MiB chunks
-            crc = zlib.crc32(chunk, crc)
-    return f"{crc & 0xFFFFFFFF:08X}"
-
-
-def verify_hash(source: SourceFile) -> tuple[bool, str] | None:
-    """Verify the CRC32 hash embedded in the filename against the file.
-
-    Returns ``(True, actual_hash)`` if the hash matches,
-    ``(False, actual_hash)`` if it mismatches, or ``None`` if no hash is
-    present in the filename.
-    """
-    if not source.hash_code:
-        return None
-    actual = compute_crc32(source.path)
-    return (actual.upper() == source.hash_code.upper(), actual)
-
-
-@dataclass
-class ConflictInfo:
-    """Describes a conflict between an incoming file and an existing destination."""
-
-    existing_path: Path
-    existing_size: int
-    existing_media: MediaInfo | None
-    incoming_source: SourceFile
-    incoming_dest: Path  # the intended destination filename
-    metadata_matches: bool
-
-
-def _extract_key_metadata(sf: SourceFile) -> tuple[str, str, str, str]:
-    """Extract key metadata elements for comparison: (group, source, codec, audio)."""
-    audio = ""
-    if sf.media and sf.media.audio_tracks:
-        audio = "+".join(_unique_audio_codecs(sf.media.audio_tracks))
-    codec = sf.media.video_codec if sf.media else ""
-    return (sf.release_group, sf.source_type, codec, audio)
-
-
-def check_destination_conflict(
-    source: SourceFile, dest_path: Path, intended_dest: Path | None = None
-) -> ConflictInfo | None:
-    """Check if destination already exists and return conflict info.
-
-    *intended_dest* is the filename the user intends to write (may differ
-    from *dest_path* when fuzzy-matching found an existing file with a
-    different naming convention).
-
-    Runs mediainfo on the existing file to ensure symmetric metadata
-    comparison with the incoming file.
-    """
-    try:
-        existing_size = dest_path.stat().st_size
-    except FileNotFoundError:
-        return None
-
-    # Parse existing filename and analyze with mediainfo for comparison
-    existing_sf = parse_source_filename(dest_path.name)
-    existing_sf.path = dest_path
-    existing_media: MediaInfo | None = None
-    try:
-        existing_media = analyze_file(dest_path)
-        existing_sf.media = existing_media
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
-
-    src_meta = _extract_key_metadata(source)
-    dst_meta = _extract_key_metadata(existing_sf)
-    metadata_matches = src_meta == dst_meta
-
-    return ConflictInfo(
-        existing_path=dest_path,
-        existing_size=existing_size,
-        existing_media=existing_media,
-        incoming_source=source,
-        incoming_dest=intended_dest or dest_path,
-        metadata_matches=metadata_matches,
-    )
-
-
-def _format_size(size: int) -> str:
-    """Format a file size in human-readable form."""
-    if size >= 1 << 30:
-        return f"{size / (1 << 30):.1f} GB"
-    if size >= 1 << 20:
-        return f"{size / (1 << 20):.1f} MB"
-    return f"{size / (1 << 10):.1f} KB"
-
-
-def _format_media_summary(media: MediaInfo | None) -> str:
-    """Format a one-line mediainfo summary."""
-    if media is None:
-        return "(mediainfo unavailable)"
-    parts: list[str] = []
-    if media.video_codec:
-        parts.append(media.video_codec)
-    if media.resolution:
-        parts.append(media.resolution)
-    if media.bit_depth >= 10:
-        parts.append(f"{media.bit_depth}bit")
-    if media.hdr_type:
-        parts.append(media.hdr_type)
-    if media.audio_tracks:
-        codecs = "+".join(_unique_audio_codecs(media.audio_tracks))
-        if codecs:
-            parts.append(codecs)
-    return ", ".join(parts)
-
-
-def resolve_conflict(conflict: ConflictInfo) -> str:
-    """Handle a destination conflict. Returns 'replace', 'keep', or 'skip'.
-
-    For matching metadata with matching CRC32, auto-replaces silently.
-    """
-    if conflict.metadata_matches:
-        # Short-circuit: if file sizes differ, CRC32 can't match
-        incoming_size = conflict.incoming_source.path.stat().st_size
-        if incoming_size == conflict.existing_size:
-            src_crc = compute_crc32(conflict.incoming_source.path)
-            dst_crc = compute_crc32(conflict.existing_path)
-            if src_crc == dst_crc:
-                print(
-                    "  Destination exists with matching encode"
-                    " (CRC32 match) — replacing to fix naming."
-                )
-                return "replace"
-            print("  WARNING: Same encode metadata but CRC32 differs!")
-        else:
-            print("  WARNING: Same encode metadata but file sizes differ!")
-        print(f"    existing: {conflict.existing_path.name}")
-        print(f"         new: {conflict.incoming_dest.name}")
-
-    else:
-        print("  Conflict: destination exists")
-        print(f"    existing: {conflict.existing_path.name}")
-        print(f"         new: {conflict.incoming_dest.name}")
-        print()
-
-        existing_size = _format_size(conflict.existing_size)
-        incoming_size = _format_size(conflict.incoming_source.path.stat().st_size)
-        existing_summary = _format_media_summary(conflict.existing_media)
-        incoming_summary = _format_media_summary(conflict.incoming_source.media)
-        print(f"    Existing: {existing_summary}, {existing_size}")
-        print(f"         New: {incoming_summary}, {incoming_size}")
-
-    print()
-    while True:
-        choice = input("  [k]eep existing  [r]eplace  [s]kip: ").strip().lower()
-        if choice in ("k", "keep"):
-            return "keep"
-        if choice in ("r", "replace"):
-            return "replace"
-        if choice in ("s", "skip"):
-            return "skip"
-        print("  Please enter k, r, or s.")
-
-
-# Matches episode tags like "s1e01", "s01e01", "s1e1" in filenames
-_RE_EP_TAG = re.compile(r"[Ss](\d+)[Ee](\d+)")
-
-
-def _find_existing_episode(dest_path: Path) -> Path | None:
-    """Find an existing file for the same episode in the destination directory.
-
-    Matches by episode tag (sXeYY) with fuzzy season/episode zero-padding,
-    so ``s1e01`` matches ``s01e01`` and vice versa.
-    """
-    dest_dir = dest_path.parent
-    if not dest_dir.is_dir():
-        return None
-
-    # Extract the episode tag from the target filename
-    m = _RE_EP_TAG.search(dest_path.name)
-    if not m:
-        return None
-    target_season = int(m.group(1))
-    target_episode = int(m.group(2))
-
-    # Scan the directory for a file with the same episode
-    for existing in dest_dir.iterdir():
-        if existing == dest_path or not existing.is_file():
-            continue
-        em = _RE_EP_TAG.search(existing.name)
-        if (
-            em
-            and int(em.group(1)) == target_season
-            and int(em.group(2)) == target_episode
-        ):
-            return existing
-
-    return None
-
-
-def handle_conflict(source: SourceFile, dest_path: Path) -> str | None:
-    """Check for and resolve a destination conflict.
-
-    First checks for an exact path match, then does a fuzzy search for
-    an existing file with the same episode tag (handles different
-    zero-padding conventions like s1e01 vs s01e01).
-
-    Returns ``None`` if no conflict, or 'replace'/'keep'/'skip'.
-    When 'replace' is returned, the existing file has already been removed.
-    """
-    # Exact path match
-    conflict = check_destination_conflict(source, dest_path, intended_dest=dest_path)
-
-    # Fuzzy match: same episode, different filename formatting
-    if conflict is None:
-        existing = _find_existing_episode(dest_path)
-        if existing is not None:
-            conflict = check_destination_conflict(
-                source, existing, intended_dest=dest_path
-            )
-
-    if conflict is None:
-        return None
-    action = resolve_conflict(conflict)
-    if action == "replace":
-        conflict.existing_path.unlink()
-    return action
-
-
-def copy_reflink(src: Path, dst: Path, dry_run: bool = False) -> bool:
-    """Copy a file using Btrfs COW reflink."""
-    if dry_run:
-        print(f"  [dry-run] cp --reflink=always {src} -> {dst}")
-        return True
-
-    # Ensure destination directory exists
-    dst.parent.mkdir(parents=True, exist_ok=True)
-
-    if _IS_LINUX:
-        cmd = ["cp", "--reflink=always", str(src), str(dst)]
-    else:
-        print(
-            f"  warning: reflinks not supported on {platform.system()}, "
-            f"using regular copy"
-        )
-        cmd = ["cp", str(src), str(dst)]
-
-    try:
-        subprocess.run(cmd, check=True)
-        return True
-    except subprocess.CalledProcessError as e:
-        print(f"  error: copy failed: {e}", file=sys.stderr)
-        return False
 
 
 # ---------------------------------------------------------------------------
@@ -1548,19 +469,6 @@ def _extract_concise_name(source_files: list[SourceFile]) -> str:
         return ""
     pm = media_parser.parse_component(source_files[0].path.name)
     return pm.series_name
-
-
-@dataclass
-class DownloadIndex:
-    """Index of download files for matching against source files.
-
-    Files are indexed by both a normalized series name key and by
-    (season, episode) within each series, enabling series-aware matching.
-    """
-
-    # series_key → [(season, episode, path, size)]
-    by_series: dict[str, list[tuple[int, int, Path, int]]] = field(default_factory=dict)
-    file_count: int = 0
 
 
 def _build_download_index(downloads_dir: Path) -> DownloadIndex:
@@ -1687,8 +595,6 @@ def _match_to_downloads(
         best_sf: SourceFile | None = None
 
         # Pass 1: exact (season, episode) match.
-        # Exact tuple match naturally prevents season 0 (TVDB specials)
-        # from matching regular seasons.
         key = (sf.parsed_season, sf.parsed_episode)
         candidates = series_by_ep.get(key, [])
         ep_best = _best_size_match(candidates, src_size) if candidates else None
@@ -1700,10 +606,6 @@ def _match_to_downloads(
                 best_sf = dl_sf
 
         # Pass 2: exact-size + matching release group across all entries.
-        # Handles DVD→aired order renumbering where episode numbers differ
-        # but the file contents (and therefore size) are identical.
-        # Skip for season 0 (specials) — they should only match via
-        # exact episode key, not via size fallback.
         if best is None and src_group and sf.parsed_season != 0:
             size_candidates = series_by_size.get(src_size, [])
             for dl_path, _dl_season, _dl_ep in size_candidates:
@@ -1749,9 +651,9 @@ def _extract_group_name(f: Path, source_dirs: list[Path]) -> str:
         except ValueError:
             continue
         if len(rel.parts) > 1:
-            # In a subdirectory — use the immediate subdirectory name
+            # In a subdirectory -- use the immediate subdirectory name
             return _extract_series_name(rel.parts[0])
-    # Directly in source dir — use the filename
+    # Directly in source dir -- use the filename
     return _extract_series_name(f.name)
 
 
@@ -1937,14 +839,6 @@ def _parse_files(files: list[Path]) -> list[SourceFile]:
     return parsed
 
 
-def _find_episode_title(info: AnimeInfo, ep_number: int, season: int = 1) -> str:
-    """Find the English title for a regular episode by number and season."""
-    for ep in info.episodes:
-        if ep.ep_type == "regular" and ep.number == ep_number and ep.season == season:
-            return ep.title_en
-    return ""
-
-
 def _process_file(
     source: SourceFile,
     info: AnimeInfo,
@@ -1992,7 +886,7 @@ def _process_file(
     episode_name = ""
 
     if ep_number is not None:
-        episode_name = _find_episode_title(info, ep_number, season)
+        episode_name = info.find_episode_title(ep_number, season)
     else:
         # Ask for episode number
         ep_str = prompt_value("Episode number (or special tag like S1, NCOP1)")
@@ -2026,7 +920,7 @@ def _process_file(
                 ep_number = int(m.group(2))
                 episode_name = (m.group(3) or "").strip()
 
-    # Verify CRC32 hash before building filename — on mismatch the hash
+    # Verify CRC32 hash before building filename -- on mismatch the hash
     # is stripped from the destination filename
     hash_result = verify_hash(source)
     if hash_result is not None:
@@ -2063,7 +957,12 @@ def _process_file(
 
     # Check for existing file at destination
     if not dry_run:
-        action = handle_conflict(source, dest_path)
+        action = handle_conflict(
+            source,
+            dest_path,
+            parse_source_filename_fn=parse_source_filename,
+            analyze_file_fn=analyze_file,
+        )
         if action == "skip":
             return False
         if action == "keep":
@@ -2078,335 +977,6 @@ def _process_file(
 # ---------------------------------------------------------------------------
 # Batch triage (vidir-style manifest editing)
 # ---------------------------------------------------------------------------
-
-
-def _build_manifest_entries(
-    parsed: list[SourceFile],
-    info: AnimeInfo,
-    concise_name: str,
-    series_dir: Path,
-    verbose: bool,
-) -> list[ManifestEntry]:
-    """Build manifest entries for all files without per-file prompts.
-
-    Runs mediainfo, verifies CRC32 hashes, matches episodes, and constructs
-    destination paths using defaults.
-    """
-    entries: list[ManifestEntry] = []
-    total = len(parsed)
-    for i, sf in enumerate(parsed, 1):
-        print(f"  Analyzing {i}/{total}: {sf.path.name}")
-
-        # Analyze with mediainfo
-        try:
-            sf.media = analyze_file(sf.path)
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            if verbose:
-                print(f"    warning: mediainfo failed: {e}")
-
-        # Verify CRC32 hash — on mismatch, clear hash so it's stripped from dest
-        hash_failed = False
-        hash_result = verify_hash(sf)
-        if hash_result is not None:
-            ok, actual = hash_result
-            if not ok:
-                print(f"    CRC32 MISMATCH: expected {sf.hash_code}, got {actual}")
-                sf.hash_code = ""
-                hash_failed = True
-            elif verbose:
-                print(f"    CRC32 verified: {sf.hash_code}")
-
-        # Match episode
-        ep_number = sf.parsed_episode
-        season = sf.parsed_season or 1
-        is_special = False
-        special_tag = ""
-        episode_name = ""
-
-        if ep_number is not None:
-            episode_name = _find_episode_title(info, ep_number, season)
-
-        # Build destination path
-        if ep_number is None:
-            # Can't auto-match — mark as TODO
-            placeholder = format_episode_filename(
-                concise_name=concise_name,
-                season=season,
-                episode=0,
-                episode_name="EPISODE_NAME",
-                source=sf,
-                is_special=is_special,
-                special_tag=special_tag,
-            )
-            placeholder = placeholder.replace("s1e00", "s1eXX")
-            dest_dir = series_dir / f"Season {season:02d}"
-            entries.append(
-                ManifestEntry(
-                    source=sf,
-                    dest_path=dest_dir / placeholder,
-                    is_todo=True,
-                    hash_failed=hash_failed,
-                )
-            )
-        else:
-            filename = format_episode_filename(
-                concise_name=concise_name,
-                season=season,
-                episode=ep_number,
-                episode_name=episode_name,
-                source=sf,
-                is_special=is_special,
-                special_tag=special_tag,
-            )
-            if is_special:
-                dest_dir = series_dir / "Specials"
-            else:
-                dest_dir = series_dir / f"Season {season:02d}"
-            entries.append(
-                ManifestEntry(
-                    source=sf,
-                    dest_path=dest_dir / filename,
-                    hash_failed=hash_failed,
-                )
-            )
-
-    return entries
-
-
-def _write_manifest(
-    entries: list[ManifestEntry],
-    info: AnimeInfo,
-    concise_name: str,
-    series_dir: Path,
-) -> Path:
-    """Write manifest entries to a KDL file for editing."""
-    provider = ""
-    if info.anidb_id is not None:
-        provider = f"AniDB: {info.anidb_id}"
-    elif info.tvdb_id is not None:
-        provider = f"TheTVDB: {info.tvdb_id}"
-
-    dirname = format_series_dirname(info.title_ja, info.title_en, info.year)
-
-    # Group entries by season/specials
-    groups: dict[str, list[ManifestEntry]] = {}
-    for entry in entries:
-        # Determine group key from the destination path
-        dest_parent = entry.dest_path.parent.name
-        if dest_parent == "Specials":
-            key = "specials"
-        else:
-            # "Season 01" → season number
-            key = dest_parent
-        groups.setdefault(key, []).append(entry)
-
-    # Build KDL document as text (easier than constructing Node objects
-    # for the header comments)
-    lines: list[str] = []
-    lines.append("// etp-anime triage manifest")
-    lines.append(f"// Series: {dirname}")
-    if provider:
-        lines.append(f"// {provider}")
-    lines.append(f"// Series dir: {series_dir}")
-    lines.append("//")
-    lines.append(
-        "// Edit destination filenames. Delete or /- comment out entries to skip."
-    )
-    lines.append("// Source filenames are for reference only — only dest is used.")
-    lines.append("")
-
-    for group_key in sorted(groups.keys()):
-        group_entries = sorted(
-            groups[group_key], key=lambda e: e.source.parsed_episode or 0
-        )
-        if group_key == "specials":
-            lines.append("specials {")
-        else:
-            # "Season 01" → season 1
-            season_num = group_key.replace("Season ", "").lstrip("0") or "0"
-            lines.append(f"season {season_num} {{")
-
-        for entry in group_entries:
-            ep_num = entry.source.parsed_episode or 0
-            tag = "(todo)" if entry.is_todo else ""
-            if entry.hash_failed:
-                lines.append("  // CRC32 MISMATCH — hash stripped from destination")
-            lines.append(f"  {tag}episode {ep_num} {{")
-            lines.append(f'    source "{_escape_kdl(str(entry.source.path))}"')
-            if entry.source.matched_download is not None:
-                lines.append(
-                    f'    downloaded "{_escape_kdl(str(entry.source.matched_download))}"'
-                )
-            dest_name = entry.dest_path.name
-            if len(dest_name.encode("utf-8")) > _MAX_FILENAME_BYTES:
-                lines.append(
-                    f"    // WARNING: filename is"
-                    f" {len(dest_name.encode('utf-8'))} bytes"
-                    f" (max {_MAX_FILENAME_BYTES}) — shorten before saving"
-                )
-            lines.append(f'    dest "{_escape_kdl(dest_name)}"')
-            lines.append("  }")
-
-        lines.append("}")
-        lines.append("")
-
-    fd, path = tempfile.mkstemp(suffix=".kdl", prefix="etp-triage-")
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
-        f.write("\n")
-
-    return Path(path)
-
-
-def _open_editor(manifest_path: Path) -> bool:
-    """Open the manifest in the user's editor. Returns True on success."""
-    editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
-    try:
-        result = subprocess.run([editor, str(manifest_path)])
-        return result.returncode == 0
-    except FileNotFoundError:
-        print(f"  error: editor '{editor}' not found")
-        return False
-
-
-def _parse_manifest(
-    manifest_path: Path,
-    known_sources: dict[str, SourceFile],
-    series_dir: Path,
-) -> tuple[list[tuple[SourceFile, Path]], list[str]]:
-    """Parse an edited KDL manifest file.
-
-    Returns ``(entries, errors)``. If errors is non-empty, the manifest has
-    problems the user should fix.
-    """
-    text = manifest_path.read_text(encoding="utf-8")
-    try:
-        doc = kdl.parse(text)
-    except kdl.ParseError as e:
-        return [], [f"  KDL parse error: {e}"]
-
-    entries: list[tuple[SourceFile, Path]] = []
-    errors: list[str] = []
-
-    for group_node in doc.nodes:
-        # Determine destination subdirectory
-        if group_node.name == "specials":
-            dest_subdir = series_dir / "Specials"
-        elif group_node.name == "season" and group_node.args:
-            season_num = int(group_node.args[0])
-            dest_subdir = series_dir / f"Season {season_num:02d}"
-        else:
-            continue
-
-        for ep_node in group_node.nodes:
-            if ep_node.name != "episode":
-                continue
-
-            # Check for (todo) tag
-            if ep_node.tag == "todo":
-                errors.append(
-                    f"  episode {ep_node.args[0] if ep_node.args else '?'}"
-                    f" in {group_node.name}: unresolved (todo) entry"
-                )
-                continue
-
-            # Extract source and dest from children
-            source_name = ""
-            dest_name = ""
-            for child in ep_node.nodes:
-                if child.name == "source" and child.args:
-                    source_name = str(child.args[0])
-                elif child.name == "dest" and child.args:
-                    dest_name = str(child.args[0])
-
-            if not dest_name:
-                errors.append(
-                    f"  episode {ep_node.args[0] if ep_node.args else '?'}"
-                    f" in {group_node.name}: missing dest"
-                )
-                continue
-
-            sf = known_sources.get(source_name)
-            if sf is None:
-                errors.append(
-                    f"  episode in {group_node.name}: unknown source '{source_name}'"
-                )
-                continue
-
-            entries.append((sf, dest_subdir / dest_name))
-
-    return entries, errors
-
-
-_MAX_FILENAME_BYTES = 255  # ext4/Btrfs filename length limit
-
-
-def _check_filename_length(dest_path: Path) -> Path:
-    """Check if the destination filename exceeds the filesystem limit.
-
-    If too long, prompts the user to edit the filename until it fits.
-    Returns the (possibly updated) destination path.
-    """
-    while len(dest_path.name.encode("utf-8")) > _MAX_FILENAME_BYTES:
-        name_len = len(dest_path.name.encode("utf-8"))
-        print(f"\n  ERROR: filename is {name_len} bytes (max {_MAX_FILENAME_BYTES}):")
-        print(f"    {dest_path.name}")
-        new_name = prompt_value("  Enter shorter filename", dest_path.name)
-        dest_path = dest_path.parent / new_name
-    return dest_path
-
-
-def _execute_manifest(
-    entries: list[tuple[SourceFile, Path]],
-    dry_run: bool,
-    verbose: bool,
-) -> tuple[int, int, list[Path]]:
-    """Execute the parsed manifest: copy each file to its destination.
-
-    Returns ``(success, failed, triaged_paths)`` — triaged_paths includes
-    files that were kept, skipped, or copied (all are marked as processed).
-    """
-    success = 0
-    failed = 0
-    triaged_paths: list[Path] = []
-
-    for sf, dest_path in entries:
-        # Check filename length before attempting any operations
-        dest_path = _check_filename_length(dest_path)
-
-        if verbose:
-            print(f"  {sf.path.name} -> {dest_path}")
-
-        # Check for existing file at destination
-        if not dry_run:
-            action = handle_conflict(sf, dest_path)
-            if action in ("keep", "skip"):
-                triaged_paths.append(sf.path)
-                if action == "skip":
-                    failed += 1
-                else:
-                    success += 1
-                continue
-
-        try:
-            if copy_reflink(sf.path, dest_path, dry_run=dry_run):
-                success += 1
-                triaged_paths.append(sf.path)
-            else:
-                failed += 1
-        except OSError as e:
-            if e.errno == errno.ENAMETOOLONG:
-                dest_path = _check_filename_length(dest_path)
-                if copy_reflink(sf.path, dest_path, dry_run=dry_run):
-                    success += 1
-                    triaged_paths.append(sf.path)
-                else:
-                    failed += 1
-            else:
-                print(f"  error: {e}", file=sys.stderr)
-                failed += 1
-
-    return success, failed, triaged_paths
 
 
 def _match_files_to_season(
@@ -2521,7 +1091,7 @@ def _process_group_batch(
     """Batch-process a group of files via an editable manifest.
 
     Same interface as ``_process_group`` but uses a vidir-style workflow:
-    build all source→destination mappings, open in $EDITOR, then execute.
+    build all source->destination mappings, open in $EDITOR, then execute.
 
     If *pre_parsed* is provided, uses those SourceFiles instead of parsing
     *files*. If *season_override* is set, all episodes are renumbered as
@@ -2559,10 +1129,17 @@ def _process_group_batch(
 
     # Build manifest entries (mediainfo + CRC32 verification)
     print()
-    entries = _build_manifest_entries(parsed, info, concise_name, series_dir, verbose)
+    entries = build_manifest_entries(
+        parsed,
+        info,
+        concise_name,
+        series_dir,
+        verbose,
+        analyze_file_fn=analyze_file,
+    )
 
     # Write manifest to temp file
-    manifest_path = _write_manifest(entries, info, concise_name, series_dir)
+    manifest_path = write_manifest(entries, info, concise_name, series_dir)
 
     # Build source lookup by full path for parsing back
     known_sources: dict[str, SourceFile] = {
@@ -2571,14 +1148,14 @@ def _process_group_batch(
 
     file_count = len(parsed)
 
-    # Edit → parse → re-edit loop
+    # Edit -> parse -> re-edit loop
     try:
         while True:
-            if not _open_editor(manifest_path):
+            if not open_editor(manifest_path):
                 print("  Editor failed. Skipping group.")
                 return 0, file_count, []
 
-            parsed_entries, errors = _parse_manifest(
+            parsed_entries, errors = parse_manifest(
                 manifest_path, known_sources, series_dir
             )
 
@@ -2602,7 +1179,13 @@ def _process_group_batch(
 
         # Execute the manifest
         print(f"\n  Copying {len(parsed_entries)} file(s)...")
-        return _execute_manifest(parsed_entries, dry_run, verbose)
+        return execute_manifest(
+            parsed_entries,
+            dry_run,
+            verbose,
+            parse_source_filename_fn=parse_source_filename,
+            analyze_file_fn=analyze_file,
+        )
 
     finally:
         try:
@@ -2615,9 +1198,9 @@ def _process_group_batch(
 # Subcommand entry points
 #
 # Three subcommands (see ADR 2026-03-26-01):
-#   run_triage  — bulk import from downloads directory via KDL manifests
-#   run_series  — sync from Sonarr-managed anime directory via KDL manifests
-#   run_episode — import a single file interactively
+#   run_triage  -- bulk import from downloads directory via KDL manifests
+#   run_series  -- sync from Sonarr-managed anime directory via KDL manifests
+#   run_episode -- import a single file interactively
 #
 # All three share: filename construction (format_episode_filename),
 # directory resolution (resolve_series_directory), conflict handling
@@ -2898,7 +1481,7 @@ def run_episode(args: argparse.Namespace, config: AnimeConfig) -> int:
     """Import a single episode or movie file.
 
     Simplified interactive workflow for one-off imports. Reluctant to create
-    new series directories — requires explicit confirmation (default no).
+    new series directories -- requires explicit confirmation (default no).
     """
     if not args.file.is_file():
         print(f"error: {args.file} is not a file", file=sys.stderr)
@@ -3145,7 +1728,7 @@ def run_triage(args: argparse.Namespace, config: AnimeConfig) -> int:
         groups_processed += 1
 
     # Write manifest once at end (skip for dry-run).
-    # Save if anything was processed — including files marked 'd' for done.
+    # Save if anything was processed -- including files marked 'd' for done.
     if not args.dry_run and len(already_copied) > manifest_size_at_start:
         _save_triage_manifest(already_copied)
 
