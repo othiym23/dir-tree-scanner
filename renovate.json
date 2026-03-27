@@ -6,11 +6,15 @@
   "packageRules": [
     {
       "matchManagers": ["cargo"],
-      "groupName": "Rust dependencies"
+      "groupName": "Rust dependencies",
+      "automerge": true,
+      "automergeType": "branch"
     },
     {
       "matchManagers": ["pep621"],
-      "groupName": "Python dev dependencies"
+      "groupName": "Python dev dependencies",
+      "automerge": true,
+      "automergeType": "branch"
     },
     {
       "matchDepNames": ["python"],
