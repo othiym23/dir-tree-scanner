@@ -263,7 +263,7 @@ fn extract_mediainfo_properties(
     {
         out.push((
             "audio_duration_ms".into(),
-            serde_json::Value::Number(serde_json::Number::from((d * 1000.0) as u64)),
+            serde_json::Value::Number(serde_json::Number::from((d * 1000.0).round() as u64)),
         ));
     }
     if let Some(br) = audio["BitRate"]
@@ -350,7 +350,10 @@ fn extract_mediainfo_tags(general: Option<&serde_json::Value>) -> Vec<(String, s
         "Description",
     ];
 
-    let mut out: Vec<(String, serde_json::Value)> = Vec::new();
+    // Use a HashMap to deduplicate: multiple mediainfo fields can map to the
+    // same canonical key (e.g. Title and Track both → track_title). First
+    // value wins.
+    let mut seen: HashMap<String, serde_json::Value> = HashMap::new();
     for (key, val) in obj {
         if !tag_fields.contains(&key.as_str()) {
             continue;
@@ -359,9 +362,11 @@ fn extract_mediainfo_tags(general: Option<&serde_json::Value>) -> Vec<(String, s
             && !s.is_empty()
         {
             let normalized = normalize_mediainfo_tag_key(key);
-            out.push((normalized, serde_json::Value::String(s.to_string())));
+            seen.entry(normalized)
+                .or_insert_with(|| serde_json::Value::String(s.to_string()));
         }
     }
+    let mut out: Vec<(String, serde_json::Value)> = seen.into_iter().collect();
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
@@ -383,13 +388,18 @@ fn normalize_mediainfo_tag_key(key: &str) -> String {
         "Comment" => "comment".into(),
         "Composer" => "composer".into(),
         "Conductor" => "conductor".into(),
-        "Lyricist" | "Lyrics" => "lyrics".into(),
+        "Lyricist" => "lyricist".into(),
+        "Lyrics" => "lyrics".into(),
         "Publisher" | "Label" => "label".into(),
         "ISRC" => "isrc".into(),
         "Barcode" | "UPC" => "barcode".into(),
         "CatalogNumber" => "catalog_number".into(),
         "BPM" => "bpm".into(),
         "Copyright" => "copyright".into(),
+        "ContentType" => "content_type".into(),
+        "Mood" => "mood".into(),
+        "Language" => "language".into(),
+        "Description" => "description".into(),
         other => other.to_ascii_lowercase().replace(['/', ' ', '-'], "_"),
     }
 }
@@ -601,12 +611,89 @@ mod tests {
 
     #[test]
     fn test_extension_dispatch() {
-        // Can't test actual reading without files, but verify the extension
-        // check routes correctly by checking MEDIAINFO_EXTENSIONS
         assert!(MEDIAINFO_EXTENSIONS.contains(&"wma"));
         assert!(MEDIAINFO_EXTENSIONS.contains(&"mka"));
         assert!(!MEDIAINFO_EXTENSIONS.contains(&"mp3"));
         assert!(!MEDIAINFO_EXTENSIONS.contains(&"dsf"));
         assert!(!MEDIAINFO_EXTENSIONS.contains(&"flac"));
+    }
+
+    #[test]
+    fn test_parse_mediainfo_json_no_audio_track() {
+        let json = serde_json::json!({
+            "media": {
+                "track": [
+                    {"@type": "General", "Title": "metadata only"}
+                ]
+            }
+        });
+        let meta = parse_mediainfo_json(&json).unwrap();
+        assert!(meta.properties.is_empty());
+        assert_eq!(meta.tags.len(), 1);
+        assert_eq!(meta.tags[0].0, "track_title");
+    }
+
+    #[test]
+    fn test_parse_mediainfo_json_duplicate_keys_deduplicated() {
+        // Both Title and Track map to track_title — should deduplicate
+        let json = serde_json::json!({
+            "media": {
+                "track": [
+                    {
+                        "@type": "General",
+                        "Title": "From Title",
+                        "Track": "From Track",
+                    },
+                    {"@type": "Audio", "Duration": "10.0"}
+                ]
+            }
+        });
+        let meta = parse_mediainfo_json(&json).unwrap();
+        let titles: Vec<&str> = meta
+            .tags
+            .iter()
+            .filter(|(k, _)| k == "track_title")
+            .map(|(_, v)| v.as_str().unwrap())
+            .collect();
+        // Should have exactly one track_title, not two
+        assert_eq!(titles.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_mediainfo_json_unrecognized_fields_filtered() {
+        let json = serde_json::json!({
+            "media": {
+                "track": [
+                    {
+                        "@type": "General",
+                        "Title": "Real Tag",
+                        "Compilation": "1",
+                        "Format": "WMA",
+                        "Encoded_Application": "some encoder",
+                        "InternetMediaType": "audio/x-ms-wma",
+                    },
+                    {"@type": "Audio"}
+                ]
+            }
+        });
+        let meta = parse_mediainfo_json(&json).unwrap();
+        let tag_keys: Vec<&str> = meta.tags.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(tag_keys.contains(&"track_title"));
+        // These are not in the allowlist
+        assert!(!tag_keys.contains(&"compilation"));
+        assert!(!tag_keys.contains(&"format"));
+        assert!(!tag_keys.contains(&"encoded_application"));
+        assert!(!tag_keys.contains(&"internetmediatype"));
+    }
+
+    #[test]
+    fn test_normalize_mediainfo_content_type() {
+        assert_eq!(normalize_mediainfo_tag_key("ContentType"), "content_type");
+    }
+
+    #[test]
+    fn test_normalize_mediainfo_lyricist_vs_lyrics() {
+        assert_eq!(normalize_mediainfo_tag_key("Lyricist"), "lyricist");
+        assert_eq!(normalize_mediainfo_tag_key("Lyrics"), "lyrics");
     }
 }
