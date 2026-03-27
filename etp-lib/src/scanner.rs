@@ -186,23 +186,7 @@ async fn flush_pending(
             sqlx::Row::get::<i64, _>(&result, 0)
         };
 
-        sqlx::query("DELETE FROM files WHERE dir_id = ?")
-            .bind(dir_id)
-            .execute(&mut *tx)
-            .await?;
-
-        for f in &update.files {
-            sqlx::query(
-                "INSERT INTO files (dir_id, filename, size, ctime, mtime) VALUES (?, ?, ?, ?, ?)",
-            )
-            .bind(dir_id)
-            .bind(&f.filename)
-            .bind(f.size as i64)
-            .bind(f.ctime)
-            .bind(f.mtime)
-            .execute(&mut *tx)
-            .await?;
-        }
+        dao::replace_files_on(&mut *tx, dir_id, &update.files).await?;
     }
 
     tx.commit().await?;
