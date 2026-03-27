@@ -117,35 +117,146 @@ pub struct FileInput {
     pub mtime: i64,
 }
 
-/// Replace all files in a directory — deletes existing files for the dir_id,
-/// then inserts the new set. Wrapped in a transaction so the DELETE + all
-/// INSERTs are a single WAL commit instead of N+1 separate fsyncs.
+/// Sync files for a directory — upserts each file (preserving file IDs for
+/// unchanged filenames) and removes files no longer present. Clears
+/// `metadata_scanned_at` when a file's mtime changes so metadata will be
+/// re-read on the next metadata scan.
 pub async fn replace_files(
     pool: &SqlitePool,
     dir_id: i64,
     files: &[FileInput],
 ) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let mut conn = pool.acquire().await?;
+    replace_files_on(&mut conn, dir_id, files).await
+}
 
-    sqlx::query("DELETE FROM files WHERE dir_id = ?")
-        .bind(dir_id)
-        .execute(&mut *tx)
-        .await?;
+/// Inner implementation that works on a mutable connection reference, so it
+/// can be called within an existing transaction (e.g., `flush_pending`).
+pub async fn replace_files_on(
+    conn: &mut sqlx::SqliteConnection,
+    dir_id: i64,
+    files: &[FileInput],
+) -> Result<(), sqlx::Error> {
+    let new_filenames: HashSet<&str> = files.iter().map(|f| f.filename.as_str()).collect();
 
+    // Upsert each file. Clear metadata_scanned_at when mtime changes so
+    // the metadata scanner knows to re-read this file.
     for f in files {
         sqlx::query(
-            "INSERT INTO files (dir_id, filename, size, ctime, mtime) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO files (dir_id, filename, size, ctime, mtime)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(dir_id, filename) DO UPDATE SET
+                 size = excluded.size,
+                 ctime = excluded.ctime,
+                 mtime = excluded.mtime,
+                 metadata_scanned_at = CASE
+                     WHEN files.mtime != excluded.mtime THEN NULL
+                     ELSE files.metadata_scanned_at
+                 END",
         )
         .bind(dir_id)
         .bind(&f.filename)
         .bind(f.size as i64)
         .bind(f.ctime)
         .bind(f.mtime)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     }
 
-    tx.commit().await?;
+    // Remove files no longer on disk. Clean up metadata rows first
+    // (ON DELETE RESTRICT prevents deleting files that have metadata).
+    let existing: Vec<(i64, String)> =
+        sqlx::query_as("SELECT id, filename FROM files WHERE dir_id = ?")
+            .bind(dir_id)
+            .fetch_all(&mut *conn)
+            .await?;
+
+    let mut had_removals = false;
+    for (file_id, filename) in &existing {
+        if !new_filenames.contains(filename.as_str()) {
+            delete_file_dependents(&mut *conn, *file_id).await?;
+            sqlx::query("DELETE FROM files WHERE id = ?")
+                .bind(file_id)
+                .execute(&mut *conn)
+                .await?;
+            had_removals = true;
+        }
+    }
+    if had_removals {
+        cleanup_orphan_blobs(&mut *conn).await?;
+    }
+
+    Ok(())
+}
+
+/// Delete all rows that reference a file (metadata, cue_sheets, embedded_images).
+/// Must be called before deleting the file itself due to ON DELETE RESTRICT.
+/// Call `cleanup_orphan_blobs` after a batch of these to remove zero-refcount blobs.
+pub async fn delete_file_dependents(
+    conn: &mut sqlx::SqliteConnection,
+    file_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE blobs SET ref_count = ref_count - 1
+         WHERE hash IN (SELECT blob_hash FROM embedded_images WHERE file_id = ?)",
+    )
+    .bind(file_id)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("DELETE FROM embedded_images WHERE file_id = ?")
+        .bind(file_id)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("DELETE FROM metadata WHERE file_id = ?")
+        .bind(file_id)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("DELETE FROM cue_sheets WHERE file_id = ?")
+        .bind(file_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Bulk-delete all dependents for every file in a directory.
+/// More efficient than calling `delete_file_dependents` per file.
+pub async fn delete_directory_dependents(
+    conn: &mut sqlx::SqliteConnection,
+    dir_id: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE blobs SET ref_count = ref_count - 1
+         WHERE hash IN (SELECT blob_hash FROM embedded_images
+                        WHERE file_id IN (SELECT id FROM files WHERE dir_id = ?))",
+    )
+    .bind(dir_id)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "DELETE FROM embedded_images WHERE file_id IN (SELECT id FROM files WHERE dir_id = ?)",
+    )
+    .bind(dir_id)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("DELETE FROM metadata WHERE file_id IN (SELECT id FROM files WHERE dir_id = ?)")
+        .bind(dir_id)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("DELETE FROM cue_sheets WHERE file_id IN (SELECT id FROM files WHERE dir_id = ?)")
+        .bind(dir_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Remove blobs with zero or negative ref_count. Call after a batch
+/// of `delete_file_dependents` or `delete_directory_dependents`.
+pub async fn cleanup_orphan_blobs(
+    conn: &mut sqlx::SqliteConnection,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM blobs WHERE ref_count <= 0")
+        .execute(&mut *conn)
+        .await?;
     Ok(())
 }
 
@@ -166,19 +277,22 @@ pub async fn remove_stale_directories(
             .await?;
 
     let mut removed = 0;
+    let mut conn = pool.acquire().await?;
     for (dir_id, path) in &all_dirs {
         if !seen_paths.contains(path) {
+            delete_directory_dependents(&mut *conn, *dir_id).await?;
             sqlx::query("DELETE FROM files WHERE dir_id = ?")
                 .bind(dir_id)
-                .execute(pool)
+                .execute(&mut *conn)
                 .await?;
             sqlx::query("DELETE FROM directories WHERE id = ?")
                 .bind(dir_id)
-                .execute(pool)
+                .execute(&mut *conn)
                 .await?;
             removed += 1;
         }
     }
+    cleanup_orphan_blobs(&mut *conn).await?;
     Ok(removed)
 }
 
