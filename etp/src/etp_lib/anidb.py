@@ -5,12 +5,16 @@ from __future__ import annotations
 import gzip
 import re
 import time
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
 from etp_lib.paths import cache_dir
 from etp_lib.types import CACHE_MAX_AGE_SECONDS, AnimeInfo, Episode
 
+# AniDB's HTTP API only supports plaintext HTTP on port 9001 — there is no
+# HTTPS endpoint.  The "client" and "clientver" params are a registered app
+# identifier, not a secret, so the risk is limited to response snooping.
 _ANIDB_API_URL = "http://api.anidb.net:9001/httpapi"
 _anidb_last_request: float = 0.0
 
@@ -171,7 +175,13 @@ def fetch_anidb_anime(
     # Fetch from API
     _anidb_rate_limit()
 
-    params = f"request=anime&client={client}&clientver={clientver}&protover=1&aid={aid}"
+    params = urllib.parse.urlencode({
+        "request": "anime",
+        "client": client,
+        "clientver": clientver,
+        "protover": 1,
+        "aid": aid,
+    })
     url = f"{_ANIDB_API_URL}?{params}"
 
     req = urllib.request.Request(url)

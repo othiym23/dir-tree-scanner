@@ -276,7 +276,7 @@ def scan_dest_ids(dest: Path) -> dict[tuple[str, int], Path]:
                     raw = id_file.read_text(encoding="utf-8").strip()
                     if raw:
                         result[(provider, int(raw))] = entry
-                except ValueError, OSError:
+                except (ValueError, OSError):
                     pass
     return result
 
@@ -311,7 +311,8 @@ def _write_id_file(series_dir: Path, info: AnimeInfo, dry_run: bool = False) -> 
             print(f"  [dry-run] write {id_file} <- {id_value}")
         else:
             try:
-                id_file.open("x").write(str(id_value) + "\n")
+                with id_file.open("x", encoding="utf-8") as f:
+                    f.write(str(id_value) + "\n")
             except FileExistsError:
                 pass
 
@@ -411,7 +412,7 @@ def _load_triage_manifest() -> set[str]:
     if path.exists():
         try:
             return set(json.loads(path.read_text(encoding="utf-8")))
-        except json.JSONDecodeError, TypeError:
+        except (json.JSONDecodeError, TypeError):
             return set()
     return set()
 

@@ -89,9 +89,13 @@ def libexec_dir() -> Path:
 
 
 def cache_dir(provider: str) -> Path:
-    """Return a cache directory under $XDG_CACHE_HOME/etp/<provider>."""
-    base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
-    cache = base / "etp" / provider
+    """Cache directory: ~/Library/Caches/<bundle>/<provider>/ on macOS,
+    $XDG_CACHE_HOME/etp/<provider>/ on Linux."""
+    if _is_macos():
+        cache = Path.home() / "Library" / "Caches" / BUNDLE_ID / provider
+    else:
+        base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+        cache = base / "etp" / provider
     cache.mkdir(parents=True, exist_ok=True)
     return cache
 

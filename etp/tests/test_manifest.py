@@ -444,6 +444,20 @@ class TestOpenEditor:
         open_editor(Path("/tmp/test.tsv"))
         assert called_with[0][0] == "vi"
 
+    def test_editor_with_arguments(self, monkeypatch):
+        called_with: list[list[str]] = []
+
+        def fake_run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
+            called_with.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        monkeypatch.setenv("VISUAL", "code --wait")
+        monkeypatch.delenv("EDITOR", raising=False)
+
+        open_editor(Path("/tmp/test.kdl"))
+        assert called_with[0] == ["code", "--wait", "/tmp/test.kdl"]
+
 
 class TestExecuteManifest:
     """Tests for manifest execution."""

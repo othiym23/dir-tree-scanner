@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -29,9 +30,9 @@ _HAMATV_RANGES: dict[str, int] = {
     "NCOP": 171,  # s0e151+ range, +20 buffer
     "NCED": 191,  # separate from NCOP to avoid collisions
     "PV": 321,  # s0e301+ range, +20 buffer
-    "Preview": 321,
+    "Preview": 321,  # alias for PV — same HamaTV category
     "CM": 521,  # s0e501+ range, +20 buffer
-    "Bonus": 521,
+    "Bonus": 521,  # alias for CM — same HamaTV category
     "Menu": 921,  # s0e901+ range, +20 buffer
 }
 
@@ -325,7 +326,7 @@ def open_editor(manifest_path: Path) -> bool:
     """Open the manifest in the user's editor. Returns True on success."""
     editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
     try:
-        result = subprocess.run([editor, str(manifest_path)])
+        result = subprocess.run([*shlex.split(editor), str(manifest_path)])
         return result.returncode == 0
     except FileNotFoundError:
         print(f"  error: editor '{editor}' not found")

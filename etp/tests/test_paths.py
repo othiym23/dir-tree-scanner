@@ -51,6 +51,38 @@ class TestDataDir:
         assert result == Path("/custom/data") / paths.APP_NAME
 
 
+class TestCacheDir:
+    def test_macos_uses_library_caches(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(sys, "platform", "darwin")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        result = paths.cache_dir("anidb")
+        assert result == tmp_path / "Library" / "Caches" / paths.BUNDLE_ID / "anidb"
+
+    def test_linux_uses_xdg_default(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+        # Point HOME to tmp_path so mkdir doesn't touch the real homedir
+        monkeypatch.setenv("HOME", str(tmp_path))
+        result = paths.cache_dir("tvdb")
+        assert ".cache" in result.parts
+        assert "etp" in result.parts
+        assert result.parts[-1] == "tvdb"
+
+    def test_linux_respects_xdg_cache_home(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(sys, "platform", "linux")
+        custom = tmp_path / "custom-cache"
+        monkeypatch.setenv("XDG_CACHE_HOME", str(custom))
+        result = paths.cache_dir("anidb")
+        assert result == custom / "etp" / "anidb"
+
+    def test_creates_directory(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(sys, "platform", "linux")
+        custom = tmp_path / "fresh-cache"
+        monkeypatch.setenv("XDG_CACHE_HOME", str(custom))
+        result = paths.cache_dir("anidb")
+        assert result.is_dir()
+
+
 class TestCatalogConfig:
     def test_filename_is_catalog_kdl(self):
         result = paths.catalog_config()
