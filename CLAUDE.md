@@ -3,8 +3,8 @@
 Incremental CLI filesystem scanner and audio metadata manager for a Synology
 NAS. See [docs/DESIGN_NOTES.md](docs/DESIGN_NOTES.md) for architecture details.
 
-Cargo workspace: `etp-lib`, `etp-csv`, `etp-tree`, `etp-find`, `etp-meta`.
-Installable Python package in `etp/` (uses `uv tool install .`).
+Cargo workspace: `etp-lib`, `etp-cas`, `etp-csv`, `etp-tree`, `etp-find`,
+`etp-meta`. Installable Python package in `etp/` (uses `uv tool install .`).
 
 ## Build & run
 
@@ -20,6 +20,10 @@ etp-tree <directory> [--db <file.db>] [--exclude <name>...] [--du [--du-subs]] [
 etp-find <pattern> [-R <directory>] [--tree=<file>] [--csv=<file>] [--size] [-i] [--db <path>] [-v]
 etp-meta scan [-R <directory>] [--db <path>] [-e <name>...] [--force] [-v]
 etp-meta read <file> [--images]
+etp-cas store <file>
+etp-cas get <hash> [-o PATH]
+etp-cas gc --db <path> [-v]
+etp-cas list
 
 # Python porcelain
 etp tree <directory> [args...]
