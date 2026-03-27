@@ -40,7 +40,6 @@ Each binary crate has a `build.rs` that embeds the short git hash in
 - `src/etp_commands/catalog.py` — KDL-configured catalog orchestrator
 - `src/etp_lib/paths.py` — XDG-based path resolution and binary search
 - `src/etp_lib/media_parser.py` — tokenizer/parser for anime/media file paths
-- `kdl-py` — KDL 1 parser (PyPI dependency)
 
 `scripts/` contains the legacy Python orchestrator (`catalog-nas.py`) driven by
 `catalog.toml`, superseded by `etp catalog` with KDL config.
