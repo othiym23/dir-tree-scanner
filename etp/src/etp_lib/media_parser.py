@@ -443,7 +443,7 @@ _RE_SCENE_TRAILING_GROUP = re.compile(r"^(.*)-([A-Za-z][A-Za-z0-9]{1,})$")
 _RE_SITE_PREFIX = re.compile(r"^www\.\w+\.\w+$", re.IGNORECASE)
 
 # Remux
-_RE_REMUX = re.compile(r"remux", re.IGNORECASE)
+_RE_REMUX = re.compile(r"remux$", re.IGNORECASE)
 
 # Japanese bonus content markers
 _BONUS_KEYWORDS = frozenset(
@@ -802,15 +802,25 @@ def _expand_metadata_words(text: str) -> list[Token]:
         else:
             sub_parts = w.split("-")
             if len(sub_parts) > 1:
+                sub_tokens: list[Token] = []
                 for sp in sub_parts:
                     sp = sp.strip()
                     if not sp:
                         continue
                     sk = _classify_text_content(sp)
                     if sk:
-                        tokens.append(Token(kind=sk, text=sp))
+                        sub_tokens.append(Token(kind=sk, text=sp))
                     else:
-                        tokens.append(Token(kind=TokenKind.UNKNOWN, text=sp))
+                        sub_tokens.append(Token(kind=TokenKind.UNKNOWN, text=sp))
+                # Scene convention: last unclassified part after metadata
+                # is the release group (e.g., "REMUX-FraMeSToR")
+                has_meta = any(t.kind != TokenKind.UNKNOWN for t in sub_tokens)
+                if has_meta and sub_tokens and sub_tokens[-1].kind == TokenKind.UNKNOWN:
+                    sub_tokens[-1] = Token(
+                        kind=TokenKind.RELEASE_GROUP,
+                        text=sub_tokens[-1].text,
+                    )
+                tokens.extend(sub_tokens)
             else:
                 tokens.append(Token(kind=TokenKind.UNKNOWN, text=w))
     return tokens
@@ -871,8 +881,12 @@ def classify(tokens: list[Token]) -> list[Token]:
     """
     result: list[Token] = []
     first_bracket_seen = False
+    seen_episode = False
 
     for i, token in enumerate(tokens):
+        if token.kind == TokenKind.EPISODE:
+            seen_episode = True
+
         if token.kind == TokenKind.EXTENSION:
             result.append(token)
             continue
@@ -880,6 +894,7 @@ def classify(tokens: list[Token]) -> list[Token]:
         if token.kind == TokenKind.PATH_SEP:
             result.append(token)
             first_bracket_seen = False  # Reset for new component
+            seen_episode = False
             continue
 
         if token.kind == TokenKind.SEPARATOR:
@@ -998,6 +1013,32 @@ def classify(tokens: list[Token]) -> list[Token]:
                 if len(split) > 1:
                     # Re-classify the split tokens
                     result.extend(classify(split))
+                    continue
+
+            # Split TEXT with trailing metadata words (e.g., scene-style
+            # episode title followed by resolution/codec/source keywords).
+            # Scan left-to-right: once metadata starts, everything after is
+            # metadata (scene filenames don't interleave title and metadata).
+            if token.kind == TokenKind.TEXT and seen_episode:
+                words = text.split()
+                meta_start = None
+                for i, w in enumerate(words):
+                    is_meta = _classify_text_content(w) is not None
+                    if not is_meta and "-" in w:
+                        is_meta = any(
+                            _classify_text_content(sp) is not None
+                            for sp in w.split("-")
+                            if sp
+                        )
+                    if is_meta:
+                        meta_start = i
+                        break
+                if meta_start is not None:
+                    title_part = " ".join(words[:meta_start]).strip()
+                    meta_part = " ".join(words[meta_start:])
+                    if title_part:
+                        result.append(Token(kind=TokenKind.TEXT, text=title_part))
+                    result.extend(_expand_metadata_words(meta_part))
                     continue
 
             # DOT_TEXT with embedded SxxExx (e.g., "S01E05----Is")
@@ -1240,6 +1281,8 @@ def _build_parsed_media(tokens: list[Token]) -> ParsedMedia:
                     pm.source_type = "Web"
         elif token.kind == TokenKind.REMUX:
             pm.is_remux = True
+            if not pm.source_type:
+                pm.source_type = "BD"
         elif token.kind == TokenKind.YEAR:
             if pm.year is None:
                 pm.year = token.year
