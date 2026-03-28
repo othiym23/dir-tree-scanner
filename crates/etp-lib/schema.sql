@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS files (
     ctime               INTEGER NOT NULL,
     mtime               INTEGER NOT NULL,
     metadata_scanned_at TEXT,
+    content_hash        TEXT,
     UNIQUE(dir_id, filename)
 );
 

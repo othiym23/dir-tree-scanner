@@ -40,6 +40,16 @@ pub fn remove_blob(hash: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// BLAKE3 hash of a file using streaming I/O (constant memory).
+/// Returns None if the file can't be read.
+pub fn hash_file(path: &std::path::Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let mut reader = io::BufReader::new(file);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update_reader(&mut reader).ok()?;
+    Some(hasher.finalize().to_hex().to_string())
+}
+
 /// List all blob hashes present on disk in the CAS directory.
 pub fn list_blob_hashes() -> io::Result<Vec<String>> {
     let cas = paths::cas_dir().map_err(io::Error::other)?;

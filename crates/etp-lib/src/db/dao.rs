@@ -126,6 +126,7 @@ pub struct RemovedFile {
     pub filename: String,
     pub size: u64,
     pub mtime: i64,
+    pub content_hash: Option<String>,
 }
 
 /// Result of syncing files in a directory.
@@ -182,14 +183,15 @@ pub async fn replace_files_on(
     }
 
     // Collect files no longer on disk as candidates for move-tracking.
-    let existing: Vec<(i64, String, i64, i64)> =
-        sqlx::query_as("SELECT id, filename, size, mtime FROM files WHERE dir_id = ?")
-            .bind(dir_id)
-            .fetch_all(&mut *conn)
-            .await?;
+    let existing: Vec<(i64, String, i64, i64, Option<String>)> = sqlx::query_as(
+        "SELECT id, filename, size, mtime, content_hash FROM files WHERE dir_id = ?",
+    )
+    .bind(dir_id)
+    .fetch_all(&mut *conn)
+    .await?;
 
     let mut removed_files = Vec::new();
-    for (file_id, filename, size, mtime) in existing {
+    for (file_id, filename, size, mtime, content_hash) in existing {
         if !new_filenames.contains(filename.as_str()) {
             removed_files.push(RemovedFile {
                 file_id,
@@ -197,6 +199,7 @@ pub async fn replace_files_on(
                 filename,
                 size: size as u64,
                 mtime,
+                content_hash,
             });
         }
     }
@@ -858,10 +861,15 @@ pub async fn upsert_cue_sheet(
 }
 
 /// Mark a file's metadata as scanned at the current time.
-pub async fn mark_metadata_scanned(pool: &SqlitePool, file_id: i64) -> Result<(), sqlx::Error> {
+pub async fn mark_metadata_scanned(
+    pool: &SqlitePool,
+    file_id: i64,
+    content_hash: Option<&str>,
+) -> Result<(), sqlx::Error> {
     let now = chrono_now();
-    sqlx::query("UPDATE files SET metadata_scanned_at = ? WHERE id = ?")
+    sqlx::query("UPDATE files SET metadata_scanned_at = ?, content_hash = ? WHERE id = ?")
         .bind(&now)
+        .bind(content_hash)
         .bind(file_id)
         .execute(pool)
         .await?;
@@ -1881,7 +1889,9 @@ mod tests {
                 .unwrap();
         assert!(row.0.is_none());
 
-        mark_metadata_scanned(&pool, file_id).await.unwrap();
+        mark_metadata_scanned(&pool, file_id, Some("abc123hash"))
+            .await
+            .unwrap();
 
         let row: (Option<String>,) =
             sqlx::query_as("SELECT metadata_scanned_at FROM files WHERE id = ?")
@@ -2034,7 +2044,7 @@ mod tests {
             .unwrap();
 
         // Mark as scanned
-        mark_metadata_scanned(&pool, file_id).await.unwrap();
+        mark_metadata_scanned(&pool, file_id, None).await.unwrap();
 
         let results = files_needing_metadata_scan(&pool, scan_id, &["mp3"], false)
             .await
