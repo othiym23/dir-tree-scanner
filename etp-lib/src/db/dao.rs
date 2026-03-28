@@ -117,27 +117,44 @@ pub struct FileInput {
     pub mtime: i64,
 }
 
+/// A file that disappeared from a directory during a scan. Held for
+/// move-tracking reconciliation before being deleted.
+#[derive(Debug, Clone)]
+pub struct RemovedFile {
+    pub file_id: i64,
+    pub dir_id: i64,
+    pub filename: String,
+    pub size: u64,
+    pub mtime: i64,
+}
+
+/// Result of syncing files in a directory.
+/// Result of syncing files in a directory.
+pub struct SyncResult {
+    /// Files that disappeared from this directory. Hold these for move-tracking
+    /// reconciliation before deleting.
+    pub removed_files: Vec<RemovedFile>,
+}
+
 /// Sync files for a directory — upserts each file (preserving file IDs for
-/// unchanged filenames) and removes files no longer present. Clears
-/// `metadata_scanned_at` when a file's mtime changes so metadata will be
-/// re-read on the next metadata scan.
+/// unchanged filenames). Returns removed files for move-tracking instead of
+/// deleting them immediately.
 pub async fn replace_files(
     pool: &SqlitePool,
     dir_id: i64,
     files: &[FileInput],
-) -> Result<Vec<String>, sqlx::Error> {
+) -> Result<SyncResult, sqlx::Error> {
     let mut conn = pool.acquire().await?;
     replace_files_on(&mut conn, dir_id, files).await
 }
 
 /// Inner implementation that works on a mutable connection reference, so it
 /// can be called within an existing transaction (e.g., `flush_pending`).
-/// Returns hashes of any orphaned CAS blobs that should be removed from disk.
 pub async fn replace_files_on(
     conn: &mut sqlx::SqliteConnection,
     dir_id: i64,
     files: &[FileInput],
-) -> Result<Vec<String>, sqlx::Error> {
+) -> Result<SyncResult, sqlx::Error> {
     let new_filenames: HashSet<&str> = files.iter().map(|f| f.filename.as_str()).collect();
 
     // Upsert each file. Clear metadata_scanned_at when mtime changes so
@@ -164,32 +181,64 @@ pub async fn replace_files_on(
         .await?;
     }
 
-    // Remove files no longer on disk. Clean up metadata rows first
-    // (ON DELETE RESTRICT prevents deleting files that have metadata).
-    let existing: Vec<(i64, String)> =
-        sqlx::query_as("SELECT id, filename FROM files WHERE dir_id = ?")
+    // Collect files no longer on disk as candidates for move-tracking.
+    let existing: Vec<(i64, String, i64, i64)> =
+        sqlx::query_as("SELECT id, filename, size, mtime FROM files WHERE dir_id = ?")
             .bind(dir_id)
             .fetch_all(&mut *conn)
             .await?;
 
-    let mut had_removals = false;
-    for (file_id, filename) in &existing {
+    let mut removed_files = Vec::new();
+    for (file_id, filename, size, mtime) in existing {
         if !new_filenames.contains(filename.as_str()) {
-            delete_file_dependents(&mut *conn, *file_id).await?;
-            sqlx::query("DELETE FROM files WHERE id = ?")
-                .bind(file_id)
-                .execute(&mut *conn)
-                .await?;
-            had_removals = true;
+            removed_files.push(RemovedFile {
+                file_id,
+                dir_id,
+                filename,
+                size: size as u64,
+                mtime,
+            });
         }
     }
-    let orphan_hashes = if had_removals {
-        cleanup_orphan_blobs(&mut *conn).await?
-    } else {
-        Vec::new()
-    };
 
-    Ok(orphan_hashes)
+    Ok(SyncResult { removed_files })
+}
+
+/// Move a file to a new directory and/or filename, preserving its ID and
+/// all dependent metadata.
+pub async fn move_file(
+    conn: &mut sqlx::SqliteConnection,
+    file_id: i64,
+    new_dir_id: i64,
+    new_filename: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE files SET dir_id = ?, filename = ? WHERE id = ?")
+        .bind(new_dir_id)
+        .bind(new_filename)
+        .bind(file_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Delete removed files that were not matched by move-tracking.
+/// Returns orphaned CAS blob hashes.
+pub async fn delete_unmatched_files(
+    conn: &mut sqlx::SqliteConnection,
+    removed: &[RemovedFile],
+) -> Result<Vec<String>, sqlx::Error> {
+    for rf in removed {
+        delete_file_dependents(&mut *conn, rf.file_id).await?;
+        sqlx::query("DELETE FROM files WHERE id = ?")
+            .bind(rf.file_id)
+            .execute(&mut *conn)
+            .await?;
+    }
+    if !removed.is_empty() {
+        cleanup_orphan_blobs(&mut *conn).await
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 /// Delete all rows that reference a file (metadata, cue_sheets, embedded_images).
@@ -863,6 +912,193 @@ pub async fn referenced_blob_hashes(pool: &SqlitePool) -> Result<HashSet<String>
     Ok(rows.into_iter().map(|(h,)| h).collect())
 }
 
+/// SQL expression that reconstructs the full file path from root_path, dir_path,
+/// and filename. Used in multiple query functions.
+const FULL_PATH_SQL: &str =
+    "s.root_path || CASE WHEN d.path = '' THEN '' ELSE '/' || d.path END || '/' || f.filename";
+
+/// Count of files in a scan.
+pub async fn count_files(pool: &SqlitePool, scan_id: i64) -> Result<i64, sqlx::Error> {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM files f
+         JOIN directories d ON f.dir_id = d.id
+         WHERE d.scan_id = ?",
+    )
+    .bind(scan_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0)
+}
+
+/// List files filtered by a directory path prefix. The prefix is matched
+/// against the full reconstructed path. Pass an empty string to list all files.
+pub async fn list_files_in_directory(
+    pool: &SqlitePool,
+    scan_id: i64,
+    dir_prefix: &str,
+) -> Result<Vec<FileRecord>, sqlx::Error> {
+    let pattern = format!("{dir_prefix}%");
+    let query = format!(
+        "SELECT s.root_path, d.path, f.filename, f.size, f.ctime, f.mtime
+         FROM files f
+         JOIN directories d ON f.dir_id = d.id
+         JOIN scans s ON d.scan_id = s.id
+         WHERE d.scan_id = ? AND {FULL_PATH_SQL} LIKE ?"
+    );
+    let rows: Vec<(String, String, String, i64, i64, i64)> = sqlx::query_as(&query)
+        .bind(scan_id)
+        .bind(&pattern)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(root, dir_path, filename, size, ctime, mtime)| {
+            let full_path = if dir_path.is_empty() {
+                root
+            } else {
+                format!("{root}/{dir_path}")
+            };
+            FileRecord {
+                dir_path: full_path,
+                filename,
+                size: size as u64,
+                ctime,
+                mtime,
+            }
+        })
+        .collect())
+}
+
+/// Look up a file's database ID by matching against the full reconstructed path.
+/// The `path_suffix` is matched against `root_path/dir_path/filename` using
+/// a trailing match, so both absolute and relative paths work.
+pub async fn find_file_id_by_path_suffix(
+    pool: &SqlitePool,
+    scan_id: i64,
+    path_suffix: &str,
+) -> Result<Option<i64>, sqlx::Error> {
+    let pattern = format!("%{path_suffix}");
+    let query = format!(
+        "SELECT f.id FROM files f
+         JOIN directories d ON f.dir_id = d.id
+         JOIN scans s ON d.scan_id = s.id
+         WHERE d.scan_id = ?
+           AND ({FULL_PATH_SQL}) LIKE ?
+         LIMIT 1"
+    );
+    let row: Option<(i64,)> = sqlx::query_as(&query)
+        .bind(scan_id)
+        .bind(&pattern)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|(id,)| id))
+}
+
+// --- Query interface DAO functions ---
+
+/// Find files whose metadata matches a tag name and value pattern.
+/// `value_pattern` uses SQL LIKE syntax (% for wildcard).
+pub async fn find_files_by_tag(
+    pool: &SqlitePool,
+    scan_id: Option<i64>,
+    tag_name: &str,
+    value_pattern: &str,
+) -> Result<Vec<(String, String)>, sqlx::Error> {
+    let (query, needs_scan_id) = if scan_id.is_some() {
+        (
+            format!(
+                "SELECT {FULL_PATH_SQL}, m.value
+                 FROM metadata m
+                 JOIN files f ON m.file_id = f.id
+                 JOIN directories d ON f.dir_id = d.id
+                 JOIN scans s ON d.scan_id = s.id
+                 WHERE d.scan_id = ? AND m.tag_name = ? AND m.value LIKE ?
+                 ORDER BY d.path, f.filename"
+            ),
+            true,
+        )
+    } else {
+        (
+            format!(
+                "SELECT {FULL_PATH_SQL}, m.value
+                 FROM metadata m
+                 JOIN files f ON m.file_id = f.id
+                 JOIN directories d ON f.dir_id = d.id
+                 JOIN scans s ON d.scan_id = s.id
+                 WHERE m.tag_name = ? AND m.value LIKE ?
+                 ORDER BY d.path, f.filename"
+            ),
+            false,
+        )
+    };
+
+    let mut q = sqlx::query_as::<_, (String, String)>(&query);
+    if needs_scan_id {
+        q = q.bind(scan_id.unwrap());
+    }
+    q = q.bind(tag_name).bind(value_pattern);
+    q.fetch_all(pool).await
+}
+
+/// Count files grouped by extension (the part after the last dot).
+/// Extension extraction is done in Rust because SQLite lacks a
+/// "last index of" function for reliable multi-dot filename handling.
+pub async fn count_files_by_extension(
+    pool: &SqlitePool,
+    scan_id: Option<i64>,
+) -> Result<Vec<(String, i64)>, sqlx::Error> {
+    let query = if scan_id.is_some() {
+        "SELECT f.filename FROM files f
+         JOIN directories d ON f.dir_id = d.id
+         WHERE d.scan_id = ?"
+    } else {
+        "SELECT f.filename FROM files f"
+    };
+
+    let mut q = sqlx::query_as::<_, (String,)>(query);
+    if let Some(id) = scan_id {
+        q = q.bind(id);
+    }
+    let rows = q.fetch_all(pool).await?;
+
+    let mut counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for (filename,) in &rows {
+        if let Some(dot_pos) = filename.rfind('.') {
+            let ext = filename[dot_pos + 1..].to_ascii_lowercase();
+            if !ext.is_empty() {
+                *counts.entry(ext).or_default() += 1;
+            }
+        }
+    }
+
+    let mut result: Vec<(String, i64)> = counts.into_iter().collect();
+    result.sort_by(|a, b| b.1.cmp(&a.1));
+    Ok(result)
+}
+
+/// Execute a custom WHERE clause against files+metadata.
+/// Returns matching file paths. The WHERE clause is appended to a base query
+/// that joins files, directories, scans, and metadata.
+///
+/// WARNING: The caller must sanitize the WHERE clause. This function does NOT
+/// parameterize the clause — it is appended directly to SQL.
+pub async fn query_files_where(
+    pool: &SqlitePool,
+    where_clause: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    let query = format!(
+        "SELECT DISTINCT {FULL_PATH_SQL}
+         FROM files f
+         JOIN directories d ON f.dir_id = d.id
+         JOIN scans s ON d.scan_id = s.id
+         LEFT JOIN metadata m ON m.file_id = f.id
+         WHERE {where_clause}
+         ORDER BY d.path, f.filename"
+    );
+    let rows: Vec<(String,)> = sqlx::query_as(&query).fetch_all(pool).await?;
+    Ok(rows.into_iter().map(|(p,)| p).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -987,21 +1223,38 @@ mod tests {
             .unwrap();
         assert_eq!(count.0, 2);
 
-        // Replace with different files
+        // Replace with different files — removed files are returned, not deleted
         let new_files = vec![FileInput {
             filename: "c.txt".into(),
             size: 300,
             ctime: 5000,
             mtime: 6000,
         }];
-        replace_files(&pool, dir_id, &new_files).await.unwrap();
+        let sync = replace_files(&pool, dir_id, &new_files).await.unwrap();
+        assert_eq!(sync.removed_files.len(), 2); // a.txt and b.txt removed
+
+        // Files still exist until we explicitly delete unmatched ones
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM files WHERE dir_id = ?")
+            .bind(dir_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 3); // c.txt + a.txt + b.txt still in DB
+
+        // Delete unmatched
+        {
+            let mut conn = pool.acquire().await.unwrap();
+            delete_unmatched_files(&mut conn, &sync.removed_files)
+                .await
+                .unwrap();
+        }
 
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM files WHERE dir_id = ?")
             .bind(dir_id)
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count.0, 1);
+        assert_eq!(count.0, 1); // only c.txt remains
     }
 
     #[tokio::test]

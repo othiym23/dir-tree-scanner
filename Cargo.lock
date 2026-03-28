@@ -489,6 +489,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "etp-cas"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "etp-lib",
+ "tokio",
+ "trycmd",
+]
+
+[[package]]
 name = "etp-csv"
 version = "0.2.0"
 dependencies = [
@@ -496,6 +506,14 @@ dependencies = [
  "etp-lib",
  "tokio",
  "trycmd",
+]
+
+[[package]]
+name = "etp-cue"
+version = "0.2.0"
+dependencies = [
+ "base64 0.22.1",
+ "sha1",
 ]
 
 [[package]]
@@ -538,8 +556,19 @@ name = "etp-meta"
 version = "0.2.0"
 dependencies = [
  "clap",
+ "etp-cue",
  "etp-lib",
  "serde_json",
+ "tokio",
+ "trycmd",
+]
+
+[[package]]
+name = "etp-query"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "etp-lib",
  "tokio",
  "trycmd",
 ]

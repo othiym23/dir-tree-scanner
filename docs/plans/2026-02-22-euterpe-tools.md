@@ -500,6 +500,12 @@ and `filename`; unmatched files are deleted with dependent cleanup.
 all metadata. A file renamed in place (same directory, different name) is also
 tracked.
 
+**Future optimization**: When the metadata scanner reads a file, it should
+compute and store the BLAKE3 content hash in the `files` table (new column).
+Move tracking can then match on stored hashes instead of re-reading files,
+eliminating the I/O-heavy hashing step during reconciliation. This also enables
+content-based deduplication detection.
+
 ---
 
 ## Subproject 3: Large-Scale Metadata Management
@@ -524,6 +530,34 @@ strict mode.
 
 **Done when**: `etp meta write <file> --tag artist --value "X"` safely writes.
 Batch coalesced writes work. Files never corrupted.
+
+### SP3.1b: MusicBrainz Read-Through Cache
+
+Local read-through cache for MusicBrainz API data. Stored in the euterpe-tools
+data directory (SQLite or JSON files). Designed to be parsimonious about load on
+MB servers:
+
+- **High/infinite TTL by default**: cached data is returned without checking
+  upstream. Callers indicate at read time when they need fresh data (e.g., the
+  "verify MB metadata is current" quality check passes a `refresh: true` flag).
+- **Batch-first**: prefer a few large API requests over many small ones. Use
+  MB's release-group, release, and recording batch lookup endpoints. When
+  refreshing, collect all stale IDs and fetch them in bulk.
+- **Rate limiting**: respect MB's rate limit (1 req/sec for authenticated, lower
+  for anonymous). Queue and throttle requests.
+
+Use cases:
+
+- SP3.3 quality check: "is the MusicBrainz recording ID in this file still
+  valid? Has the release been updated?" — reads from cache, optionally
+  refreshes.
+- SP3.2/SP3.4 scripted transforms: Lua/CSV pipelines can look up MB data
+  (release info, track lists, artist credits) to enrich or correct local tags.
+- Disc ID → release lookup: given a computed disc ID (from etp-cue), find the
+  matching MB release and populate tags.
+
+**Done when**: cache stores MB releases/recordings/release-groups, supports
+read-with-optional-refresh, batch fetches, and respects rate limits.
 
 ### SP3.2: Lua Scripting Runtime
 
@@ -588,9 +622,10 @@ SP1.1 Workspace Restructure
                      ├→ SP2.5 Query Interface (incremental)
                      └→ SP2.6 File-Move Tracking (parallel)
                          └→ SP3.1 Write Path
-                             ├→ SP3.2 Lua Scripting
-                             │   └→ SP3.4 Declarative Transforms
-                             └→ SP3.3 Quality Checking
+                             └→ SP3.1b MusicBrainz Cache
+                                 ├→ SP3.2 Lua Scripting
+                                 │   └→ SP3.4 Declarative Transforms
+                                 └→ SP3.3 Quality Checking
 ```
 
 ## Cross-Cutting
