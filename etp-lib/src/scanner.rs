@@ -311,9 +311,8 @@ async fn reconcile_moves(
                                 rf.filename, new_filename
                             );
                         }
-                        // Move the old file record to the new location
                         dao::move_file(&mut conn, rf.file_id, *new_dir_id, new_filename).await?;
-                        // Delete the newly inserted duplicate
+                        dao::delete_file_dependents(&mut conn, *new_id).await?;
                         sqlx::query("DELETE FROM files WHERE id = ?")
                             .bind(new_id)
                             .execute(&mut *conn)
@@ -334,6 +333,7 @@ async fn reconcile_moves(
                     );
                 }
                 dao::move_file(&mut conn, rf.file_id, *new_dir_id, new_filename).await?;
+                dao::delete_file_dependents(&mut conn, *new_id).await?;
                 sqlx::query("DELETE FROM files WHERE id = ?")
                     .bind(new_id)
                     .execute(&mut *conn)
@@ -357,10 +357,14 @@ async fn reconcile_moves(
     Ok(orphans)
 }
 
-/// BLAKE3 hash of a file, or None if the file can't be read.
+/// BLAKE3 hash of a file using streaming I/O (constant memory).
+/// Returns None if the file can't be read.
 fn hash_file(path: &Path) -> Option<String> {
-    let data = fs::read(path).ok()?;
-    Some(blake3::hash(&data).to_hex().to_string())
+    let file = fs::File::open(path).ok()?;
+    let mut reader = io::BufReader::new(file);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update_reader(&mut reader).ok()?;
+    Some(hasher.finalize().to_hex().to_string())
 }
 
 /// Look up a directory's relative path by its ID.
