@@ -40,6 +40,16 @@ pub fn remove_blob(hash: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// BLAKE3 hash of a file using streaming I/O (constant memory).
+/// Returns None if the file can't be read.
+pub fn hash_file(path: &std::path::Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let mut reader = io::BufReader::new(file);
+    let mut hasher = blake3::Hasher::new();
+    hasher.update_reader(&mut reader).ok()?;
+    Some(hasher.finalize().to_hex().to_string())
+}
+
 /// List all blob hashes present on disk in the CAS directory.
 pub fn list_blob_hashes() -> io::Result<Vec<String>> {
     let cas = paths::cas_dir().map_err(io::Error::other)?;
@@ -73,5 +83,21 @@ mod tests {
         let hash2 = blake3::hash(b"test data").to_hex().to_string();
         assert_eq!(hash1, hash2);
         assert_ne!(hash1, blake3::hash(b"other data").to_hex().to_string());
+    }
+
+    #[test]
+    fn test_hash_file_matches_in_memory() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let data = b"streaming hash test content";
+        std::fs::write(tmp.path(), data).unwrap();
+
+        let file_hash = super::hash_file(tmp.path()).unwrap();
+        let mem_hash = blake3::hash(data).to_hex().to_string();
+        assert_eq!(file_hash, mem_hash);
+    }
+
+    #[test]
+    fn test_hash_file_nonexistent_returns_none() {
+        assert!(super::hash_file(std::path::Path::new("/nonexistent/file")).is_none());
     }
 }

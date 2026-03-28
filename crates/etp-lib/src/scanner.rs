@@ -319,7 +319,7 @@ async fn reconcile_moves(
         } else {
             root.join(dir_path).join(new_filename)
         };
-        let new_hash = match hash_file(&new_path) {
+        let new_hash = match cas::hash_file(&new_path) {
             Some(h) => h,
             None => continue,
         };
@@ -330,12 +330,21 @@ async fn reconcile_moves(
             }
             let rf = &removed[idx];
 
-            let old_path = match dir_paths.get(&rf.dir_id) {
-                Some(dp) if dp.is_empty() => root.join(&rf.filename),
-                Some(dp) => root.join(dp).join(&rf.filename),
-                None => continue,
+            // Use stored content hash if available (from prior metadata scan),
+            // otherwise read and hash the old file from disk.
+            let old_hash = if let Some(ref stored) = rf.content_hash {
+                Some(stored.clone())
+            } else {
+                let old_path = match dir_paths.get(&rf.dir_id) {
+                    Some(dp) if dp.is_empty() => root.join(&rf.filename),
+                    Some(dp) => root.join(dp).join(&rf.filename),
+                    None => {
+                        continue;
+                    }
+                };
+                cas::hash_file(&old_path)
             };
-            let old_hash = match hash_file(&old_path) {
+            let old_hash = match old_hash {
                 Some(h) => h,
                 None => {
                     // Old file is gone (expected for a move). Accept a size-only
@@ -440,16 +449,6 @@ async fn apply_move(
         .execute(&mut **tx)
         .await?;
     Ok(())
-}
-
-/// BLAKE3 hash of a file using streaming I/O (constant memory).
-/// Returns None if the file can't be read.
-fn hash_file(path: &Path) -> Option<String> {
-    let file = fs::File::open(path).ok()?;
-    let mut reader = io::BufReader::new(file);
-    let mut hasher = blake3::Hasher::new();
-    hasher.update_reader(&mut reader).ok()?;
-    Some(hasher.finalize().to_hex().to_string())
 }
 
 /// Local struct for batching directory updates in scan_to_db.

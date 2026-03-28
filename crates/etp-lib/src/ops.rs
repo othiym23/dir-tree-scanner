@@ -561,7 +561,10 @@ async fn process_audio_file(
         }
     }
 
-    dao::mark_metadata_scanned(pool, record.file_id)
+    // Compute content hash for move tracking and deduplication
+    let content_hash = cas::hash_file(&full_path);
+
+    dao::mark_metadata_scanned(pool, record.file_id, content_hash.as_deref())
         .await
         .map_err(|e| format!("mark scanned: {e}"))?;
 

@@ -17,9 +17,13 @@ VERSION = "0.1.0"
 
 BUILTIN_COMMANDS = {
     "anime": "Interactive anime collection manager",
+    "cas": "Content-addressable blob storage operations",
     "catalog": "Run catalog scans across configured directory trees",
     "csv": "Incremental filesystem scanner with CSV output",
     "find": "Search indexed files by regex pattern",
+    "meta": "Audio metadata scan, read, and CUE sheet display",
+    "query": "Query indexed files and metadata",
+    "scan": "Scan a directory and update the database",
     "tree": "Incremental filesystem scanner with tree output",
 }
 
