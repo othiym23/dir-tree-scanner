@@ -216,6 +216,67 @@ pub fn parse_ignore_patterns(patterns: &[String]) -> Vec<glob::Pattern> {
         .collect()
 }
 
+/// Result of opening a database and resolving a scan for a directory.
+pub struct ScanContext {
+    pub pool: SqlitePool,
+    pub scan_id: i64,
+    pub directory: PathBuf,
+}
+
+/// Open the database for a directory and resolve the scan_id.
+///
+/// Handles the common setup sequence shared by etp-tree and etp-csv:
+/// 1. Resolve `--db` path (defaults to `<directory>/.etp.db`)
+/// 2. Resolve `--[no-]scan` via `resolve_bool_pair`
+/// 3. Guard against creating an empty DB when not scanning
+/// 4. Open the database
+/// 5. Canonicalize the directory and resolve the scan_id
+///
+/// Exits with `EXIT_NO_SCAN` (code 2) if no scan exists and `--scan` was not
+/// passed. Exits with code 1 on database or I/O errors.
+pub async fn open_and_resolve_scan(
+    directory: &Path,
+    db: Option<PathBuf>,
+    scan: bool,
+    no_scan: bool,
+    exclude: &[String],
+    verbose: bool,
+) -> ScanContext {
+    validate_directory(directory);
+
+    let db_path = db.unwrap_or_else(|| directory.join(".etp.db"));
+    let do_scan = resolve_bool_pair(scan, no_scan, "scan", false);
+
+    if !do_scan && !db_path.exists() {
+        eprintln!(
+            "error: no previous scan exists for this directory; run etp-scan first, or pass --scan"
+        );
+        process::exit(EXIT_NO_SCAN);
+    }
+
+    let pool = crate::db::open_db(&db_path, verbose)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("error opening database: {e}");
+            process::exit(1);
+        });
+
+    let canon = directory.canonicalize().unwrap_or(directory.to_path_buf());
+    let run_type = canon.to_string_lossy();
+
+    let scan_id = if do_scan {
+        run_scan_to_db(directory, &pool, &run_type, exclude, verbose).await
+    } else {
+        resolve_latest_scan_id(&pool, &run_type, verbose).await
+    };
+
+    ScanContext {
+        pool,
+        scan_id,
+        directory: directory.to_path_buf(),
+    }
+}
+
 /// Look up the latest scan_id for a directory. Exits with `EXIT_NO_SCAN` if
 /// no scan exists, allowing the porcelain to auto-scan and retry.
 pub async fn resolve_latest_scan_id(pool: &SqlitePool, run_type: &str, verbose: bool) -> i64 {

@@ -75,41 +75,19 @@ async fn main() {
         None
     };
 
-    ops::validate_directory(&cli.directory);
-
     let output = cli
         .output
         .unwrap_or_else(|| cli.directory.join("index.csv"));
-    let db_path = cli.db.unwrap_or_else(|| cli.directory.join(".etp.db"));
 
-    let do_scan = ops::resolve_bool_pair(cli.scan, cli.no_scan, "scan", false);
-
-    // When not scanning, bail early if no DB exists to avoid creating an empty one.
-    if !do_scan && !db_path.exists() {
-        eprintln!(
-            "error: no previous scan exists for this directory; run etp-scan first, or pass --scan"
-        );
-        std::process::exit(ops::EXIT_NO_SCAN);
-    }
-
-    let pool = etp_lib::db::open_db(&db_path, cli.verbose)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("error opening database: {}", e);
-            std::process::exit(1);
-        });
-
-    let canon = cli
-        .directory
-        .canonicalize()
-        .unwrap_or(cli.directory.clone());
-    let run_type = canon.to_string_lossy();
-
-    let scan_id = if do_scan {
-        ops::run_scan_to_db(&cli.directory, &pool, &run_type, &cli.exclude, cli.verbose).await
-    } else {
-        ops::resolve_latest_scan_id(&pool, &run_type, cli.verbose).await
-    };
+    let ctx = ops::open_and_resolve_scan(
+        &cli.directory,
+        cli.db,
+        cli.scan,
+        cli.no_scan,
+        &cli.exclude,
+        cli.verbose,
+    )
+    .await;
 
     let filter = ops::FilterConfig::from_flags(
         cli.include_system_files,
@@ -120,17 +98,26 @@ async fn main() {
     if let Some(ref find_pattern) = cli.find {
         let pattern = ops::compile_pattern(find_pattern, cli.insensitive);
         let matches =
-            ops::collect_find_matches(&pool, scan_id, &pattern, &cli.exclude, &filter).await;
+            ops::collect_find_matches(&ctx.pool, ctx.scan_id, &pattern, &cli.exclude, &filter)
+                .await;
         let output_str = output.to_string_lossy();
         ops::write_find_csv(&matches, &output_str).unwrap_or_else(|e| {
             eprintln!("error writing CSV: {}", e);
             std::process::exit(1);
         });
     } else {
-        ops::write_csv_from_db(&pool, scan_id, &output, &cli.exclude, &filter, cli.verbose).await;
+        ops::write_csv_from_db(
+            &ctx.pool,
+            ctx.scan_id,
+            &output,
+            &cli.exclude,
+            &filter,
+            cli.verbose,
+        )
+        .await;
     }
 
-    etp_lib::db::close_db(pool).await;
+    etp_lib::db::close_db(ctx.pool).await;
 
     #[cfg(feature = "profiling")]
     if let Some(guard) = _profiling_guard {

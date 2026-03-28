@@ -90,38 +90,16 @@ async fn main() {
     if cli.verbose {
         eprintln!("root is {}", cli.directory.display());
     }
-    ops::validate_directory(&cli.directory);
 
-    let db_path = cli.db.unwrap_or_else(|| cli.directory.join(".etp.db"));
-
-    let do_scan = ops::resolve_bool_pair(cli.scan, cli.no_scan, "scan", false);
-
-    // When not scanning, bail early if no DB exists to avoid creating an empty one.
-    if !do_scan && !db_path.exists() {
-        eprintln!(
-            "error: no previous scan exists for this directory; run etp-scan first, or pass --scan"
-        );
-        std::process::exit(ops::EXIT_NO_SCAN);
-    }
-
-    let pool = etp_lib::db::open_db(&db_path, cli.verbose)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("error opening database: {}", e);
-            std::process::exit(1);
-        });
-
-    let canon = cli
-        .directory
-        .canonicalize()
-        .unwrap_or(cli.directory.clone());
-    let run_type = canon.to_string_lossy();
-
-    let scan_id = if do_scan {
-        ops::run_scan_to_db(&cli.directory, &pool, &run_type, &cli.exclude, cli.verbose).await
-    } else {
-        ops::resolve_latest_scan_id(&pool, &run_type, cli.verbose).await
-    };
+    let ctx = ops::open_and_resolve_scan(
+        &cli.directory,
+        cli.db,
+        cli.scan,
+        cli.no_scan,
+        &cli.exclude,
+        cli.verbose,
+    )
+    .await;
 
     let filter = ops::FilterConfig::from_flags(
         cli.include_system_files,
@@ -132,8 +110,9 @@ async fn main() {
     if let Some(ref find_pattern) = cli.find {
         let pattern = ops::compile_pattern(find_pattern, cli.insensitive);
         let matches =
-            ops::collect_find_matches(&pool, scan_id, &pattern, &cli.exclude, &filter).await;
-        ops::render_find_tree(&matches, &cli.directory, "-").unwrap_or_else(|e| {
+            ops::collect_find_matches(&ctx.pool, ctx.scan_id, &pattern, &cli.exclude, &filter)
+                .await;
+        ops::render_find_tree(&matches, &ctx.directory, "-").unwrap_or_else(|e| {
             eprintln!("error rendering tree: {}", e);
             std::process::exit(1);
         });
@@ -142,9 +121,9 @@ async fn main() {
         all_ignore.extend(cli.exclude.iter().cloned());
 
         ops::render_tree_from_db(
-            &pool,
-            scan_id,
-            &cli.directory,
+            &ctx.pool,
+            ctx.scan_id,
+            &ctx.directory,
             &all_ignore,
             &filter,
             cli.no_escape,
@@ -157,10 +136,10 @@ async fn main() {
     }
 
     if cli.du {
-        ops::render_du(&pool, scan_id, cli.du_subs).await;
+        ops::render_du(&ctx.pool, ctx.scan_id, cli.du_subs).await;
     }
 
-    etp_lib::db::close_db(pool).await;
+    etp_lib::db::close_db(ctx.pool).await;
 
     #[cfg(feature = "profiling")]
     if let Some(guard) = _profiling_guard {
