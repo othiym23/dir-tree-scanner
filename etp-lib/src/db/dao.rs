@@ -863,6 +863,124 @@ pub async fn referenced_blob_hashes(pool: &SqlitePool) -> Result<HashSet<String>
     Ok(rows.into_iter().map(|(h,)| h).collect())
 }
 
+/// Look up a file's database ID by matching against the full reconstructed path.
+/// The `path_suffix` is matched against `root_path/dir_path/filename` using
+/// a trailing match, so both absolute and relative paths work.
+pub async fn find_file_id_by_path_suffix(
+    pool: &SqlitePool,
+    scan_id: i64,
+    path_suffix: &str,
+) -> Result<Option<i64>, sqlx::Error> {
+    let pattern = format!("%{path_suffix}");
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT f.id FROM files f
+         JOIN directories d ON f.dir_id = d.id
+         JOIN scans s ON d.scan_id = s.id
+         WHERE d.scan_id = ?
+           AND (s.root_path || CASE WHEN d.path = '' THEN '' ELSE '/' || d.path END || '/' || f.filename) LIKE ?
+         LIMIT 1",
+    )
+    .bind(scan_id)
+    .bind(&pattern)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(id,)| id))
+}
+
+// --- Query interface DAO functions ---
+
+/// Find files whose metadata matches a tag name and value pattern.
+/// `value_pattern` uses SQL LIKE syntax (% for wildcard).
+pub async fn find_files_by_tag(
+    pool: &SqlitePool,
+    scan_id: Option<i64>,
+    tag_name: &str,
+    value_pattern: &str,
+) -> Result<Vec<(String, String)>, sqlx::Error> {
+    let (query, needs_scan_id) = if scan_id.is_some() {
+        (
+            "SELECT s.root_path || CASE WHEN d.path = '' THEN '' ELSE '/' || d.path END || '/' || f.filename, m.value
+             FROM metadata m
+             JOIN files f ON m.file_id = f.id
+             JOIN directories d ON f.dir_id = d.id
+             JOIN scans s ON d.scan_id = s.id
+             WHERE d.scan_id = ? AND m.tag_name = ? AND m.value LIKE ?
+             ORDER BY d.path, f.filename",
+            true,
+        )
+    } else {
+        (
+            "SELECT s.root_path || CASE WHEN d.path = '' THEN '' ELSE '/' || d.path END || '/' || f.filename, m.value
+             FROM metadata m
+             JOIN files f ON m.file_id = f.id
+             JOIN directories d ON f.dir_id = d.id
+             JOIN scans s ON d.scan_id = s.id
+             WHERE m.tag_name = ? AND m.value LIKE ?
+             ORDER BY d.path, f.filename",
+            false,
+        )
+    };
+
+    let mut q = sqlx::query_as::<_, (String, String)>(query);
+    if needs_scan_id {
+        q = q.bind(scan_id.unwrap());
+    }
+    q = q.bind(tag_name).bind(value_pattern);
+    q.fetch_all(pool).await
+}
+
+/// Count files grouped by extension.
+pub async fn count_files_by_extension(
+    pool: &SqlitePool,
+    scan_id: Option<i64>,
+) -> Result<Vec<(String, i64)>, sqlx::Error> {
+    let query = if scan_id.is_some() {
+        "SELECT lower(substr(f.filename, instr(f.filename, '.') + 1)) AS ext,
+                COUNT(*) AS cnt
+         FROM files f
+         JOIN directories d ON f.dir_id = d.id
+         WHERE d.scan_id = ? AND instr(f.filename, '.') > 0
+         GROUP BY ext
+         ORDER BY cnt DESC"
+    } else {
+        "SELECT lower(substr(f.filename, instr(f.filename, '.') + 1)) AS ext,
+                COUNT(*) AS cnt
+         FROM files f
+         WHERE instr(f.filename, '.') > 0
+         GROUP BY ext
+         ORDER BY cnt DESC"
+    };
+
+    let mut q = sqlx::query_as::<_, (String, i64)>(query);
+    if let Some(id) = scan_id {
+        q = q.bind(id);
+    }
+    q.fetch_all(pool).await
+}
+
+/// Execute a custom WHERE clause against files+metadata.
+/// Returns matching file paths. The WHERE clause is appended to a base query
+/// that joins files, directories, scans, and metadata.
+///
+/// WARNING: The caller must sanitize the WHERE clause. This function does NOT
+/// parameterize the clause — it is appended directly to SQL.
+pub async fn query_files_where(
+    pool: &SqlitePool,
+    where_clause: &str,
+) -> Result<Vec<String>, sqlx::Error> {
+    let query = format!(
+        "SELECT DISTINCT s.root_path || CASE WHEN d.path = '' THEN '' ELSE '/' || d.path END || '/' || f.filename
+         FROM files f
+         JOIN directories d ON f.dir_id = d.id
+         JOIN scans s ON d.scan_id = s.id
+         LEFT JOIN metadata m ON m.file_id = f.id
+         WHERE {where_clause}
+         ORDER BY d.path, f.filename"
+    );
+    let rows: Vec<(String,)> = sqlx::query_as(&query).fetch_all(pool).await?;
+    Ok(rows.into_iter().map(|(p,)| p).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
