@@ -1,5 +1,6 @@
 use crate::db::dao;
 use crate::finder::FindMatch;
+use crate::ops::FilterConfig;
 use glob::Pattern;
 use icu_collator::CollatorBorrowed;
 use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
@@ -30,6 +31,7 @@ struct TreeContext<'a> {
     files_by_dir: HashMap<PathBuf, Vec<String>>,
     children: BTreeMap<PathBuf, BTreeSet<String>>,
     patterns: &'a [Pattern],
+    filter: &'a FilterConfig,
     collator: CollatorBorrowed<'static>,
     no_escape: bool,
     show_hidden: bool,
@@ -52,6 +54,7 @@ pub async fn render_tree_from_db(
     scan_id: i64,
     root: &Path,
     patterns: &[Pattern],
+    filter: &FilterConfig,
     no_escape: bool,
     show_hidden: bool,
 ) -> io::Result<(usize, usize)> {
@@ -89,6 +92,7 @@ pub async fn render_tree_from_db(
         files_by_dir,
         children,
         patterns,
+        filter,
         collator: make_collator()?,
         no_escape,
         show_hidden,
@@ -153,10 +157,12 @@ pub fn render_tree_from_paths(
     }
 
     let no_patterns: Vec<Pattern> = Vec::new();
+    let show_all = FilterConfig::new(true);
     let ctx = TreeContext {
         files_by_dir,
         children,
         patterns: &no_patterns,
+        filter: &show_all,
         collator: make_collator()?,
         no_escape: true,
         show_hidden: true,
@@ -191,6 +197,9 @@ fn merge_entries(files: &[String], child_dirs: &BTreeSet<String>, ctx: &TreeCont
         .chain(child_dirs.iter().map(|d| Entry::Dir(d.clone())))
         .filter(|e| {
             let n = e.name();
+            if !ctx.filter.should_show_name(n) {
+                return false;
+            }
             if !ctx.show_hidden && n.starts_with('.') {
                 return false;
             }

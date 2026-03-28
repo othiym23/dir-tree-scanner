@@ -10,6 +10,27 @@ use std::time::Instant;
 /// Exit code for "no scan exists" — recoverable by running etp-scan first.
 pub const EXIT_NO_SCAN: i32 = 2;
 
+/// NAS/OS system files: always scanned, counted in du, hidden from display
+/// unless `--include-system-files` is passed.
+pub const DEFAULT_SYSTEM_PATTERNS: &[&str] = &[
+    "@eaDir",
+    "@eaStream",
+    "@tmp",
+    "@SynoResource",
+    "@SynoEAStream",
+    "#recycle",
+    ".SynologyWorkingDirectory",
+    ".etp.db",
+    ".etp.db-wal",
+    ".etp.db-shm",
+];
+
+/// Default user excludes: hidden from display AND excluded from size calculations.
+/// Uses glob patterns matched against file/directory names.
+pub const DEFAULT_USER_EXCLUDES: &[&str] = &[
+    ".*", // dotfiles
+];
+
 /// Compile a regex pattern, optionally case-insensitive. Exits on invalid pattern.
 pub fn compile_pattern(pattern: &str, case_insensitive: bool) -> regex::Regex {
     regex::RegexBuilder::new(pattern)
@@ -38,6 +59,126 @@ pub fn is_excluded_path(dir_path: &str, exclude: &[String]) -> bool {
     std::path::Path::new(dir_path)
         .components()
         .any(|c| exclude.iter().any(|ex| c.as_os_str() == ex.as_str()))
+}
+
+/// Check whether a name matches any system file pattern (exact match).
+pub fn is_system_name(name: &str, system_patterns: &[String]) -> bool {
+    system_patterns.iter().any(|p| p == name)
+}
+
+/// Check whether a directory path or filename matches any system file pattern.
+/// Checks each path component and the filename itself.
+pub fn is_system_path(dir_path: &str, filename: Option<&str>, system_patterns: &[String]) -> bool {
+    if system_patterns.is_empty() {
+        return false;
+    }
+    if std::path::Path::new(dir_path)
+        .components()
+        .any(|c| system_patterns.iter().any(|p| c.as_os_str() == p.as_str()))
+    {
+        return true;
+    }
+    if let Some(name) = filename {
+        return is_system_name(name, system_patterns);
+    }
+    false
+}
+
+/// Check whether a name matches any user exclude glob pattern.
+pub fn is_user_excluded_name(name: &str, patterns: &[glob::Pattern]) -> bool {
+    patterns.iter().any(|p| p.matches(name))
+}
+
+/// Check whether a directory path or filename matches any user exclude glob pattern.
+pub fn is_user_excluded(
+    dir_path: &str,
+    filename: Option<&str>,
+    patterns: &[glob::Pattern],
+) -> bool {
+    if patterns.is_empty() {
+        return false;
+    }
+    if std::path::Path::new(dir_path).components().any(|c| {
+        let name = c.as_os_str().to_string_lossy();
+        patterns.iter().any(|p| p.matches(&name))
+    }) {
+        return true;
+    }
+    if let Some(name) = filename {
+        return is_user_excluded_name(name, patterns);
+    }
+    false
+}
+
+/// Build system pattern list from string slices.
+pub fn default_system_patterns() -> Vec<String> {
+    DEFAULT_SYSTEM_PATTERNS
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Build default user exclude patterns as compiled globs.
+pub fn default_user_exclude_patterns() -> Vec<glob::Pattern> {
+    DEFAULT_USER_EXCLUDES
+        .iter()
+        .filter_map(|p| glob::Pattern::new(p).ok())
+        .collect()
+}
+
+/// Bundled filtering options for display-time filtering.
+pub struct FilterConfig {
+    pub system_patterns: Vec<String>,
+    pub user_excludes: Vec<glob::Pattern>,
+    pub include_system_files: bool,
+}
+
+impl FilterConfig {
+    /// Create with defaults: system files hidden, default patterns.
+    pub fn new(include_system_files: bool) -> Self {
+        Self {
+            system_patterns: default_system_patterns(),
+            user_excludes: default_user_exclude_patterns(),
+            include_system_files,
+        }
+    }
+
+    /// Check whether a name (file or directory) should be shown.
+    pub fn should_show_name(&self, name: &str) -> bool {
+        let is_system = is_system_name(name, &self.system_patterns);
+        if !self.include_system_files && is_system {
+            return false;
+        }
+        // System files are exempt from user excludes (they're managed separately)
+        if !is_system && is_user_excluded_name(name, &self.user_excludes) {
+            return false;
+        }
+        true
+    }
+
+    /// Check whether a file record should be shown (checks filename and dir name only,
+    /// not the full absolute path which may contain system directories like `.tmp*`).
+    pub fn should_show(&self, dir_path: &str, filename: &str) -> bool {
+        let is_system_file = is_system_name(filename, &self.system_patterns);
+        // Check if any path component is a system directory
+        let in_system_dir = std::path::Path::new(dir_path).components().any(|c| {
+            self.system_patterns
+                .iter()
+                .any(|p| c.as_os_str() == p.as_str())
+        });
+        let is_system = is_system_file || in_system_dir;
+
+        if !self.include_system_files && is_system {
+            return false;
+        }
+        // System files are exempt from user excludes (they're managed separately).
+        // Only check the filename against user excludes, not the full dir_path
+        // (which includes the absolute root and may contain unrelated dot-dirs).
+        if !is_system && is_user_excluded_name(filename, &self.user_excludes) {
+            return false;
+        }
+        true
+    }
 }
 
 /// Parse glob ignore patterns, warning on and discarding invalid ones.
@@ -114,9 +255,10 @@ pub async fn write_csv_from_db(
     scan_id: i64,
     output: &Path,
     exclude: &[String],
+    filter: &FilterConfig,
     verbose: bool,
 ) {
-    if let Err(e) = csv_writer::write_csv_from_db(pool, scan_id, output, exclude, verbose).await {
+    if let Err(e) = csv_writer::write_csv_from_db(pool, scan_id, output, exclude, filter).await {
         eprintln!("error writing CSV: {}", e);
         process::exit(1);
     }
@@ -135,12 +277,21 @@ pub async fn render_tree_from_db(
     scan_id: i64,
     root: &Path,
     ignore: &[String],
+    filter: &FilterConfig,
     no_escape: bool,
     show_hidden: bool,
 ) -> std::io::Result<()> {
     let patterns = parse_ignore_patterns(ignore);
-    let (dir_count, file_count) =
-        tree::render_tree_from_db(pool, scan_id, root, &patterns, no_escape, show_hidden).await?;
+    let (dir_count, file_count) = tree::render_tree_from_db(
+        pool,
+        scan_id,
+        root,
+        &patterns,
+        filter,
+        no_escape,
+        show_hidden,
+    )
+    .await?;
     println!("\n{} directories, {} files", dir_count, file_count);
     Ok(())
 }
@@ -203,6 +354,7 @@ pub async fn stream_find_matches(
     scan_id: i64,
     pattern: &regex::Regex,
     exclude: &[String],
+    filter: &FilterConfig,
 ) -> (usize, u64) {
     use crate::finder;
     use std::future::poll_fn;
@@ -221,6 +373,9 @@ pub async fn stream_find_matches(
         match result {
             Ok(record) => {
                 if is_excluded_path(&record.dir_path, exclude) {
+                    continue;
+                }
+                if !filter.should_show(&record.dir_path, &record.filename) {
                     continue;
                 }
                 if let Some(m) = finder::matches_pattern(&record, pattern) {
@@ -249,6 +404,7 @@ pub async fn collect_find_matches(
     scan_id: i64,
     pattern: &regex::Regex,
     exclude: &[String],
+    filter: &FilterConfig,
 ) -> Vec<crate::finder::FindMatch> {
     use crate::finder;
 
@@ -260,6 +416,7 @@ pub async fn collect_find_matches(
     files
         .iter()
         .filter(|record| !is_excluded_path(&record.dir_path, exclude))
+        .filter(|record| filter.should_show(&record.dir_path, &record.filename))
         .filter_map(|record| finder::matches_pattern(record, pattern))
         .collect()
 }
@@ -273,6 +430,7 @@ pub async fn stream_find_all_matches(
     pool: &SqlitePool,
     pattern: &regex::Regex,
     exclude: &[String],
+    filter: &FilterConfig,
 ) -> (usize, u64) {
     use crate::finder;
     use std::future::poll_fn;
@@ -291,6 +449,9 @@ pub async fn stream_find_all_matches(
         match result {
             Ok(record) => {
                 if is_excluded_path(&record.dir_path, exclude) {
+                    continue;
+                }
+                if !filter.should_show(&record.dir_path, &record.filename) {
                     continue;
                 }
                 if let Some(m) = finder::matches_pattern(&record, pattern) {
@@ -318,6 +479,7 @@ pub async fn collect_find_all_matches(
     pool: &SqlitePool,
     pattern: &regex::Regex,
     exclude: &[String],
+    filter: &FilterConfig,
 ) -> Vec<crate::finder::FindMatch> {
     use crate::finder;
 
@@ -329,6 +491,7 @@ pub async fn collect_find_all_matches(
     files
         .iter()
         .filter(|record| !is_excluded_path(&record.dir_path, exclude))
+        .filter(|record| filter.should_show(&record.dir_path, &record.filename))
         .filter_map(|record| finder::matches_pattern(record, pattern))
         .collect()
 }
@@ -439,6 +602,41 @@ mod tests {
     #[test]
     fn is_excluded_path_empty_exclude() {
         assert!(!is_excluded_path("/data/@eaDir", &[]));
+    }
+
+    #[test]
+    fn user_exclude_dotfile_pattern() {
+        let pats = default_user_exclude_patterns();
+        assert!(is_user_excluded_name(".hidden", &pats));
+        assert!(is_user_excluded_name(".DS_Store", &pats));
+        assert!(!is_user_excluded_name("a.txt", &pats));
+        assert!(!is_user_excluded_name("sub", &pats));
+    }
+
+    #[test]
+    fn system_name_matching() {
+        let sys = default_system_patterns();
+        assert!(is_system_name("@eaDir", &sys));
+        assert!(is_system_name(".etp.db", &sys));
+        assert!(!is_system_name("music", &sys));
+    }
+
+    #[test]
+    fn filter_config_should_show() {
+        let filter = FilterConfig::new(false);
+        assert!(filter.should_show("/data/sub", "song.mp3"));
+        assert!(!filter.should_show("/data/sub", ".hidden"));
+        assert!(!filter.should_show("/data/@eaDir", "thumb.jpg"));
+        assert!(!filter.should_show("/data/sub", ".etp.db"));
+    }
+
+    #[test]
+    fn filter_config_include_system_files() {
+        let filter = FilterConfig::new(true);
+        assert!(filter.should_show("/data/@eaDir", "thumb.jpg"));
+        assert!(filter.should_show("/data/sub", ".etp.db"));
+        // User excludes still apply
+        assert!(!filter.should_show("/data/sub", ".hidden"));
     }
 }
 

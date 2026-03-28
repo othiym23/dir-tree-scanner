@@ -1,5 +1,6 @@
 use etp_lib::csv_writer;
 use etp_lib::db;
+use etp_lib::ops;
 use etp_lib::scanner;
 use std::fs;
 
@@ -30,9 +31,15 @@ async fn csv_output_from_db_is_correct() {
         .unwrap();
 
     let csv_path = tmp.path().join("out.csv");
-    csv_writer::write_csv_from_db(&pool, scan_id, &csv_path, &[], false)
-        .await
-        .unwrap();
+    csv_writer::write_csv_from_db(
+        &pool,
+        scan_id,
+        &csv_path,
+        &[],
+        &ops::FilterConfig::new(true),
+    )
+    .await
+    .unwrap();
 
     let content = fs::read_to_string(&csv_path).unwrap();
     let lines: Vec<&str> = content.lines().collect();
@@ -64,9 +71,15 @@ async fn csv_output_with_exclude_filters_correctly() {
         .unwrap();
 
     let csv_path = tmp.path().join("out.csv");
-    csv_writer::write_csv_from_db(&pool, scan_id, &csv_path, &exclude, false)
-        .await
-        .unwrap();
+    csv_writer::write_csv_from_db(
+        &pool,
+        scan_id,
+        &csv_path,
+        &exclude,
+        &ops::FilterConfig::new(true),
+    )
+    .await
+    .unwrap();
 
     let content = fs::read_to_string(&csv_path).unwrap();
     // Should not contain @eaDir files

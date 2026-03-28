@@ -48,6 +48,10 @@ struct Cli {
     #[arg(long, hide = true, default_value_t = false)]
     no_scan: bool,
 
+    /// Include NAS/OS system files in output (e.g. @eaDir, .etp.db)
+    #[arg(long, default_value_t = false)]
+    include_system_files: bool,
+
     /// Print size summary after tree output
     #[arg(long)]
     du: bool,
@@ -113,9 +117,12 @@ async fn main() {
         ops::resolve_latest_scan_id(&pool, &run_type, cli.verbose).await
     };
 
+    let filter = ops::FilterConfig::new(cli.include_system_files);
+
     if let Some(ref find_pattern) = cli.find {
         let pattern = ops::compile_pattern(find_pattern, cli.insensitive);
-        let matches = ops::collect_find_matches(&pool, scan_id, &pattern, &cli.exclude).await;
+        let matches =
+            ops::collect_find_matches(&pool, scan_id, &pattern, &cli.exclude, &filter).await;
         ops::render_find_tree(&matches, &cli.directory, "-").unwrap_or_else(|e| {
             eprintln!("error rendering tree: {}", e);
             std::process::exit(1);
@@ -129,6 +136,7 @@ async fn main() {
             scan_id,
             &cli.directory,
             &all_ignore,
+            &filter,
             cli.no_escape,
             cli.all,
         )

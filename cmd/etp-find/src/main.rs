@@ -44,6 +44,10 @@ struct Cli {
     #[arg(long, hide = true)]
     no_scan: bool,
 
+    /// Include NAS/OS system files in output (e.g. @eaDir, .etp.db)
+    #[arg(long, default_value_t = false)]
+    include_system_files: bool,
+
     /// Print diagnostic info on stderr
     #[arg(short, long)]
     verbose: bool,
@@ -136,6 +140,8 @@ async fn main() {
         None
     };
 
+    let filter = ops::FilterConfig::new(cli.include_system_files);
+
     // Determine if any output goes to stdout via "-"
     let stdout_tree = cli.tree.as_deref() == Some("-");
     let stdout_csv = cli.csv.as_deref() == Some("-");
@@ -144,8 +150,8 @@ async fn main() {
     if needs_collect {
         // Collect all matches
         let matches = match scan_id {
-            Some(id) => ops::collect_find_matches(&pool, id, &pattern, &cli.exclude).await,
-            None => ops::collect_find_all_matches(&pool, &pattern, &cli.exclude).await,
+            Some(id) => ops::collect_find_matches(&pool, id, &pattern, &cli.exclude, &filter).await,
+            None => ops::collect_find_all_matches(&pool, &pattern, &cli.exclude, &filter).await,
         };
         let count = matches.len();
         let total_size: u64 = matches.iter().map(|m| m.size).sum();
@@ -184,8 +190,8 @@ async fn main() {
     } else {
         // Stream matches to stdout
         let (count, total_size) = match scan_id {
-            Some(id) => ops::stream_find_matches(&pool, id, &pattern, &cli.exclude).await,
-            None => ops::stream_find_all_matches(&pool, &pattern, &cli.exclude).await,
+            Some(id) => ops::stream_find_matches(&pool, id, &pattern, &cli.exclude, &filter).await,
+            None => ops::stream_find_all_matches(&pool, &pattern, &cli.exclude, &filter).await,
         };
 
         if cli.size {

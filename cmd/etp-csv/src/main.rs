@@ -40,6 +40,10 @@ struct Cli {
     #[arg(long, hide = true, default_value_t = false)]
     no_scan: bool,
 
+    /// Include NAS/OS system files in output (e.g. @eaDir, .etp.db)
+    #[arg(long, default_value_t = false)]
+    include_system_files: bool,
+
     /// Print diagnostic info on stderr
     #[arg(short, long)]
     verbose: bool,
@@ -97,16 +101,19 @@ async fn main() {
         ops::resolve_latest_scan_id(&pool, &run_type, cli.verbose).await
     };
 
+    let filter = ops::FilterConfig::new(cli.include_system_files);
+
     if let Some(ref find_pattern) = cli.find {
         let pattern = ops::compile_pattern(find_pattern, cli.insensitive);
-        let matches = ops::collect_find_matches(&pool, scan_id, &pattern, &cli.exclude).await;
+        let matches =
+            ops::collect_find_matches(&pool, scan_id, &pattern, &cli.exclude, &filter).await;
         let output_str = output.to_string_lossy();
         ops::write_find_csv(&matches, &output_str).unwrap_or_else(|e| {
             eprintln!("error writing CSV: {}", e);
             std::process::exit(1);
         });
     } else {
-        ops::write_csv_from_db(&pool, scan_id, &output, &cli.exclude, cli.verbose).await;
+        ops::write_csv_from_db(&pool, scan_id, &output, &cli.exclude, &filter, cli.verbose).await;
     }
 
     etp_lib::db::close_db(pool).await;
