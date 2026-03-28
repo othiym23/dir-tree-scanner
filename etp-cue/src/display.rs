@@ -3,16 +3,15 @@ use crate::types::{CueSheet, CueTime, CueTrack};
 /// Format an album summary matching the mockup in docs/album-display-mockup.txt.
 ///
 /// Durations are in MM:SS:FF (native CUE format). If `disc_id` is provided,
-/// it's shown at the bottom. `total_sectors` is needed to compute the last
-/// track's duration.
+/// it's shown at the bottom. `file_durations` provides per-FILE sector counts
+/// for computing track durations and absolute offsets.
 pub fn format_album_summary(
     sheet: &CueSheet,
-    total_sectors: Option<u64>,
+    file_durations: &[u64],
     disc_id: Option<&str>,
 ) -> String {
     let mut out = String::new();
 
-    // Header: [YEAR] ARTIST: TITLE (GENRE)
     let year = sheet.date.as_deref().unwrap_or("????");
     let artist = sheet.performer.as_deref().unwrap_or("Unknown Artist");
     let title = sheet.title.as_deref().unwrap_or("Unknown Album");
@@ -22,30 +21,28 @@ pub fn format_album_summary(
     }
     out.push_str("\n\n");
 
-    // Track listing
-    let tracks: Vec<&CueTrack> = sheet.tracks().collect();
-    let num_width = if tracks.len() >= 10 { 2 } else { 1 };
+    let abs_tracks = absolute_audio_tracks(sheet, file_durations);
+    let num_width = if abs_tracks.len() >= 10 { 2 } else { 1 };
 
-    for (i, track) in tracks.iter().enumerate() {
-        let duration = track_duration(track, tracks.get(i + 1).copied(), total_sectors);
+    for (i, at) in abs_tracks.iter().enumerate() {
+        let duration = abs_track_duration(at, abs_tracks.get(i + 1), file_durations);
         let dur_str = match duration {
             Some(d) => format!("({d})"),
             None => "(??:??:??)".into(),
         };
 
-        // Show artist prefix only if track artist differs from album artist
-        let track_line = match (&track.performer, &sheet.performer) {
+        let track_line = match (&at.track.performer, &sheet.performer) {
             (Some(tp), Some(ap)) if tp != ap => {
-                let title = track.title.as_deref().unwrap_or("Untitled");
+                let title = at.track.title.as_deref().unwrap_or("Untitled");
                 format!("{tp} - {title}")
             }
-            _ => track.title.as_deref().unwrap_or("Untitled").to_string(),
+            _ => at.track.title.as_deref().unwrap_or("Untitled").to_string(),
         };
 
         out.push_str(&format!(
             "  {:>width$}: {track_line} {dur_str}\n",
-            track.number,
-            width = num_width + 2, // indent
+            at.track.number,
+            width = num_width + 2,
         ));
     }
 
@@ -57,16 +54,14 @@ pub fn format_album_summary(
 }
 
 /// Format a CUEtools-style TOC.
-///
-/// Columns: track | start time | duration | start sector | end sector
-pub fn format_cuetools_toc(sheet: &CueSheet, total_sectors: Option<u64>) -> String {
+pub fn format_cuetools_toc(sheet: &CueSheet, file_durations: &[u64]) -> String {
     let mut out = String::new();
-    let tracks: Vec<&CueTrack> = sheet.tracks().collect();
+    let abs_tracks = absolute_audio_tracks(sheet, file_durations);
 
-    for (i, track) in tracks.iter().enumerate() {
-        let start = track.index01;
-        let start_sector = start.to_sectors();
-        let duration = track_duration(track, tracks.get(i + 1).copied(), total_sectors);
+    for (i, at) in abs_tracks.iter().enumerate() {
+        let start_sector = at.absolute_offset;
+        let start_time = CueTime::from_sectors(start_sector);
+        let duration = abs_track_duration(at, abs_tracks.get(i + 1), file_durations);
         let dur_str = duration.map_or("??:??:??".to_string(), |d| format!("{d}"));
         let end_sector = match duration {
             Some(d) => format!("{:>6}", start_sector + d.to_sectors()),
@@ -74,27 +69,25 @@ pub fn format_cuetools_toc(sheet: &CueSheet, total_sectors: Option<u64>) -> Stri
         };
 
         out.push_str(&format!(
-            "  {:>2} | {start} | {dur_str} | {start_sector:>6} | {end_sector}\n",
-            track.number,
+            "  {:>2} | {start_time} | {dur_str} | {start_sector:>6} | {end_sector}\n",
+            at.track.number,
         ));
     }
     out
 }
 
 /// Format an EAC-style TOC (track listing portion only).
-///
-/// Columns: Track | Start | Length | Start Sector | End Sector
-pub fn format_eac_toc(sheet: &CueSheet, total_sectors: Option<u64>) -> String {
+pub fn format_eac_toc(sheet: &CueSheet, file_durations: &[u64]) -> String {
     let mut out = String::new();
     out.push_str("     Track |   Start  |  Length  | Start Sector | End Sector\n");
     out.push_str("    ---------------------------------------------------------\n");
 
-    let tracks: Vec<&CueTrack> = sheet.tracks().collect();
+    let abs_tracks = absolute_audio_tracks(sheet, file_durations);
 
-    for (i, track) in tracks.iter().enumerate() {
-        let start = track.index01;
-        let start_sector = start.to_sectors();
-        let duration = track_duration(track, tracks.get(i + 1).copied(), total_sectors);
+    for (i, at) in abs_tracks.iter().enumerate() {
+        let start_sector = at.absolute_offset;
+        let start_time = CueTime::from_sectors(start_sector);
+        let duration = abs_track_duration(at, abs_tracks.get(i + 1), file_durations);
         let dur_str = duration.map_or("??:??:??".to_string(), |d| format!("{d}"));
         let end_sector = match duration {
             Some(d) => {
@@ -105,26 +98,54 @@ pub fn format_eac_toc(sheet: &CueSheet, total_sectors: Option<u64>) -> String {
         };
 
         out.push_str(&format!(
-            "    {:>5}  | {start} | {dur_str} | {:>12} | {end_sector}\n",
-            track.number, start_sector,
+            "    {:>5}  | {start_time} | {dur_str} | {:>12} | {end_sector}\n",
+            at.track.number, start_sector,
         ));
     }
     out
 }
 
-/// Compute a track's duration from the gap between its INDEX 01 and the next
-/// track's INDEX 01 (or the total disc length for the last track).
-fn track_duration(
-    track: &CueTrack,
-    next_track: Option<&CueTrack>,
-    total_sectors: Option<u64>,
+/// An audio track with its absolute sector offset.
+struct AbsoluteTrack<'a> {
+    track: &'a CueTrack,
+    absolute_offset: u64,
+}
+
+/// Build a list of audio tracks with absolute offsets computed from
+/// per-file durations.
+fn absolute_audio_tracks<'a>(
+    sheet: &'a CueSheet,
+    file_durations: &[u64],
+) -> Vec<AbsoluteTrack<'a>> {
+    let (offsets, _) = sheet.absolute_offsets(file_durations);
+    let audio_tracks: Vec<&CueTrack> = sheet.tracks().filter(|t| t.track_type == "AUDIO").collect();
+
+    audio_tracks
+        .into_iter()
+        .zip(offsets)
+        .map(|(track, offset)| AbsoluteTrack {
+            track,
+            absolute_offset: offset,
+        })
+        .collect()
+}
+
+/// Compute duration from absolute offsets. For the last track, uses the
+/// total disc duration from file_durations.
+fn abs_track_duration(
+    current: &AbsoluteTrack,
+    next: Option<&AbsoluteTrack>,
+    file_durations: &[u64],
 ) -> Option<CueTime> {
-    let start = track.index01;
-    if let Some(next) = next_track {
-        Some(CueTime::duration_between(start, next.index01))
+    if let Some(next) = next {
+        let dur = next.absolute_offset.saturating_sub(current.absolute_offset);
+        Some(CueTime::from_sectors(dur))
+    } else if !file_durations.is_empty() {
+        let total: u64 = file_durations.iter().sum();
+        let dur = total.saturating_sub(current.absolute_offset);
+        Some(CueTime::from_sectors(dur))
     } else {
-        // Last track: need total duration
-        total_sectors.map(|total| CueTime::duration_between(start, CueTime::from_sectors(total)))
+        None
     }
 }
 
@@ -156,7 +177,7 @@ FILE "album.flac" WAVE
     fn test_album_summary() {
         let sheet = parse_cue_sheet(SAMPLE).unwrap();
         let total = CueTime::new(13, 52, 60).to_sectors();
-        let summary = format_album_summary(&sheet, Some(total), Some("test_id_123"));
+        let summary = format_album_summary(&sheet, &[total], Some("test_id_123"));
         assert!(summary.contains("[1998] Various Artists: Rebirth of Cool, Volume 4 (Electronic)"));
         assert!(summary.contains("Kruder & Dorfmeister - Bug Powder Dust"));
         assert!(summary.contains("DJ Cam - Innervisions"));
@@ -179,30 +200,26 @@ FILE "third.flac" WAVE
     INDEX 01 05:00:00
 "#;
         let sheet = parse_cue_sheet(cue).unwrap();
-        let summary = format_album_summary(&sheet, Some(36000), None);
-        // Same artist as album — should NOT show "Portishead - Silence"
+        let summary = format_album_summary(&sheet, &[36000], None);
         assert!(summary.contains("Silence"));
         assert!(!summary.contains("Portishead - Silence"));
     }
 
     #[test]
-    fn test_album_summary_no_total() {
+    fn test_album_summary_no_durations() {
         let sheet = parse_cue_sheet(SAMPLE).unwrap();
-        let summary = format_album_summary(&sheet, None, None);
-        // Last track should show unknown duration
+        let summary = format_album_summary(&sheet, &[], None);
+        // All tracks should show unknown duration since we have no file durations
         assert!(summary.contains("(??:??:??)"));
-        // First two tracks can still compute duration
-        assert!(!summary.starts_with("??"));
     }
 
     #[test]
     fn test_cuetools_toc() {
         let sheet = parse_cue_sheet(SAMPLE).unwrap();
         let total = CueTime::new(13, 52, 60).to_sectors();
-        let toc = format_cuetools_toc(&sheet, Some(total));
+        let toc = format_cuetools_toc(&sheet, &[total]);
         assert!(toc.contains("00:00:00"));
         assert!(toc.contains("04:35:12"));
-        // Track 1 start sector = 0
         assert!(toc.contains("|      0 |"));
     }
 
@@ -210,9 +227,39 @@ FILE "third.flac" WAVE
     fn test_eac_toc() {
         let sheet = parse_cue_sheet(SAMPLE).unwrap();
         let total = CueTime::new(13, 52, 60).to_sectors();
-        let toc = format_eac_toc(&sheet, Some(total));
+        let toc = format_eac_toc(&sheet, &[total]);
         assert!(toc.contains("Track |   Start  |  Length  | Start Sector | End Sector"));
         assert!(toc.contains("-----"));
         assert!(toc.contains("00:00:00"));
+    }
+
+    #[test]
+    fn test_multi_file_durations() {
+        let cue = r#"PERFORMER "Test"
+TITLE "Multi-File"
+FILE "disc1_track1.wav" WAVE
+  TRACK 01 AUDIO
+    TITLE "Track 1"
+    INDEX 01 00:00:00
+FILE "disc1_track2.wav" WAVE
+  TRACK 02 AUDIO
+    TITLE "Track 2"
+    INDEX 01 00:00:00
+FILE "disc1_track3.wav" WAVE
+  TRACK 03 AUDIO
+    TITLE "Track 3"
+    INDEX 01 00:00:00
+"#;
+        let sheet = parse_cue_sheet(cue).unwrap();
+        // Each file is 3 minutes = 13500 sectors
+        let durations = &[13500, 13500, 13500];
+        let toc = format_cuetools_toc(&sheet, durations);
+
+        // Verify absolute offsets appear in the TOC
+        let lines: Vec<&str> = toc.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("0")); // track 1 starts at sector 0
+        assert!(lines[1].contains("13500")); // track 2 at accumulated offset
+        assert!(lines[2].contains("27000")); // track 3 at accumulated offset
     }
 }

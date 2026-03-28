@@ -21,6 +21,29 @@ impl CueSheet {
     pub fn track_count(&self) -> usize {
         self.tracks().filter(|t| t.track_type == "AUDIO").count()
     }
+
+    /// Compute absolute sector offsets for all audio tracks given per-file
+    /// durations in sectors. Returns `(absolute_offsets, total_sectors)`.
+    ///
+    /// For single-file CUE sheets, pass `&[total_sectors]`.
+    /// For multi-file CUE sheets, pass one duration per FILE block.
+    pub fn absolute_offsets(&self, file_durations: &[u64]) -> (Vec<u64>, u64) {
+        let mut offsets = Vec::new();
+        let mut cumulative: u64 = 0;
+
+        for (file_idx, file) in self.files.iter().enumerate() {
+            for track in &file.tracks {
+                if track.track_type == "AUDIO" {
+                    offsets.push(cumulative + track.index01.to_sectors());
+                }
+            }
+            if file_idx < file_durations.len() {
+                cumulative += file_durations[file_idx];
+            }
+        }
+
+        (offsets, cumulative)
+    }
 }
 
 /// A FILE block within a CUE sheet.

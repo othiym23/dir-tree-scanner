@@ -56,9 +56,10 @@ enum Commands {
         /// Path to .cue file
         file: PathBuf,
 
-        /// Audio file for total duration (needed for disc ID and last track length)
-        #[arg(long)]
-        audio_file: Option<PathBuf>,
+        /// Audio file(s) — one per FILE block in the CUE sheet (needed for disc
+        /// ID and track durations). For single-image CUE sheets, pass one file.
+        #[arg(long = "audio-file")]
+        audio_files: Vec<PathBuf>,
 
         /// Output format
         #[arg(long, default_value = "summary", value_parser = ["summary", "cuetools", "eac"])]
@@ -170,7 +171,7 @@ async fn main() {
         }
         Commands::Cue {
             file,
-            audio_file,
+            audio_files,
             format,
         } => {
             let content = std::fs::read_to_string(&file).unwrap_or_else(|e| {
@@ -182,33 +183,40 @@ async fn main() {
                 std::process::exit(1);
             });
 
-            // Get total sectors from audio file duration if provided
-            let total_sectors = audio_file.as_ref().and_then(|path| {
-                etp_lib::metadata::read_metadata(path)
-                    .ok()
-                    .and_then(|meta| {
-                        meta.properties
-                            .iter()
-                            .find(|(k, _)| k == "audio_duration_ms")
-                            .and_then(|(_, v)| v.as_u64())
-                            .map(|ms| ms * 75 / 1000) // ms → sectors (75 sectors/sec)
-                    })
-            });
+            // Get per-file durations in sectors from audio files
+            let file_durations: Vec<u64> = audio_files
+                .iter()
+                .filter_map(|path| {
+                    etp_lib::metadata::read_metadata(path)
+                        .ok()
+                        .and_then(|meta| {
+                            meta.properties
+                                .iter()
+                                .find(|(k, _)| k == "audio_duration_ms")
+                                .and_then(|(_, v)| v.as_u64())
+                                .map(|ms| (ms * 75 + 500) / 1000)
+                        })
+                })
+                .collect();
 
-            let disc_id = total_sectors.map(|s| etp_cue::compute_disc_id(&sheet, s));
+            let disc_id = if !file_durations.is_empty() {
+                Some(etp_cue::compute_disc_id(&sheet, &file_durations))
+            } else {
+                None
+            };
 
             match format.as_str() {
                 "summary" => {
                     print!(
                         "{}",
-                        etp_cue::format_album_summary(&sheet, total_sectors, disc_id.as_deref(),)
+                        etp_cue::format_album_summary(&sheet, &file_durations, disc_id.as_deref(),)
                     );
                 }
                 "cuetools" => {
-                    print!("{}", etp_cue::format_cuetools_toc(&sheet, total_sectors));
+                    print!("{}", etp_cue::format_cuetools_toc(&sheet, &file_durations));
                 }
                 "eac" => {
-                    print!("{}", etp_cue::format_eac_toc(&sheet, total_sectors));
+                    print!("{}", etp_cue::format_eac_toc(&sheet, &file_durations));
                 }
                 _ => unreachable!(),
             }

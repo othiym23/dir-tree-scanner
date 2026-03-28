@@ -378,4 +378,63 @@ FILE "test.wav" WAVE
 "#;
         assert!(parse_cue_sheet(cue).is_err());
     }
+
+    #[test]
+    fn test_postgap() {
+        let cue = r#"FILE "test.wav" WAVE
+  TRACK 01 AUDIO
+    INDEX 01 00:00:00
+    POSTGAP 00:02:00
+"#;
+        let sheet = parse_cue_sheet(cue).unwrap();
+        let tracks: Vec<&CueTrack> = sheet.tracks().collect();
+        assert_eq!(tracks[0].postgap, Some(CueTime::new(0, 2, 0)));
+    }
+
+    #[test]
+    fn test_unquoted_filename() {
+        let cue = "FILE test.wav WAVE\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n";
+        let sheet = parse_cue_sheet(cue).unwrap();
+        assert_eq!(sheet.files[0].filename, "test.wav");
+        assert_eq!(sheet.files[0].file_type, "WAVE");
+    }
+
+    #[test]
+    fn test_non_audio_track_no_index01_ok() {
+        let cue = r#"FILE "data.bin" BINARY
+  TRACK 01 MODE1/2352
+FILE "audio.wav" WAVE
+  TRACK 02 AUDIO
+    INDEX 01 00:00:00
+"#;
+        let sheet = parse_cue_sheet(cue).unwrap();
+        let all_tracks: Vec<&CueTrack> = sheet.tracks().collect();
+        assert_eq!(all_tracks.len(), 2);
+        assert_eq!(all_tracks[0].track_type, "MODE1/2352");
+        assert_eq!(all_tracks[1].track_type, "AUDIO");
+        assert_eq!(sheet.track_count(), 1); // only audio tracks
+    }
+
+    #[test]
+    fn test_multi_file_cue() {
+        let cue = r#"PERFORMER "Test"
+TITLE "Split"
+FILE "track01.wav" WAVE
+  TRACK 01 AUDIO
+    TITLE "First"
+    INDEX 01 00:00:00
+FILE "track02.wav" WAVE
+  TRACK 02 AUDIO
+    TITLE "Second"
+    INDEX 01 00:00:00
+"#;
+        let sheet = parse_cue_sheet(cue).unwrap();
+        assert_eq!(sheet.files.len(), 2);
+        assert_eq!(sheet.track_count(), 2);
+
+        // Absolute offsets with 3-minute files
+        let (offsets, total) = sheet.absolute_offsets(&[13500, 13500]);
+        assert_eq!(offsets, vec![0, 13500]);
+        assert_eq!(total, 27000);
+    }
 }
