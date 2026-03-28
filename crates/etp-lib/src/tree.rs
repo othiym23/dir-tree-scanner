@@ -34,7 +34,6 @@ struct TreeContext<'a> {
     filter: &'a FilterConfig,
     collator: CollatorBorrowed<'static>,
     no_escape: bool,
-    show_hidden: bool,
 }
 
 fn make_collator() -> io::Result<CollatorBorrowed<'static>> {
@@ -56,7 +55,6 @@ pub async fn render_tree_from_db(
     patterns: &[Pattern],
     filter: &FilterConfig,
     no_escape: bool,
-    show_hidden: bool,
 ) -> io::Result<(usize, usize)> {
     let dir_paths = dao::list_directory_paths(pool, scan_id)
         .await
@@ -95,7 +93,6 @@ pub async fn render_tree_from_db(
         filter,
         collator: make_collator()?,
         no_escape,
-        show_hidden,
     };
 
     let mut out = io::stdout();
@@ -157,7 +154,8 @@ pub fn render_tree_from_paths(
     }
 
     let no_patterns: Vec<Pattern> = Vec::new();
-    let show_all = FilterConfig::new(true);
+    let mut show_all = FilterConfig::new(true);
+    show_all.show_hidden = true;
     let ctx = TreeContext {
         files_by_dir,
         children,
@@ -165,7 +163,6 @@ pub fn render_tree_from_paths(
         filter: &show_all,
         collator: make_collator()?,
         no_escape: true,
-        show_hidden: true,
     };
 
     writeln!(writer, "{}", root.display())?;
@@ -198,9 +195,6 @@ fn merge_entries(files: &[String], child_dirs: &BTreeSet<String>, ctx: &TreeCont
         .filter(|e| {
             let n = e.name();
             if !ctx.filter.should_show_name(n) {
-                return false;
-            }
-            if !ctx.show_hidden && n.starts_with('.') {
                 return false;
             }
             !ctx.patterns.iter().any(|p| p.matches(n))

@@ -44,6 +44,10 @@ struct Cli {
     #[arg(long, hide = true)]
     no_scan: bool,
 
+    /// Show hidden files (names starting with '.')
+    #[arg(short = 'A', long)]
+    all: bool,
+
     /// Include NAS/OS system files in output (e.g. @eaDir, .etp.db)
     #[arg(long, default_value_t = false)]
     include_system_files: bool,
@@ -144,8 +148,11 @@ async fn main() {
         None
     };
 
-    let filter =
-        ops::FilterConfig::from_flags(cli.include_system_files, cli.no_include_system_files);
+    let filter = ops::FilterConfig::from_flags(
+        cli.include_system_files,
+        cli.no_include_system_files,
+        cli.all,
+    );
 
     // Determine if any output goes to stdout via "-"
     let stdout_tree = cli.tree.as_deref() == Some("-");

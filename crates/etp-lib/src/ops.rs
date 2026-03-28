@@ -26,10 +26,9 @@ pub const DEFAULT_SYSTEM_PATTERNS: &[&str] = &[
 ];
 
 /// Default user excludes: hidden from display AND excluded from size calculations.
-/// Uses glob patterns matched against file/directory names.
-pub const DEFAULT_USER_EXCLUDES: &[&str] = &[
-    ".*", // dotfiles
-];
+/// Uses glob patterns matched against file/directory names. Dotfile hiding is
+/// handled separately by the --all/-A flag, not by user excludes.
+pub const DEFAULT_USER_EXCLUDES: &[&str] = &[];
 
 /// Resolve a `--flag` / `--no-flag` boolean pair. If both are passed, prints a
 /// warning and returns the default value.
@@ -131,30 +130,48 @@ pub struct FilterConfig {
     pub system_patterns: Vec<String>,
     pub user_excludes: Vec<glob::Pattern>,
     pub include_system_files: bool,
+    pub show_hidden: bool,
 }
 
 impl FilterConfig {
-    /// Create with defaults: system files hidden, default patterns.
+    /// Create with defaults: system files hidden, dotfiles hidden, default patterns.
     pub fn new(include_system_files: bool) -> Self {
         Self {
             system_patterns: default_system_patterns(),
             user_excludes: default_user_exclude_patterns(),
             include_system_files,
+            show_hidden: false,
         }
     }
 
-    /// Create from CLI `--include-system-files` / `--no-include-system-files` flags,
-    /// resolving conflicts with a warning.
-    pub fn from_flags(include_flag: bool, no_include_flag: bool) -> Self {
-        let include =
-            resolve_bool_pair(include_flag, no_include_flag, "include-system-files", false);
-        Self::new(include)
+    /// Create from CLI flags, resolving conflicts with warnings.
+    pub fn from_flags(
+        include_system_flag: bool,
+        no_include_system_flag: bool,
+        show_hidden: bool,
+    ) -> Self {
+        let include = resolve_bool_pair(
+            include_system_flag,
+            no_include_system_flag,
+            "include-system-files",
+            false,
+        );
+        Self {
+            system_patterns: default_system_patterns(),
+            user_excludes: default_user_exclude_patterns(),
+            include_system_files: include,
+            show_hidden,
+        }
     }
 
     /// Check whether a name (file or directory) should be shown.
     pub fn should_show_name(&self, name: &str) -> bool {
         let is_system = is_system_name(name, &self.system_patterns);
         if !self.include_system_files && is_system {
+            return false;
+        }
+        // Dotfiles hidden unless --all is passed; system files are exempt
+        if !self.show_hidden && !is_system && name.starts_with('.') {
             return false;
         }
         // System files are exempt from user excludes (they're managed separately)
@@ -171,6 +188,10 @@ impl FilterConfig {
     pub fn should_show(&self, dir_path: &str, filename: &str) -> bool {
         let is_system = is_system_path(dir_path, Some(filename), &self.system_patterns);
         if !self.include_system_files && is_system {
+            return false;
+        }
+        // Dotfiles hidden unless --all is passed; system files are exempt
+        if !self.show_hidden && !is_system && filename.starts_with('.') {
             return false;
         }
         // System files are exempt from user excludes (they're managed separately)
@@ -279,19 +300,10 @@ pub async fn render_tree_from_db(
     ignore: &[String],
     filter: &FilterConfig,
     no_escape: bool,
-    show_hidden: bool,
 ) -> std::io::Result<()> {
     let patterns = parse_ignore_patterns(ignore);
-    let (dir_count, file_count) = tree::render_tree_from_db(
-        pool,
-        scan_id,
-        root,
-        &patterns,
-        filter,
-        no_escape,
-        show_hidden,
-    )
-    .await?;
+    let (dir_count, file_count) =
+        tree::render_tree_from_db(pool, scan_id, root, &patterns, filter, no_escape).await?;
     println!("\n{} directories, {} files", dir_count, file_count);
     Ok(())
 }
@@ -605,12 +617,10 @@ mod tests {
     }
 
     #[test]
-    fn user_exclude_dotfile_pattern() {
-        let pats = default_user_exclude_patterns();
-        assert!(is_user_excluded_name(".hidden", &pats));
-        assert!(is_user_excluded_name(".DS_Store", &pats));
-        assert!(!is_user_excluded_name("a.txt", &pats));
-        assert!(!is_user_excluded_name("sub", &pats));
+    fn user_exclude_glob_matching() {
+        let pat = glob::Pattern::new("*.bak").unwrap();
+        assert!(is_user_excluded_name("file.bak", &[pat.clone()]));
+        assert!(!is_user_excluded_name("file.txt", &[pat]));
     }
 
     #[test]
@@ -622,10 +632,24 @@ mod tests {
     }
 
     #[test]
-    fn filter_config_should_show() {
+    fn filter_config_hides_dotfiles_by_default() {
         let filter = FilterConfig::new(false);
         assert!(filter.should_show("/data/sub", "song.mp3"));
         assert!(!filter.should_show("/data/sub", ".hidden"));
+        assert!(!filter.should_show("/data/sub", ".DS_Store"));
+    }
+
+    #[test]
+    fn filter_config_show_hidden_reveals_dotfiles() {
+        let mut filter = FilterConfig::new(false);
+        filter.show_hidden = true;
+        assert!(filter.should_show("/data/sub", ".hidden"));
+        assert!(filter.should_show("/data/sub", ".DS_Store"));
+    }
+
+    #[test]
+    fn filter_config_hides_system_files_by_default() {
+        let filter = FilterConfig::new(false);
         assert!(!filter.should_show("/data/@eaDir", "thumb.jpg"));
         assert!(!filter.should_show("/data/sub", ".etp.db"));
     }
@@ -635,8 +659,16 @@ mod tests {
         let filter = FilterConfig::new(true);
         assert!(filter.should_show("/data/@eaDir", "thumb.jpg"));
         assert!(filter.should_show("/data/sub", ".etp.db"));
-        // User excludes still apply
+        // Dotfiles still hidden (show_hidden defaults to false)
         assert!(!filter.should_show("/data/sub", ".hidden"));
+    }
+
+    #[test]
+    fn filter_config_system_files_exempt_from_dotfile_hiding() {
+        // .etp.db starts with '.' but is a system file, not a dotfile
+        let filter = FilterConfig::new(true);
+        assert!(filter.should_show("/data/sub", ".etp.db"));
+        assert!(filter.should_show("/data/sub", ".SynologyWorkingDirectory"));
     }
 }
 

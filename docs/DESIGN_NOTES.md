@@ -88,27 +88,30 @@ dependent cleanup.
 ## Display Filtering
 
 The scanner indexes everything on disk. Filtering happens at display time via
-two independent layers:
+three independent layers:
 
 1. **System files** (`@eaDir`, `@eaStream`, `.etp.db*`, etc.) — NAS/OS
    byproducts. Hidden from listings by default, but included in `--du` size
    calculations. Shown with `--include-system-files`. Patterns are exact name
    matches against file/directory names.
 
-2. **User excludes** (`.*` by default) — glob patterns matched against filenames
-   only (not the full path, since absolute paths may contain unrelated
-   dot-directories like macOS tempdir components). Hidden from both listings and
-   size calculations.
+2. **Dotfiles** (names starting with `.`) — hidden by default, shown with
+   `-A`/`--all`. Managed by the `show_hidden` field in `FilterConfig`, not by
+   user excludes. System files starting with `.` (like `.etp.db`) are exempt
+   from dotfile hiding. See
+   `docs/adrs/2026-03-28-02-dotfile-hiding-via-all-flag.md`.
 
-System files are exempt from user exclude matching. Without this, `.etp.db`
-would be caught by the `.*` dotfile pattern and hidden even when
-`--include-system-files` is passed. The two filter layers are independent:
-system file visibility is controlled by `--[no-]include-system-files`, while
-user excludes are controlled by `--exclude` and `--ignore`.
+3. **User excludes** (empty by default) — glob patterns from `--exclude` and
+   `--ignore`, matched against filenames only (not the full path, since absolute
+   paths may contain unrelated dot-directories).
 
-`FilterConfig` in `ops.rs` bundles both pattern lists and the include flag,
-providing `should_show()` (for full path + filename checks) and
-`should_show_name()` (for individual name checks in tree rendering).
+System files are exempt from both dotfile hiding and user exclude matching.
+`etp-query` does not apply dotfile hiding (it's a lower-level search command).
+
+`FilterConfig` in `ops.rs` bundles all filter state: system patterns, user
+excludes, `include_system_files`, and `show_hidden`. It provides `should_show()`
+(for full path + filename checks) and `should_show_name()` (for individual name
+checks in tree rendering).
 
 ## CLI Boolean Flag Pairs
 

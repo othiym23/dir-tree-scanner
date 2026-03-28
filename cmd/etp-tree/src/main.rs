@@ -44,8 +44,8 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     scan: bool,
 
-    /// Hidden backward-compat alias (no-scan is already the default)
-    #[arg(long, hide = true, default_value_t = false)]
+    /// Do not scan, read existing DB (default)
+    #[arg(long, default_value_t = false)]
     no_scan: bool,
 
     /// Include NAS/OS system files in output (e.g. @eaDir, .etp.db)
@@ -94,8 +94,10 @@ async fn main() {
 
     let db_path = cli.db.unwrap_or_else(|| cli.directory.join(".etp.db"));
 
+    let do_scan = ops::resolve_bool_pair(cli.scan, cli.no_scan, "scan", false);
+
     // When not scanning, bail early if no DB exists to avoid creating an empty one.
-    if !cli.scan && !db_path.exists() {
+    if !do_scan && !db_path.exists() {
         eprintln!(
             "error: no previous scan exists for this directory; run etp-scan first, or pass --scan"
         );
@@ -115,14 +117,17 @@ async fn main() {
         .unwrap_or(cli.directory.clone());
     let run_type = canon.to_string_lossy();
 
-    let scan_id = if cli.scan {
+    let scan_id = if do_scan {
         ops::run_scan_to_db(&cli.directory, &pool, &run_type, &cli.exclude, cli.verbose).await
     } else {
         ops::resolve_latest_scan_id(&pool, &run_type, cli.verbose).await
     };
 
-    let filter =
-        ops::FilterConfig::from_flags(cli.include_system_files, cli.no_include_system_files);
+    let filter = ops::FilterConfig::from_flags(
+        cli.include_system_files,
+        cli.no_include_system_files,
+        cli.all,
+    );
 
     if let Some(ref find_pattern) = cli.find {
         let pattern = ops::compile_pattern(find_pattern, cli.insensitive);
@@ -143,7 +148,6 @@ async fn main() {
             &all_ignore,
             &filter,
             cli.no_escape,
-            cli.all,
         )
         .await
         .unwrap_or_else(|e| {
