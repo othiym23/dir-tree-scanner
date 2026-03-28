@@ -32,9 +32,10 @@ run dir:
 format:
     # Rust
     cargo fmt --all
-    # Python
+    # Python (scripts — legacy)
     cd scripts && uv run ruff format
-    cd etp && uv run ruff format
+    # Python (main package)
+    uv run ruff format
     # Markdown
     prettier --write "**/*.md"
 
@@ -43,22 +44,17 @@ check:
     # Rust
     cargo fmt --all --check
     cargo clippy --workspace -- -D warnings
-    # Python (scripts)
+    # Python (scripts — legacy)
     cd scripts && \
       uv run ruff check && \
       uv run ruff format --check
     cd scripts && \
       uv run pyright
-    cd scripts && \
-      uv run ty check
-    # Python (etp)
-    cd etp && \
-      uv run ruff check && \
+    # Python (main package)
+    uv run ruff check && \
       uv run ruff format --check
-    cd etp && \
-      uv run pyright
-    cd etp && \
-      uv run ty check
+    uv run pyright
+    uv run ty check pylib/ cmd/etp/
     # Markdown
     prettier --check "**/*.md"
 
@@ -66,7 +62,7 @@ check:
 test:
     cargo nextest run --workspace
     cd scripts && uv run pytest test_catalog.py -q
-    cd etp && uv run pytest tests/ -q
+    uv run pytest pylib/tests/ -q
 
 nas_home := "/Volumes/home"
 nas_data := "/Volumes/data"
@@ -101,13 +97,15 @@ deploy: check test build-nas
     fi
     # Rust plumbing → libexec
     mkdir -p "{{ nas_home }}/.local/libexec/etp"
-    cp target/x86_64-unknown-linux-musl/release/etp-csv "{{ nas_home }}/.local/libexec/etp"
-    cp target/x86_64-unknown-linux-musl/release/etp-tree "{{ nas_home }}/.local/libexec/etp"
-    cp target/x86_64-unknown-linux-musl/release/etp-find "{{ nas_home }}/.local/libexec/etp"
-    # Python porcelain → copy source and uv tool install on NAS
+    for bin in etp-csv etp-tree etp-find etp-meta etp-cas etp-query; do
+        cp "target/x86_64-unknown-linux-musl/release/$bin" "{{ nas_home }}/.local/libexec/etp/"
+    done
+    # Python package → copy source and uv tool install on NAS
     mkdir -p "{{ nas_home }}/.local/src/etp"
-    rsync -a --delete --exclude .venv --exclude __pycache__ --exclude .pytest_cache --exclude .ruff_cache --exclude '*.pyc' \
-        etp/ "{{ nas_home }}/.local/src/etp/"
+    rsync -a --delete \
+        --exclude .venv --exclude __pycache__ --exclude .pytest_cache \
+        --exclude .ruff_cache --exclude '*.pyc' --exclude test-data \
+        pylib/ cmd/etp/ pyproject.toml uv.lock "{{ nas_home }}/.local/src/etp/"
     ssh ogd@{{ nas_host }} "cd ~/.local/src/etp && ~/.local/bin/uv tool install --force --python python3.14 ."
     # Config ($HOME/.config/euterpe-tools/) — don't overwrite existing
     mkdir -p "{{ nas_home }}/.config/euterpe-tools"
@@ -116,11 +114,3 @@ deploy: check test build-nas
     else
         echo "catalog.kdl already exists, skipping"
     fi
-    # Clean up legacy locations
-    rm -f "{{ nas_home }}/bin/etp-csv" "{{ nas_home }}/bin/etp-tree" "{{ nas_home }}/bin/etp-find"
-    rm -f "{{ nas_home }}/bin/etp" "{{ nas_home }}/bin/etp-anime" "{{ nas_home }}/bin/etp-catalog"
-    rm -rf "{{ nas_home }}/.local/lib/etp"
-    rm -f "{{ nas_home }}/bin/fsscan" "{{ nas_home }}/bin/cached-tree" "{{ nas_home }}/bin/dir-tree-scanner"
-    rm -rf "{{ nas_home }}/bin/kdl"
-    rm -f "{{ nas_home }}/scripts/catalog-nas.py" "{{ nas_home }}/scripts/catalog.toml"
-    rm -f "{{ nas_home }}/conf/catalog.kdl"
