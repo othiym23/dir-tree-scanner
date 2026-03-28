@@ -101,7 +101,7 @@ deploy: check test build-nas
     rsync -a --delete \
         --exclude __pycache__ --exclude '*.pyc' \
         cmd/etp/ "$dest/cmd/etp/"
-    cp pyproject.toml uv.lock "$dest/"
+    cp -X pyproject.toml uv.lock "$dest/"
     ssh ogd@{{ nas_host }} "cd ~/.local/src/etp && ~/.local/bin/uv tool install --force --python python3.14 ."
     # Config ($HOME/.config/euterpe-tools/) — don't overwrite existing
     mkdir -p "{{ nas_home }}/.config/euterpe-tools"
