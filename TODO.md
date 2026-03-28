@@ -30,7 +30,10 @@ implemented.
           tree rendering ordering dependency (filter dirs before descending) is
           implicit
   - [ ] Phase 3: runtime config + etp-init
-    - [ ] `config.kdl` with system patterns, user excludes, database nicknames
+    - [ ] `config.kdl` with system patterns, user excludes, database nicknames,
+          and CAS directory path (currently hardcoded to platform data dir;
+          making it configurable allows sharing a single CAS between NAS and
+          workstation)
     - [ ] `etp-init` plumbing command to generate commented config template
     - [ ] database nickname resolution in all Rust commands
   - [ ] Phase 4: smart porcelain dispatch
