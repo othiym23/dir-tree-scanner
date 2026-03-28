@@ -303,8 +303,7 @@ async fn reconcile_moves(
     let mut matched_new: HashSet<i64> = HashSet::new();
     let mut tx = pool.begin().await?;
 
-    for (ci, (new_id, dir_path, new_filename, new_size, new_dir_id, new_mtime, new_ctime)) in
-        candidates.iter().enumerate()
+    for (new_id, dir_path, new_filename, new_size, new_dir_id, new_mtime, new_ctime) in &candidates
     {
         if matched_new.contains(new_id) {
             continue;
@@ -398,7 +397,6 @@ async fn reconcile_moves(
                 break;
             }
         }
-        let _ = ci;
     }
 
     // Delete unmatched removed files

@@ -184,20 +184,36 @@ async fn main() {
             });
 
             // Get per-file durations in sectors from audio files
-            let file_durations: Vec<u64> = audio_files
-                .iter()
-                .filter_map(|path| {
-                    etp_lib::metadata::read_metadata(path)
-                        .ok()
-                        .and_then(|meta| {
-                            meta.properties
-                                .iter()
-                                .find(|(k, _)| k == "audio_duration_ms")
-                                .and_then(|(_, v)| v.as_u64())
-                                .map(etp_cue::milliseconds_to_sectors)
-                        })
-                })
-                .collect();
+            let mut file_durations: Vec<u64> = Vec::new();
+            for path in &audio_files {
+                match etp_lib::metadata::read_metadata(path) {
+                    Ok(meta) => {
+                        let sectors = meta
+                            .properties
+                            .iter()
+                            .find(|(k, _)| k == "audio_duration_ms")
+                            .and_then(|(_, v)| v.as_u64())
+                            .map(etp_cue::milliseconds_to_sectors);
+                        match sectors {
+                            Some(s) => file_durations.push(s),
+                            None => {
+                                eprintln!("warning: no duration found in {}", path.display());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("warning: {}: {e}", path.display());
+                    }
+                }
+            }
+            if !audio_files.is_empty() && file_durations.len() != audio_files.len() {
+                eprintln!(
+                    "warning: got {} duration(s) for {} audio file(s); \
+                     disc ID and track durations may be wrong",
+                    file_durations.len(),
+                    audio_files.len()
+                );
+            }
 
             let disc_id = if !file_durations.is_empty() {
                 Some(etp_cue::compute_disc_id(&sheet, &file_durations))

@@ -129,9 +129,8 @@ pub struct RemovedFile {
 }
 
 /// Result of syncing files in a directory.
+/// Result of syncing files in a directory.
 pub struct SyncResult {
-    /// CAS blob hashes orphaned by this sync (caller should remove from disk).
-    pub orphan_hashes: Vec<String>,
     /// Files that disappeared from this directory. Hold these for move-tracking
     /// reconciliation before deleting.
     pub removed_files: Vec<RemovedFile>,
@@ -202,10 +201,7 @@ pub async fn replace_files_on(
         }
     }
 
-    Ok(SyncResult {
-        orphan_hashes: Vec::new(),
-        removed_files,
-    })
+    Ok(SyncResult { removed_files })
 }
 
 /// Move a file to a new directory and/or filename, preserving its ID and
