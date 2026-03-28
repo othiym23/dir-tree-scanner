@@ -16,6 +16,14 @@ struct Cli {
     #[arg(long, global = true)]
     db: Option<PathBuf>,
 
+    /// Include NAS/OS system files in results (default for most subcommands)
+    #[arg(long, global = true, default_value_t = false)]
+    include_system_files: bool,
+
+    /// Hide NAS/OS system files from results
+    #[arg(long, global = true, default_value_t = false)]
+    no_include_system_files: bool,
+
     /// Print diagnostic info on stderr
     #[arg(short, long, global = true)]
     verbose: bool,
@@ -57,9 +65,29 @@ enum Commands {
     },
 }
 
+/// Determine whether system files should be included for a given subcommand.
+/// etp-query defaults to INCLUDING system files (opposite of tree/csv/find),
+/// except for `stats` which defaults to EXCLUDING them because system file
+/// counts and sizes would skew the statistics. `sql` bypasses filtering entirely.
+/// See docs/adrs/2026-03-28-03-query-system-file-defaults.md.
+fn resolve_system_files(command: &Commands, include_flag: bool, no_include_flag: bool) -> bool {
+    let default_include = !matches!(command, Commands::Stats);
+    ops::resolve_bool_pair(
+        include_flag,
+        no_include_flag,
+        "include-system-files",
+        default_include,
+    )
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let cli = Cli::parse();
+    let include_system = resolve_system_files(
+        &cli.command,
+        cli.include_system_files,
+        cli.no_include_system_files,
+    );
 
     let db_path = cli.db.unwrap_or_else(|| {
         eprintln!("error: --db is required");
@@ -86,6 +114,11 @@ async fn main() {
         }
     };
 
+    // etp-query defaults to showing system files (it's a low-level command).
+    // show_hidden is always true — etp-query doesn't hide dotfiles.
+    let mut filter = ops::FilterConfig::new(include_system);
+    filter.show_hidden = true;
+
     match cli.command {
         Commands::Files { directory } => {
             let prefix = directory.as_deref().unwrap_or("");
@@ -96,7 +129,9 @@ async fn main() {
                     std::process::exit(1);
                 });
             for f in &files {
-                println!("{}/{}", f.dir_path, f.filename);
+                if filter.should_show(&f.dir_path, &f.filename) {
+                    println!("{}/{}", f.dir_path, f.filename);
+                }
             }
         }
         Commands::Tags { file } => {
@@ -131,7 +166,6 @@ async fn main() {
             }
         }
         Commands::Find { tag, value } => {
-            // Wrap value in % for substring matching if no wildcards present
             let pattern = if value.contains('%') || value.contains('_') {
                 value
             } else {
@@ -143,30 +177,71 @@ async fn main() {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 });
+            let mut count = 0;
             for (path, val) in &results {
-                println!("{path}  [{val}]");
+                // find_files_by_tag returns full paths; extract filename for filtering
+                let filename = std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("");
+                let dir = std::path::Path::new(path)
+                    .parent()
+                    .and_then(|p| p.to_str())
+                    .unwrap_or("");
+                if filter.should_show(dir, filename) {
+                    println!("{path}  [{val}]");
+                    count += 1;
+                }
             }
             if cli.verbose {
-                eprintln!("{} match(es)", results.len());
+                eprintln!("{count} match(es)");
             }
         }
         Commands::Stats => {
-            let total = db::dao::total_size(&pool, scan_id).await.unwrap_or(0);
-            let file_count = db::dao::count_files(&pool, scan_id).await.unwrap_or(0);
-            let extensions = db::dao::count_files_by_extension(&pool, Some(scan_id))
+            // Stats uses the filter to exclude system files by default,
+            // since their counts and sizes would badly skew the statistics.
+            let all_files = db::dao::list_files(&pool, scan_id)
                 .await
-                .unwrap_or_default();
+                .unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+
+            let filtered: Vec<_> = all_files
+                .iter()
+                .filter(|f| filter.should_show(&f.dir_path, &f.filename))
+                .collect();
+
+            let file_count = filtered.len();
+            let total: u64 = filtered.iter().map(|f| f.size).sum();
 
             println!("Files: {file_count}");
             println!("Total size: {}", ops::format_size(total));
-            if !extensions.is_empty() {
+
+            // Extension counts from filtered files
+            let mut ext_counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for f in &filtered {
+                let ext = f
+                    .filename
+                    .rfind('.')
+                    .map(|i| f.filename[i + 1..].to_lowercase())
+                    .unwrap_or_default();
+                if !ext.is_empty() {
+                    *ext_counts.entry(ext).or_default() += 1;
+                }
+            }
+            if !ext_counts.is_empty() {
+                let mut sorted: Vec<_> = ext_counts.into_iter().collect();
+                sorted.sort_by(|a, b| b.1.cmp(&a.1));
                 println!("\nBy extension:");
-                for (ext, count) in &extensions {
+                for (ext, count) in &sorted {
                     println!("  .{ext}: {count}");
                 }
             }
         }
         Commands::Size { directory } => {
+            // Size always includes system files — they're real disk usage.
             let prefix = directory.as_deref().unwrap_or("");
             let size = db::dao::subtree_size(&pool, scan_id, prefix)
                 .await
@@ -174,6 +249,7 @@ async fn main() {
             println!("{}", ops::format_size(size));
         }
         Commands::Sql { where_clause } => {
+            // SQL passthrough — no display-time filtering applied.
             let results = db::dao::query_files_where(&pool, &where_clause)
                 .await
                 .unwrap_or_else(|e| {
