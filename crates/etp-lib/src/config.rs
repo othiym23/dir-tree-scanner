@@ -439,6 +439,25 @@ database "incomplete" {
     }
 
     #[test]
+    fn runtime_config_parses_init_template() {
+        // The etp-init template must parse as valid RuntimeConfig.
+        // This catches KDL syntax errors in the template.
+        let template = include_str!("../../../cmd/etp-init/src/main.rs");
+        let start = template.find("r##\"").unwrap() + 4;
+        let end = template.find("\"##;").unwrap();
+        let kdl = &template[start..end];
+        let config = parse_runtime_config(kdl).unwrap();
+        assert!(
+            config.system_patterns.contains(&"@eaDir".to_string()),
+            "template should include @eaDir"
+        );
+        assert!(
+            config.databases.is_empty(),
+            "template databases are commented out"
+        );
+    }
+
+    #[test]
     fn runtime_config_defaults_returns_hardcoded() {
         let config = RuntimeConfig::defaults();
         assert!(config.system_patterns.contains(&"@eaDir".to_string()));

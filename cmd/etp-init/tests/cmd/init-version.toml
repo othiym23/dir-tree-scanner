@@ -1,0 +1,3 @@
+bin.name = "etp-init"
+args = ["--version"]
+status = "success"

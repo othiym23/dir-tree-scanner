@@ -5,6 +5,7 @@ members = [
     "cmd/etp-cas",
     "cmd/etp-csv",
     "cmd/etp-find",
+    "cmd/etp-init",
     "cmd/etp-meta",
     "cmd/etp-query",
     "cmd/etp-scan",

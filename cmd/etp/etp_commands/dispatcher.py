@@ -21,6 +21,7 @@ BUILTIN_COMMANDS = {
     "catalog": "Run catalog scans across configured directory trees",
     "csv": "Generate CSV index from indexed database",
     "find": "Search indexed files by regex pattern",
+    "init": "Create a default configuration file",
     "meta": "Audio metadata scan, read, and CUE sheet display",
     "query": "Query indexed files and metadata",
     "scan": "Scan a directory and update the database",
