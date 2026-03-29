@@ -103,7 +103,9 @@ async fn main() {
         } else if let Some((_, resolved)) = ops::resolve_nickname(&db, &config) {
             resolved
         } else {
-            db
+            eprintln!("error: database not found: {}", db.display());
+            eprintln!("provide a path to an existing database, or a nickname from config.kdl");
+            std::process::exit(1);
         }
     });
 

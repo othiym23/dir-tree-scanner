@@ -85,9 +85,9 @@ async fn main() {
         } else if let Some((_, db)) = ops::resolve_nickname(db_arg, &config) {
             db
         } else {
-            // Not a nickname and doesn't exist — try it as a path anyway
-            // (open_db will create it or fail)
-            db_arg.clone()
+            eprintln!("error: database not found: {}", db_arg.display());
+            eprintln!("provide a path to an existing database, or a nickname from config.kdl");
+            std::process::exit(1);
         }
     } else if let Some(ref default_name) = config.default_database {
         match config.resolve_database(default_name) {
