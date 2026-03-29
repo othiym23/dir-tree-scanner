@@ -10,7 +10,7 @@ implemented.
 ## Backlog (not assigned to a subproject)
 
 - [x] etp-scan: extract the scanning portion into its own plumbing command
-- [ ] scan/display separation and two-tier filtering
+- [x] scan/display separation and two-tier filtering
       (docs/plans/2026-03-28-scan-display-separation.md)
   - [x] Phase 1: scan everything, default to `--no-scan`
     - [x] remove `@eaDir` default exclude from etp-scan, etp-tree, etp-csv,
@@ -41,9 +41,9 @@ implemented.
     - [x] replace os.execv with subprocess.run for orchestrated commands
     - [x] auto-scan on exit code 2 for `etp tree` and `etp csv`
     - [x] argument extraction for directory and --db from argv
-  - [ ] Phase 5: catalog.py update
-    - [ ] run etp-scan first, then tree + CSV in parallel
-    - [ ] remove @eaDir from scan excludes
+  - [x] Phase 5: catalog.py update
+    - [x] run etp-scan first, then tree + CSV in parallel
+    - [x] remove @eaDir from scan excludes
 - [ ] `etp-completions` plumbing command for shell completions (fish, bash, zsh)
       via `eval (etp completions --fish)` etc. Use clap's built-in
       `clap_complete` for the plumbing commands and generate porcelain
