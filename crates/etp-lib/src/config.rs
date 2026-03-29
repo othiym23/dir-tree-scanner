@@ -152,6 +152,14 @@ impl RuntimeConfig {
     pub fn resolve_database(&self, name: &str) -> Option<&DatabaseEntry> {
         self.databases.iter().find(|d| d.name == name)
     }
+
+    /// Load from config file, falling back to defaults on missing file or error.
+    pub fn load_or_default() -> Self {
+        load_runtime_config().unwrap_or_else(|e| {
+            eprintln!("warning: failed to load config: {e}");
+            Self::defaults()
+        })
+    }
 }
 
 /// Load runtime config from `config.kdl`. Returns defaults if the file
@@ -199,6 +207,23 @@ fn resolve_raw_config(raw: RawRuntimeConfig) -> Result<RuntimeConfig, ConfigErro
         .databases
         .into_iter()
         .filter_map(|d| {
+            match (&d.root, &d.db) {
+                (None, _) => {
+                    eprintln!(
+                        "warning: database \"{}\" missing 'root' field, skipping",
+                        d.name
+                    );
+                    return None;
+                }
+                (_, None) => {
+                    eprintln!(
+                        "warning: database \"{}\" missing 'db' field, skipping",
+                        d.name
+                    );
+                    return None;
+                }
+                _ => {}
+            }
             let root = d.root?;
             let db = d.db?;
             Some(DatabaseEntry {

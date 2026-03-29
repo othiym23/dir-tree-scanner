@@ -151,27 +151,6 @@ impl FilterConfig {
         }
     }
 
-    /// Create from CLI flags, resolving conflicts with warnings.
-    /// Uses hardcoded default patterns.
-    pub fn from_flags(
-        include_system_flag: bool,
-        no_include_system_flag: bool,
-        show_hidden: bool,
-    ) -> Self {
-        let include = resolve_bool_pair(
-            include_system_flag,
-            no_include_system_flag,
-            "include-system-files",
-            false,
-        );
-        Self {
-            system_patterns: default_system_patterns(),
-            user_excludes: default_user_exclude_patterns(),
-            include_system_files: include,
-            show_hidden,
-        }
-    }
-
     /// Create from CLI flags and RuntimeConfig patterns.
     pub fn from_config(
         config: &crate::config::RuntimeConfig,
@@ -273,6 +252,20 @@ pub fn resolve_nickname(
         );
         (entry.root.clone(), entry.db.clone())
     })
+}
+
+/// Resolve a `--db` argument that could be a file path or a database nickname.
+/// Exits with an error if the path doesn't exist and isn't a configured nickname.
+pub fn resolve_db_path(db_arg: &Path, config: &crate::config::RuntimeConfig) -> PathBuf {
+    if db_arg.exists() {
+        return db_arg.to_path_buf();
+    }
+    if let Some((_, db)) = resolve_nickname(db_arg, config) {
+        return db;
+    }
+    eprintln!("error: database not found: {}", db_arg.display());
+    eprintln!("provide a path to an existing database, or a nickname from config.kdl");
+    process::exit(1);
 }
 
 /// Result of opening a database and resolving a scan for a directory.

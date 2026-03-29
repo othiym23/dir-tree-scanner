@@ -79,10 +79,7 @@ async fn main() {
         None
     };
 
-    let config = etp_lib::config::load_runtime_config().unwrap_or_else(|e| {
-        eprintln!("warning: failed to load config: {e}");
-        etp_lib::config::RuntimeConfig::defaults()
-    });
+    let config = etp_lib::config::RuntimeConfig::load_or_default();
 
     let pattern = ops::compile_pattern(&cli.pattern, cli.insensitive);
 
@@ -96,18 +93,7 @@ async fn main() {
         (None, cli.db.clone())
     };
 
-    // --db also accepts a nickname (for searching all scans without -R).
-    let resolved_db = explicit_db.map(|db| {
-        if db.exists() {
-            db
-        } else if let Some((_, resolved)) = ops::resolve_nickname(&db, &config) {
-            resolved
-        } else {
-            eprintln!("error: database not found: {}", db.display());
-            eprintln!("provide a path to an existing database, or a nickname from config.kdl");
-            std::process::exit(1);
-        }
-    });
+    let resolved_db = explicit_db.map(|db| ops::resolve_db_path(&db, &config));
 
     // When no directory is given, --db is required and we search all scans.
     let db_path = match (&directory, &resolved_db) {

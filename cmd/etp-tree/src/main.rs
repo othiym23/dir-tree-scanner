@@ -87,10 +87,7 @@ async fn main() {
         None
     };
 
-    let config = etp_lib::config::load_runtime_config().unwrap_or_else(|e| {
-        eprintln!("warning: failed to load config: {e}");
-        etp_lib::config::RuntimeConfig::defaults()
-    });
+    let config = etp_lib::config::RuntimeConfig::load_or_default();
 
     let (directory, db) = match ops::resolve_nickname(&cli.directory, &config) {
         Some((root, db_path)) => (root, Some(db_path)),

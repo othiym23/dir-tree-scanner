@@ -1,6 +1,14 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use etp_lib::{db, ops};
 use std::path::PathBuf;
+
+#[derive(Clone, ValueEnum)]
+enum StatsFormat {
+    Text,
+    Csv,
+    Json,
+    Kdl,
+}
 
 #[derive(Parser)]
 #[command(
@@ -52,9 +60,9 @@ enum Commands {
     },
     /// Show collection statistics
     Stats {
-        /// Output format: text (default), csv, or json
+        /// Output format
         #[arg(long, default_value = "text")]
-        format: String,
+        format: StatsFormat,
     },
     /// Show total size of a directory subtree
     Size {
@@ -73,33 +81,11 @@ enum Commands {
 async fn main() {
     let cli = Cli::parse();
 
-    // Validate arguments before doing any I/O.
-    if let Commands::Stats { ref format } = cli.command {
-        match format.as_str() {
-            "text" | "csv" | "json" | "kdl" => {}
-            other => {
-                eprintln!("error: unknown format \"{other}\"; expected text, csv, json, or kdl");
-                std::process::exit(1);
-            }
-        }
-    }
-
-    let config = etp_lib::config::load_runtime_config().unwrap_or_else(|e| {
-        eprintln!("warning: failed to load config: {e}");
-        etp_lib::config::RuntimeConfig::defaults()
-    });
+    let config = etp_lib::config::RuntimeConfig::load_or_default();
 
     // Resolve --db: accept a path, a nickname, or fall back to default-database.
     let db_path = if let Some(ref db_arg) = cli.db {
-        if db_arg.exists() {
-            db_arg.clone()
-        } else if let Some((_, db)) = ops::resolve_nickname(db_arg, &config) {
-            db
-        } else {
-            eprintln!("error: database not found: {}", db_arg.display());
-            eprintln!("provide a path to an existing database, or a nickname from config.kdl");
-            std::process::exit(1);
-        }
+        ops::resolve_db_path(db_arg, &config)
     } else if let Some(ref default_name) = config.default_database {
         match config.resolve_database(default_name) {
             Some(entry) => {
@@ -277,8 +263,8 @@ async fn main() {
             let mut sorted: Vec<_> = ext_counts.into_iter().collect();
             sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
-            match format.as_str() {
-                "json" => {
+            match format {
+                StatsFormat::Json => {
                     let extensions: serde_json::Map<String, serde_json::Value> = sorted
                         .iter()
                         .map(|(ext, count)| {
@@ -293,13 +279,13 @@ async fn main() {
                     });
                     println!("{}", serde_json::to_string_pretty(&obj).unwrap());
                 }
-                "csv" => {
+                StatsFormat::Csv => {
                     println!("extension,count");
                     for (ext, count) in &sorted {
                         println!(".{ext},{count}");
                     }
                 }
-                "text" => {
+                StatsFormat::Text => {
                     println!("Files: {file_count}");
                     println!("Total size: {}", ops::format_size(total));
 
@@ -313,7 +299,7 @@ async fn main() {
                         }
                     }
                 }
-                "kdl" => {
+                StatsFormat::Kdl => {
                     println!("stats {{");
                     println!("    files {file_count}");
                     println!("    total-size {total}");
@@ -327,8 +313,6 @@ async fn main() {
                     }
                     println!("}}");
                 }
-                // Validated at startup; unreachable.
-                _ => unreachable!(),
             }
         }
         Commands::Size { directory } => {
