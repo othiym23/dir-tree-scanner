@@ -1606,3 +1606,52 @@ class TestMatchFilesToSeason:
         matched, remaining = anime._match_files_to_season(pool, info)
         assert len(matched) == 3
         assert len(remaining) == 0
+
+
+class TestIterMediaFiles:
+    """Tests for recursive media file discovery."""
+
+    def test_finds_files_in_subdirectory(self, tmp_path):
+        """Files one level deep are found."""
+        sub = tmp_path / "batch"
+        sub.mkdir()
+        (sub / "ep01.mkv").touch()
+        (sub / "ep02.mkv").touch()
+        result = anime._iter_media_files([tmp_path])
+        assert len(result) == 2
+
+    def test_finds_files_in_nested_specials(self, tmp_path):
+        """Files in Specials/ subdirectory inside a batch dir are found."""
+        batch = tmp_path / "Show S01 [BD]"
+        batch.mkdir()
+        (batch / "ep01.mkv").touch()
+        specials = batch / "Specials"
+        specials.mkdir()
+        (specials / "special01.mkv").touch()
+        (specials / "special02.mkv").touch()
+        result = anime._iter_media_files([tmp_path])
+        names = sorted(r.name for r in result)
+        assert names == ["ep01.mkv", "special01.mkv", "special02.mkv"]
+
+    def test_finds_deeply_nested_files(self, tmp_path):
+        """Files at arbitrary depth are found."""
+        deep = tmp_path / "a" / "b" / "c" / "d"
+        deep.mkdir(parents=True)
+        (deep / "episode.mkv").touch()
+        result = anime._iter_media_files([tmp_path])
+        assert len(result) == 1
+        assert result[0].name == "episode.mkv"
+
+    def test_ignores_non_media_files(self, tmp_path):
+        """Non-media extensions are skipped."""
+        (tmp_path / "readme.txt").touch()
+        (tmp_path / "cover.jpg").touch()
+        (tmp_path / "episode.mkv").touch()
+        result = anime._iter_media_files([tmp_path])
+        assert len(result) == 1
+        assert result[0].name == "episode.mkv"
+
+    def test_skips_nonexistent_dir(self):
+        """Non-existent source directories are silently skipped."""
+        result = anime._iter_media_files([Path("/nonexistent/path")])
+        assert result == []

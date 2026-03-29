@@ -428,32 +428,16 @@ def _save_triage_manifest(copied: set[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _iter_media_files(
-    source_dirs: list[Path], *, recursive: bool = False
-) -> list[Path]:
-    """Walk source directories for media files.
-
-    By default scans one level of subdirectories.  With *recursive=True*
-    walks the full tree (used for the download index where batch releases
-    may nest several directories deep).
-    """
+def _iter_media_files(source_dirs: list[Path]) -> list[Path]:
+    """Walk source directories recursively for media files."""
     results: list[Path] = []
     for source_dir in source_dirs:
         if not source_dir.is_dir():
             continue
-        if recursive:
-            for root, _dirs, files in os.walk(source_dir):
-                for name in files:
-                    if Path(name).suffix.lower() in _MEDIA_EXTENSIONS:
-                        results.append(Path(root) / name)
-        else:
-            for entry in source_dir.iterdir():
-                if entry.is_file() and entry.suffix.lower() in _MEDIA_EXTENSIONS:
-                    results.append(entry)
-                elif entry.is_dir():
-                    for f in entry.iterdir():
-                        if f.is_file() and f.suffix.lower() in _MEDIA_EXTENSIONS:
-                            results.append(f)
+        for root, _dirs, files in os.walk(source_dir):
+            for name in files:
+                if Path(name).suffix.lower() in _MEDIA_EXTENSIONS:
+                    results.append(Path(root) / name)
     return results
 
 
@@ -485,7 +469,7 @@ def _build_download_index(downloads_dir: Path) -> DownloadIndex:
     # name for every file it contains.
     dir_keys_cache: dict[tuple[str, str], set[str]] = {}
 
-    for f in _iter_media_files([downloads_dir], recursive=True):
+    for f in _iter_media_files([downloads_dir]):
         try:
             rel = str(f.relative_to(downloads_dir))
         except ValueError:
