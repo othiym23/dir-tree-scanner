@@ -116,25 +116,23 @@ implemented.
 
 ## Code Quality Improvements
 
-- [ ] `process::exit` in etp-lib functions → return `Result` so the library is
-      testable and reusable; binaries convert errors to exit codes at top level
-- [ ] Collapse `stream_find_matches` / `stream_find_all_matches` and
-      `collect_find_matches` / `collect_find_all_matches` (4 nearly-identical
-      functions → 2 parameterized by stream source)
-- [ ] Extract stream-polling helper or add `futures-util` for
-      `StreamExt::next()` to eliminate `poll_fn` boilerplate (3 locations)
-- [ ] RAII profiling guard to replace duplicated setup/teardown in 5 binaries
-- [ ] `open_and_resolve_scan` parameter struct to reduce argument count
+- [x] `process::exit` in etp-lib functions → return `Result`; binaries use
+      anyhow with `?` propagation (ADR 2026-03-28-05)
+- [x] Collapse `stream_find_matches` / `collect_find_matches` (4 → 2
+      parameterized by `scan_id: Option<i64>`)
+- [x] Add `futures-util` for `StreamExt::next()` (replaces `poll_fn`
+      boilerplate)
+- [x] RAII profiling guard with `Drop` + `maybe_init_profiling` helper
+- [x] `ScanOptions` struct for `open_and_resolve_scan` parameters
 - [ ] Move single-caller ops.rs functions (`gc_orphan_blobs`,
       `read_file_metadata`) closer to their respective command crates
 - [ ] CSV writer: stream from DB with SQL-side sorting instead of loading all
       records into memory (biggest memory improvement for large scans)
 - [ ] `resolve_cas_dir`: resolve once per operation and pass `&Path` directly
       instead of `Option<&Path>` per CAS call
-- [ ] `reconcile_moves`: batch dir_paths pre-fetch into one `WHERE id IN (...)`
-      query instead of N sequential queries
-- [ ] `system_patterns` as `HashSet<String>` for O(1) lookup (currently O(n)
-      linear scan, n ≈ 10)
+- [x] `reconcile_moves`: batch dir_paths pre-fetch into one `WHERE id IN (...)`
+      query
+- [x] `system_patterns` as `HashSet<String>` for O(1) lookup
 
 ## Post-SP3: Memory Profiling
 
