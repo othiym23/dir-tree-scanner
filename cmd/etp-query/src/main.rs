@@ -302,8 +302,24 @@ async fn main() {
                         }
                     }
                 }
+                "kdl" => {
+                    println!("stats {{");
+                    println!("    files {file_count}");
+                    println!("    total-size {total}");
+                    println!("    total-size-human \"{}\"", ops::format_size(total));
+                    if !sorted.is_empty() {
+                        println!("    extensions {{");
+                        for (ext, count) in &sorted {
+                            println!("        ext \".{ext}\" {count}");
+                        }
+                        println!("    }}");
+                    }
+                    println!("}}");
+                }
                 other => {
-                    eprintln!("error: unknown format \"{other}\"; expected text, csv, or json");
+                    eprintln!(
+                        "error: unknown format \"{other}\"; expected text, csv, json, or kdl"
+                    );
                     std::process::exit(1);
                 }
             }
