@@ -3,11 +3,20 @@ use crate::db::dao::{self, FileInput, RemovedFile};
 use sqlx::SqlitePool;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::Instant;
 use walkdir::WalkDir;
+
+#[derive(Debug, thiserror::Error)]
+pub enum ScanError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("database error: {0}")]
+    Db(#[from] sqlx::Error),
+    #[error("walkdir error: {0}")]
+    Walk(#[from] walkdir::Error),
+}
 
 pub struct ScanStats {
     pub dirs_cached: usize,
@@ -27,7 +36,7 @@ pub async fn scan_to_db(
     exclude: &[String],
     verbose: bool,
     cas_dir: Option<&Path>,
-) -> io::Result<(i64, ScanStats)> {
+) -> Result<(i64, ScanStats), ScanError> {
     let start = Instant::now();
 
     if verbose {
@@ -35,9 +44,7 @@ pub async fn scan_to_db(
     }
 
     let root_str = root.to_string_lossy();
-    let scan_id = dao::upsert_scan(pool, run_type, &root_str)
-        .await
-        .map_err(io::Error::other)?;
+    let scan_id = dao::upsert_scan(pool, run_type, &root_str).await?;
 
     let mut stats = ScanStats {
         dirs_cached: 0,
@@ -49,9 +56,7 @@ pub async fn scan_to_db(
     let mut all_removed: Vec<RemovedFile> = Vec::new();
 
     // Bulk-load all cached mtimes in one query instead of per-directory SELECTs.
-    let cached_mtimes: HashMap<String, i64> = dao::all_directory_mtimes(pool, scan_id)
-        .await
-        .map_err(io::Error::other)?;
+    let cached_mtimes: HashMap<String, i64> = dao::all_directory_mtimes(pool, scan_id).await?;
 
     // Walk without sorting — order doesn't matter for scanning (output reads
     // from DB with its own sort). Skipping sort avoids buffering + extra
@@ -71,7 +76,7 @@ pub async fn scan_to_db(
             })
         })
     {
-        let entry = entry.map_err(io::Error::other)?;
+        let entry = entry?;
         if !entry.file_type().is_dir() {
             continue;
         }
@@ -134,27 +139,21 @@ pub async fn scan_to_db(
         });
 
         if pending.len() >= BATCH_SIZE {
-            let removed = flush_pending(pool, scan_id, &mut pending)
-                .await
-                .map_err(io::Error::other)?;
+            let removed = flush_pending(pool, scan_id, &mut pending).await?;
             all_removed.extend(removed);
         }
     }
 
     // Flush any remaining directories
     if !pending.is_empty() {
-        let removed = flush_pending(pool, scan_id, &mut pending)
-            .await
-            .map_err(io::Error::other)?;
+        let removed = flush_pending(pool, scan_id, &mut pending).await?;
         all_removed.extend(removed);
     }
 
     // If nothing was scanned, every directory matched its cached mtime —
     // the DB is already in sync and no directories can be stale.
     let (dir_removed, stale_orphans) = if stats.dirs_scanned > 0 {
-        dao::remove_stale_directories(pool, scan_id, &seen_paths)
-            .await
-            .map_err(io::Error::other)?
+        dao::remove_stale_directories(pool, scan_id, &seen_paths).await?
     } else {
         (0, Vec::new())
     };
@@ -163,18 +162,14 @@ pub async fn scan_to_db(
     // Move-tracking: match removed files against newly appeared files by
     // size, then verify with BLAKE3 hash. Matched files get their dir_id
     // and filename updated; unmatched files are deleted.
-    let orphan_hashes = reconcile_moves(pool, root, &mut all_removed, verbose)
-        .await
-        .map_err(io::Error::other)?;
+    let orphan_hashes = reconcile_moves(pool, root, &mut all_removed, verbose).await?;
 
     // Clean up CAS blobs orphaned by unmatched deletions + stale dirs
     for hash in orphan_hashes.iter().chain(stale_orphans.iter()) {
         let _ = cas::remove_blob(hash, cas_dir);
     }
 
-    dao::finish_scan(pool, scan_id)
-        .await
-        .map_err(io::Error::other)?;
+    dao::finish_scan(pool, scan_id).await?;
 
     stats.elapsed_ms = start.elapsed().as_millis();
 
