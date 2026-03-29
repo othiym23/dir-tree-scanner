@@ -2,20 +2,30 @@ use std::path::{Path, PathBuf};
 
 /// Guard that flushes the trace file on drop and prints a summary to stderr.
 pub struct ProfilingGuard {
-    _guard: tracing_chrome::FlushGuard,
+    guard: Option<tracing_chrome::FlushGuard>,
     trace_path: PathBuf,
 }
 
-impl ProfilingGuard {
-    /// Flush the trace file and print a summary to stderr.
-    pub fn finish(self) {
-        let path = self.trace_path.clone();
-        // Drop self (and the inner FlushGuard) to flush all buffered data.
-        drop(self);
-        if let Ok(meta) = std::fs::metadata(&path) {
+impl Drop for ProfilingGuard {
+    fn drop(&mut self) {
+        // Explicitly drop the FlushGuard first to flush all buffered trace data,
+        // then read the final file size for the summary.
+        drop(self.guard.take());
+        if let Ok(meta) = std::fs::metadata(&self.trace_path) {
             let size = crate::ops::format_size(meta.len());
-            eprintln!("profiling: wrote {} ({})", path.display(), size);
+            eprintln!("profiling: wrote {} ({})", self.trace_path.display(), size);
         }
+    }
+}
+
+/// Conditionally initialize profiling. Returns a guard that prints a summary
+/// on drop. Use in main(): `let _guard = maybe_init_profiling(cli.profile, "etp-tree");`
+#[cfg(feature = "profiling")]
+pub fn maybe_init_profiling(enabled: bool, binary_name: &str) -> Option<ProfilingGuard> {
+    if enabled {
+        Some(init_profiling(&trace_path(binary_name)))
+    } else {
+        None
     }
 }
 
@@ -35,7 +45,7 @@ pub fn init_profiling(trace_path: &Path) -> ProfilingGuard {
     tracing_subscriber::registry().with(chrome_layer).init();
 
     ProfilingGuard {
-        _guard: guard,
+        guard: Some(guard),
         trace_path: trace_path.to_path_buf(),
     }
 }

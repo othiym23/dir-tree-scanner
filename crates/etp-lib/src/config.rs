@@ -42,33 +42,24 @@ pub struct Scan {
 
 /// Load and parse a KDL config file.
 pub fn load_config(path: &Path) -> Result<Config, ConfigError> {
-    let text = fs::read_to_string(path).map_err(ConfigError::Io)?;
+    let text = fs::read_to_string(path)?;
     parse_config(&text, path.to_string_lossy().as_ref())
 }
 
 /// Parse a KDL config string.
 pub fn parse_config(text: &str, filename: &str) -> Result<Config, ConfigError> {
-    knuffel::parse(filename, text).map_err(ConfigError::Parse)
+    Ok(knuffel::parse(filename, text)?)
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    Io(std::io::Error),
-    Parse(knuffel::Error),
+    #[error("config I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("config parse error: {0}")]
+    Parse(#[from] knuffel::Error),
+    #[error("config error: {0}")]
     Validation(String),
 }
-
-impl std::fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConfigError::Io(e) => write!(f, "config I/O error: {e}"),
-            ConfigError::Parse(e) => write!(f, "config parse error: {e}"),
-            ConfigError::Validation(msg) => write!(f, "config error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for ConfigError {}
 
 // --- Runtime configuration (config.kdl) ---
 
@@ -117,7 +108,7 @@ struct RawDatabaseEntry {
 pub struct RuntimeConfig {
     pub default_database: Option<String>,
     pub cas_dir: Option<PathBuf>,
-    pub system_patterns: Vec<String>,
+    pub system_patterns: std::collections::HashSet<String>,
     pub user_excludes: Vec<String>,
     pub databases: Vec<DatabaseEntry>,
 }
@@ -174,15 +165,14 @@ pub fn load_runtime_config() -> Result<RuntimeConfig, ConfigError> {
         return Ok(RuntimeConfig::defaults());
     }
 
-    let text = fs::read_to_string(&path).map_err(ConfigError::Io)?;
-    let raw: RawRuntimeConfig =
-        knuffel::parse(path.to_string_lossy().as_ref(), &text).map_err(ConfigError::Parse)?;
+    let text = fs::read_to_string(&path)?;
+    let raw: RawRuntimeConfig = knuffel::parse(path.to_string_lossy().as_ref(), &text)?;
     resolve_raw_config(raw)
 }
 
 /// Parse a runtime config from a KDL string (for testing).
 pub fn parse_runtime_config(text: &str) -> Result<RuntimeConfig, ConfigError> {
-    let raw: RawRuntimeConfig = knuffel::parse("test.kdl", text).map_err(ConfigError::Parse)?;
+    let raw: RawRuntimeConfig = knuffel::parse("test.kdl", text)?;
     resolve_raw_config(raw)
 }
 
@@ -249,6 +239,7 @@ fn resolve_raw_config(raw: RawRuntimeConfig) -> Result<RuntimeConfig, ConfigErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
     fn parse_full_config() {
@@ -386,7 +377,10 @@ database "tv" {
             config.cas_dir.as_deref(),
             Some(Path::new("/volume1/data/etp/assets"))
         );
-        assert_eq!(config.system_patterns, vec!["@eaDir", "@custom"]);
+        assert_eq!(
+            config.system_patterns,
+            HashSet::from(["@eaDir".to_string(), "@custom".to_string()])
+        );
         assert_eq!(config.user_excludes, vec!["*.bak"]);
         assert_eq!(config.databases.len(), 2);
         assert_eq!(config.databases[0].name, "music");
@@ -403,7 +397,10 @@ system-files {
 }
 "#;
         let config = parse_runtime_config(kdl).unwrap();
-        assert_eq!(config.system_patterns, vec!["only-this"]);
+        assert_eq!(
+            config.system_patterns,
+            HashSet::from(["only-this".to_string()])
+        );
     }
 
     #[test]

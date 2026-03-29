@@ -3,12 +3,20 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[derive(Debug, thiserror::Error)]
+pub enum CasError {
+    #[error("CAS I/O error: {0}")]
+    Io(#[from] io::Error),
+    #[error("CAS directory resolution failed: {0}")]
+    HomeDir(#[from] etcetera::HomeDirError),
+}
+
 /// Resolve the CAS root directory, using an override if provided or
 /// falling back to the platform default (`paths::cas_dir()`).
-pub fn resolve_cas_dir(override_dir: Option<&Path>) -> io::Result<PathBuf> {
+pub fn resolve_cas_dir(override_dir: Option<&Path>) -> Result<PathBuf, CasError> {
     match override_dir {
         Some(dir) => Ok(dir.to_path_buf()),
-        None => paths::cas_dir().map_err(io::Error::other),
+        None => Ok(paths::cas_dir()?),
     }
 }
 
@@ -23,7 +31,7 @@ fn blob_path(cas_root: &Path, hash: &str) -> PathBuf {
 /// Writes to a temp file then renames for atomicity (safe on Btrfs).
 /// No-op if a blob with the same hash already exists.
 /// Pass `cas_dir: None` to use the platform default.
-pub fn store_blob(data: &[u8], cas_dir: Option<&Path>) -> io::Result<(String, u64)> {
+pub fn store_blob(data: &[u8], cas_dir: Option<&Path>) -> Result<(String, u64), CasError> {
     let hash = blake3::hash(data).to_hex().to_string();
     let size = data.len() as u64;
     let cas_root = resolve_cas_dir(cas_dir)?;
@@ -44,13 +52,13 @@ pub fn store_blob(data: &[u8], cas_dir: Option<&Path>) -> io::Result<(String, u6
 }
 
 /// Read a blob by its hash.
-pub fn get_blob(hash: &str, cas_dir: Option<&Path>) -> io::Result<Vec<u8>> {
+pub fn get_blob(hash: &str, cas_dir: Option<&Path>) -> Result<Vec<u8>, CasError> {
     let cas_root = resolve_cas_dir(cas_dir)?;
-    fs::read(blob_path(&cas_root, hash))
+    Ok(fs::read(blob_path(&cas_root, hash))?)
 }
 
 /// Remove a blob by its hash.
-pub fn remove_blob(hash: &str, cas_dir: Option<&Path>) -> io::Result<()> {
+pub fn remove_blob(hash: &str, cas_dir: Option<&Path>) -> Result<(), CasError> {
     let cas_root = resolve_cas_dir(cas_dir)?;
     let path = blob_path(&cas_root, hash);
     if path.exists() {
@@ -70,7 +78,7 @@ pub fn hash_file(path: &Path) -> Option<String> {
 }
 
 /// List all blob hashes present on disk in the CAS directory.
-pub fn list_blob_hashes(cas_dir: Option<&Path>) -> io::Result<Vec<String>> {
+pub fn list_blob_hashes(cas_dir: Option<&Path>) -> Result<Vec<String>, CasError> {
     let cas = resolve_cas_dir(cas_dir)?;
     let mut hashes = Vec::new();
     if !cas.exists() {
