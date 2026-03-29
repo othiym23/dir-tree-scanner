@@ -75,21 +75,10 @@ async fn main() {
     let cli = Cli::parse();
 
     #[cfg(feature = "profiling")]
-    let _profiling_guard = if cli.profile {
-        Some(etp_lib::profiling::init_profiling(
-            &etp_lib::profiling::trace_path("etp-scan"),
-        ))
-    } else {
-        None
-    };
+    let _profiling_guard = etp_lib::profiling::maybe_init_profiling(cli.profile, "etp-scan");
 
     if let Err(e) = run(cli).await {
         eprintln!("error: {e:#}");
         process::exit(1);
-    }
-
-    #[cfg(feature = "profiling")]
-    if let Some(guard) = _profiling_guard {
-        guard.finish();
     }
 }

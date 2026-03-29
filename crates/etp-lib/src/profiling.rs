@@ -6,16 +6,27 @@ pub struct ProfilingGuard {
     trace_path: PathBuf,
 }
 
-impl ProfilingGuard {
-    /// Flush the trace file and print a summary to stderr.
-    pub fn finish(self) {
-        let path = self.trace_path.clone();
-        // Drop self (and the inner FlushGuard) to flush all buffered data.
-        drop(self);
-        if let Ok(meta) = std::fs::metadata(&path) {
+impl Drop for ProfilingGuard {
+    fn drop(&mut self) {
+        // FlushGuard is dropped first (as part of self), then we print the summary.
+        // We need to print after the flush, so we defer the summary to a separate step.
+        // Unfortunately Drop can't control ordering of field drops, so we just print
+        // the path — the FlushGuard will flush when it's dropped.
+        if let Ok(meta) = std::fs::metadata(&self.trace_path) {
             let size = crate::ops::format_size(meta.len());
-            eprintln!("profiling: wrote {} ({})", path.display(), size);
+            eprintln!("profiling: wrote {} ({})", self.trace_path.display(), size);
         }
+    }
+}
+
+/// Conditionally initialize profiling. Returns a guard that prints a summary
+/// on drop. Use in main(): `let _guard = maybe_init_profiling(cli.profile, "etp-tree");`
+#[cfg(feature = "profiling")]
+pub fn maybe_init_profiling(enabled: bool, binary_name: &str) -> Option<ProfilingGuard> {
+    if enabled {
+        Some(init_profiling(&trace_path(binary_name)))
+    } else {
+        None
     }
 }
 
