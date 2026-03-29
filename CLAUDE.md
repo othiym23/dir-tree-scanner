@@ -31,9 +31,10 @@ just deploy           # check + test + build + copy to NAS
 
 # Rust plumbing (in cmd/)
 etp-scan <directory> [--db <path>] [-e <name>...] [-v]
-etp-csv <directory> [--output <file.csv>] [--db <file.db>] [--exclude <name>...] [-v]
-etp-tree <directory> [--db <file.db>] [--exclude <name>...] [--du [--du-subs]] [-v]
-etp-find <pattern> [-R <directory>] [--tree=<file>] [--csv=<file>] [--size] [-i] [--db <path>] [-v]
+etp-csv <directory> [--scan] [--output <file.csv>] [--db <file.db>] [-a] [--exclude <name>...] [--[no-]include-system-files] [-v]
+etp-tree <directory> [--scan] [--db <file.db>] [-a] [--exclude <name>...] [--[no-]include-system-files] [--du [--du-subs]] [-v]
+etp-find <pattern> [-R <directory>] [--tree=<file>] [--csv=<file>] [--size] [-a] [-i] [--db <path>] [--[no-]include-system-files] [-v]
+etp-init [--force]
 etp-meta scan [-R <directory>] [--db <path>] [-e <name>...] [--force] [-v]
 etp-meta read <file> [--images]
 etp-meta cue <file> [--audio-file PATH...] [--format summary|cuetools|eac]
@@ -41,7 +42,8 @@ etp-cas store <file>
 etp-cas get <hash> [-o PATH]
 etp-cas gc --db <path> [-v]
 etp-cas list
-etp-query --db <path> files|tags|find|stats|size|sql [args...]
+etp-query --db <path|nickname> files|tags|find|stats|size|sql [args...]
+etp-query stats [--format text|csv|json|kdl] [--[no-]include-system-files]
 
 # Python porcelain (in cmd/etp/)
 etp tree <directory> [args...]

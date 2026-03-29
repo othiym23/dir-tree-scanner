@@ -1,0 +1,11 @@
+{
+  "extensions": {
+    "flac": 2,
+    "jpg": 1,
+    "mp3": 2,
+    "txt": 1
+  },
+  "files": 6,
+  "total_size": 64501000,
+  "total_size_human": "61.51 MiB"
+}

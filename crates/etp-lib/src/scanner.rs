@@ -26,6 +26,7 @@ pub async fn scan_to_db(
     run_type: &str,
     exclude: &[String],
     verbose: bool,
+    cas_dir: Option<&Path>,
 ) -> io::Result<(i64, ScanStats)> {
     let start = Instant::now();
 
@@ -55,7 +56,7 @@ pub async fn scan_to_db(
     // Walk without sorting — order doesn't matter for scanning (output reads
     // from DB with its own sort). Skipping sort avoids buffering + extra
     // syscalls per directory. filter_entry skips excluded directories so
-    // walkdir never descends into them (e.g. Synology @eaDir).
+    // walkdir never descends into them.
     let mut pending: Vec<DirUpdate> = Vec::new();
     const BATCH_SIZE: usize = 64;
 
@@ -97,12 +98,6 @@ pub async fn scan_to_db(
         #[cfg(feature = "profiling")]
         let _dir_span = tracing::info_span!("scan_directory", path = %relative).entered();
 
-        if verbose {
-            let file_count = fs::read_dir(dir_path)?.count();
-            let display_path = if relative.is_empty() { "." } else { &relative };
-            eprintln!("scanning: {display_path} ({file_count} files)");
-        }
-
         let mut files = Vec::new();
         let mut dir_size: u64 = 0;
 
@@ -121,6 +116,11 @@ pub async fn scan_to_db(
                     mtime: child_meta.mtime(),
                 });
             }
+        }
+
+        if verbose {
+            let display_path = if relative.is_empty() { "." } else { &relative };
+            eprintln!("scanning: {display_path} ({} files)", files.len());
         }
 
         #[cfg(feature = "profiling")]
@@ -169,7 +169,7 @@ pub async fn scan_to_db(
 
     // Clean up CAS blobs orphaned by unmatched deletions + stale dirs
     for hash in orphan_hashes.iter().chain(stale_orphans.iter()) {
-        let _ = cas::remove_blob(hash);
+        let _ = cas::remove_blob(hash, cas_dir);
     }
 
     dao::finish_scan(pool, scan_id)

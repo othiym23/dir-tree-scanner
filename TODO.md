@@ -10,8 +10,44 @@ implemented.
 ## Backlog (not assigned to a subproject)
 
 - [x] etp-scan: extract the scanning portion into its own plumbing command
-- [ ] refactor etp-csv/etp-tree to use `--no-scan` by default with scanning
-      managed by porcelain or a separate etp-scan invocation
+- [x] scan/display separation and two-tier filtering
+      (docs/plans/2026-03-28-scan-display-separation.md)
+  - [x] Phase 1: scan everything, default to `--no-scan`
+    - [x] remove `@eaDir` default exclude from etp-scan, etp-tree, etp-csv,
+          etp-find (also etp-meta)
+    - [x] add `--[no-]scan` boolean pair to etp-tree and etp-csv (default: no
+          scan)
+    - [x] exit code 2 when no scan exists (for porcelain auto-scan)
+  - [x] Phase 2: two-tier display filtering
+    - [x] system file patterns (hidden from display, counted in du)
+    - [x] user exclude patterns (hidden from display AND du)
+    - [x] `--[no-]include-system-files` flag on etp-tree, etp-csv, etp-find,
+          etp-query
+    - [x] configurable default patterns for both lists
+    - [x] `is_system_path` checks all absolute path components — documented as
+          safe due to distinctive pattern prefixes; configuration error, not
+          architectural limitation
+    - [x] `should_show_name` vs `should_show` contract — documented: only use
+          `should_show_name` in tree rendering's top-down traversal where
+          directories are filtered before descending
+  - [x] Phase 3: runtime config + etp-init
+    - [x] `config.kdl` with system patterns, user excludes, database nicknames,
+          and CAS directory path
+    - [x] `etp-init` plumbing command to generate commented config template
+    - [x] database nickname resolution in all Rust commands
+    - [x] wire up `default-database` from config.kdl — used as fallback when no
+          `--db` is specified and no `.etp.db` exists in the target directory
+  - [x] Phase 4: smart porcelain dispatch
+    - [x] replace os.execv with subprocess.run for orchestrated commands
+    - [x] auto-scan on exit code 2 for `etp tree` and `etp csv`
+    - [x] argument extraction for directory and --db from argv
+  - [x] Phase 5: catalog.py update
+    - [x] run etp-scan first, then tree + CSV in parallel
+    - [x] remove @eaDir from scan excludes
+- [ ] `etp-completions` plumbing command for shell completions (fish, bash, zsh)
+      via `eval (etp completions --fish)` etc. Use clap's built-in
+      `clap_complete` for the plumbing commands and generate porcelain
+      completions (with database nicknames from config.kdl) for the dispatcher.
 - [x] create README with description of all porcelain commands and with
       installation instructions
 - [ ] write a utility to truncate media files for various formats to just
@@ -23,6 +59,14 @@ implemented.
 - [x] store BLAKE3 content hash in the files table during metadata scan to
       simplify move tracking (eliminates I/O-heavy hashing during reconciliation
       and enables content-based deduplication detection)
+
+## Incremental Background Metadata Scanning
+
+- [ ] `etp meta scan --limit N` to process only N unscanned files per invocation
+      (default ~1000), enabling batched background ingestion
+- [ ] Run niced (`nice -n 19 ionice -c3`) via cron/systemd timer on NAS
+- [ ] Porcelain support: `etp catalog --meta-scan` runs batched metadata scans
+      across all configured databases
 
 ## SP 3.1: Metadata Write Path
 
@@ -61,3 +105,41 @@ implemented.
 - [ ] CSV/spreadsheet metadata import with diff against DB state
 - [ ] external binary callouts via etp.run() in Lua
 - [ ] everything feeds into the coalesced write pipeline
+
+## Config Bootstrapping
+
+- [ ] `etp init` should bootstrap `config.kdl` from `catalog.kdl` if it exists:
+      generate database nicknames from catalog scan blocks (name → root/db
+      mapping), set first scan as default-database
+- [ ] Cross-reference databases in `config.kdl` with scans in `catalog.kdl` to
+      validate that nicknames point to real catalog entries
+
+## Code Quality Improvements
+
+- [ ] `process::exit` in etp-lib functions → return `Result` so the library is
+      testable and reusable; binaries convert errors to exit codes at top level
+- [ ] Collapse `stream_find_matches` / `stream_find_all_matches` and
+      `collect_find_matches` / `collect_find_all_matches` (4 nearly-identical
+      functions → 2 parameterized by stream source)
+- [ ] Extract stream-polling helper or add `futures-util` for
+      `StreamExt::next()` to eliminate `poll_fn` boilerplate (3 locations)
+- [ ] RAII profiling guard to replace duplicated setup/teardown in 5 binaries
+- [ ] `open_and_resolve_scan` parameter struct to reduce argument count
+- [ ] Move single-caller ops.rs functions (`gc_orphan_blobs`,
+      `read_file_metadata`) closer to their respective command crates
+- [ ] CSV writer: stream from DB with SQL-side sorting instead of loading all
+      records into memory (biggest memory improvement for large scans)
+- [ ] `resolve_cas_dir`: resolve once per operation and pass `&Path` directly
+      instead of `Option<&Path>` per CAS call
+- [ ] `reconcile_moves`: batch dir_paths pre-fetch into one `WHERE id IN (...)`
+      query instead of N sequential queries
+- [ ] `system_patterns` as `HashSet<String>` for O(1) lookup (currently O(n)
+      linear scan, n ≈ 10)
+
+## Post-SP3: Memory Profiling
+
+- [ ] Profile peak memory of all commands and subcommands against a large
+      sample: scanning + metadata reading against a real directory (200K+
+      files), querying against the resulting database. Identify any O(n) memory
+      usage that should be streaming. Candidates: `list_files` callers, tree
+      rendering data structures, metadata scan file list, CSV output grouping.

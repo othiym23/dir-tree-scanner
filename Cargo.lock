@@ -571,6 +571,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "etp-init"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "etp-lib",
+ "trycmd",
+]
+
+[[package]]
 name = "etp-lib"
 version = "0.2.0"
 dependencies = [
@@ -613,6 +622,8 @@ version = "0.2.0"
 dependencies = [
  "clap",
  "etp-lib",
+ "futures-core",
+ "serde_json",
  "tokio",
  "trycmd",
 ]

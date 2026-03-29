@@ -40,12 +40,6 @@ pub fn cas_dir() -> Result<PathBuf, etcetera::HomeDirError> {
     Ok(data_dir()?.join("assets"))
 }
 
-/// CAS blob path for a given BLAKE3 hex hash: `assets/{first2}/{full_hash}`.
-pub fn cas_blob_path(hash: &str) -> Result<PathBuf, etcetera::HomeDirError> {
-    let prefix = &hash[..2.min(hash.len())];
-    Ok(cas_dir()?.join(prefix).join(hash))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -72,12 +66,6 @@ mod tests {
     fn db_path_ends_with_sqlite() {
         let path = db_path().unwrap();
         assert_eq!(path.file_name().unwrap(), "metadata.sqlite");
-    }
-
-    #[test]
-    fn cas_blob_path_uses_prefix_directory() {
-        let path = cas_blob_path("abcdef1234567890").unwrap();
-        assert!(path.ends_with("ab/abcdef1234567890"));
     }
 
     #[test]

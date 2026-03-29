@@ -1,0 +1,4 @@
+bin.name = "etp-query"
+args = ["--db", "../../test-data/stats-fixture.db", "stats", "--format", "kdl"]
+status = "success"
+stderr = ""

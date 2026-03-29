@@ -1,0 +1,5 @@
+bin.name = "etp-find"
+args = ["test_pattern", "--db", "nonexistent_nickname_that_is_not_a_path"]
+status.code = 1
+stdout = ""
+fs.sandbox = true

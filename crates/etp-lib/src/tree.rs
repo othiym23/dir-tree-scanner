@@ -1,8 +1,9 @@
 use crate::db::dao;
 use crate::finder::FindMatch;
+use crate::ops;
+use crate::ops::FilterConfig;
 use glob::Pattern;
 use icu_collator::CollatorBorrowed;
-use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
 use sqlx::SqlitePool;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, Write};
@@ -30,17 +31,9 @@ struct TreeContext<'a> {
     files_by_dir: HashMap<PathBuf, Vec<String>>,
     children: BTreeMap<PathBuf, BTreeSet<String>>,
     patterns: &'a [Pattern],
+    filter: &'a FilterConfig,
     collator: CollatorBorrowed<'static>,
     no_escape: bool,
-    show_hidden: bool,
-}
-
-fn make_collator() -> io::Result<CollatorBorrowed<'static>> {
-    let mut options = CollatorOptions::default();
-    options.strength = Some(Strength::Quaternary);
-    options.alternate_handling = Some(AlternateHandling::Shifted);
-    CollatorBorrowed::try_new(Default::default(), options)
-        .map_err(|e| io::Error::other(format!("collator initialization failed: {e}")))
 }
 
 #[cfg_attr(
@@ -52,8 +45,8 @@ pub async fn render_tree_from_db(
     scan_id: i64,
     root: &Path,
     patterns: &[Pattern],
+    filter: &FilterConfig,
     no_escape: bool,
-    show_hidden: bool,
 ) -> io::Result<(usize, usize)> {
     let dir_paths = dao::list_directory_paths(pool, scan_id)
         .await
@@ -89,9 +82,9 @@ pub async fn render_tree_from_db(
         files_by_dir,
         children,
         patterns,
-        collator: make_collator()?,
+        filter,
+        collator: ops::make_collator()?,
         no_escape,
-        show_hidden,
     };
 
     let mut out = io::stdout();
@@ -153,13 +146,15 @@ pub fn render_tree_from_paths(
     }
 
     let no_patterns: Vec<Pattern> = Vec::new();
+    let mut show_all = FilterConfig::new(true);
+    show_all.show_hidden = true;
     let ctx = TreeContext {
         files_by_dir,
         children,
         patterns: &no_patterns,
-        collator: make_collator()?,
+        filter: &show_all,
+        collator: ops::make_collator()?,
         no_escape: true,
-        show_hidden: true,
     };
 
     writeln!(writer, "{}", root.display())?;
@@ -191,7 +186,7 @@ fn merge_entries(files: &[String], child_dirs: &BTreeSet<String>, ctx: &TreeCont
         .chain(child_dirs.iter().map(|d| Entry::Dir(d.clone())))
         .filter(|e| {
             let n = e.name();
-            if !ctx.show_hidden && n.starts_with('.') {
+            if !ctx.filter.should_show_name(n) {
                 return false;
             }
             !ctx.patterns.iter().any(|p| p.matches(n))

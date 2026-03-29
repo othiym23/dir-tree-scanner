@@ -1,5 +1,6 @@
 use etp_lib::csv_writer;
 use etp_lib::db;
+use etp_lib::ops;
 use etp_lib::scanner;
 use std::fs;
 
@@ -25,14 +26,20 @@ async fn csv_output_from_db_is_correct() {
 
     let pool = db::open_memory().await.unwrap();
     let run_type = root.to_string_lossy();
-    let (scan_id, _stats) = scanner::scan_to_db(&root, &pool, &run_type, &[], false)
+    let (scan_id, _stats) = scanner::scan_to_db(&root, &pool, &run_type, &[], false, None)
         .await
         .unwrap();
 
     let csv_path = tmp.path().join("out.csv");
-    csv_writer::write_csv_from_db(&pool, scan_id, &csv_path, &[], false)
-        .await
-        .unwrap();
+    csv_writer::write_csv_from_db(
+        &pool,
+        scan_id,
+        &csv_path,
+        &[],
+        &ops::FilterConfig::new(true),
+    )
+    .await
+    .unwrap();
 
     let content = fs::read_to_string(&csv_path).unwrap();
     let lines: Vec<&str> = content.lines().collect();
@@ -59,14 +66,20 @@ async fn csv_output_with_exclude_filters_correctly() {
     let pool = db::open_memory().await.unwrap();
     let run_type = root.to_string_lossy();
     let exclude = vec!["@eaDir".to_string()];
-    let (scan_id, _stats) = scanner::scan_to_db(&root, &pool, &run_type, &exclude, false)
+    let (scan_id, _stats) = scanner::scan_to_db(&root, &pool, &run_type, &exclude, false, None)
         .await
         .unwrap();
 
     let csv_path = tmp.path().join("out.csv");
-    csv_writer::write_csv_from_db(&pool, scan_id, &csv_path, &exclude, false)
-        .await
-        .unwrap();
+    csv_writer::write_csv_from_db(
+        &pool,
+        scan_id,
+        &csv_path,
+        &exclude,
+        &ops::FilterConfig::new(true),
+    )
+    .await
+    .unwrap();
 
     let content = fs::read_to_string(&csv_path).unwrap();
     // Should not contain @eaDir files
@@ -90,7 +103,7 @@ async fn scan_to_db_excludes_directories() {
     let pool = db::open_memory().await.unwrap();
     let run_type = root.to_string_lossy();
     let exclude = vec!["@eaDir".to_string()];
-    let (scan_id, stats) = scanner::scan_to_db(&root, &pool, &run_type, &exclude, false)
+    let (scan_id, stats) = scanner::scan_to_db(&root, &pool, &run_type, &exclude, false, None)
         .await
         .unwrap();
 
@@ -119,7 +132,7 @@ async fn scan_to_db_without_exclude_captures_all() {
 
     let pool = db::open_memory().await.unwrap();
     let run_type = root.to_string_lossy();
-    let (scan_id, stats) = scanner::scan_to_db(&root, &pool, &run_type, &[], false)
+    let (scan_id, stats) = scanner::scan_to_db(&root, &pool, &run_type, &[], false, None)
         .await
         .unwrap();
 

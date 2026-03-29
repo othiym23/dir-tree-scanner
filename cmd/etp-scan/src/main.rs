@@ -17,7 +17,7 @@ struct Cli {
     db: Option<PathBuf>,
 
     /// Directory names to exclude from scan
-    #[arg(short, long, default_values_t = [String::from("@eaDir")])]
+    #[arg(short, long)]
     exclude: Vec<String>,
 
     /// Print diagnostic info on stderr
@@ -43,9 +43,17 @@ async fn main() {
         None
     };
 
-    ops::validate_directory(&cli.directory);
+    let config = etp_lib::config::RuntimeConfig::load_or_default();
 
-    let db_path = cli.db.unwrap_or_else(|| cli.directory.join(".etp.db"));
+    let (directory, db_path) = match ops::resolve_nickname(&cli.directory, &config) {
+        Some((root, db)) => (root, db),
+        None => {
+            let db = cli.db.unwrap_or_else(|| cli.directory.join(".etp.db"));
+            (cli.directory.clone(), db)
+        }
+    };
+
+    ops::validate_directory(&directory);
 
     let pool = etp_lib::db::open_db(&db_path, cli.verbose)
         .await
@@ -54,10 +62,18 @@ async fn main() {
             std::process::exit(1);
         });
 
-    let canon = cli.directory.canonicalize().unwrap_or(cli.directory);
+    let canon = directory.canonicalize().unwrap_or(directory);
     let run_type = canon.to_string_lossy();
 
-    let scan_id = ops::run_scan_to_db(&canon, &pool, &run_type, &cli.exclude, cli.verbose).await;
+    let scan_id = ops::run_scan_to_db(
+        &canon,
+        &pool,
+        &run_type,
+        &cli.exclude,
+        cli.verbose,
+        config.cas_dir.as_deref(),
+    )
+    .await;
 
     if cli.verbose {
         eprintln!("scan complete, scan_id = {scan_id}");
