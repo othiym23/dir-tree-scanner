@@ -24,6 +24,9 @@ pub const EXIT_NO_SCAN: i32 = 2;
 
 /// Error indicating no scan exists for a directory. Binary crates check for
 /// this via `anyhow::Error::downcast_ref::<NoScanExists>()` to set exit code 2.
+///
+/// **Do not wrap this error with `.context()`** — that would make the downcast
+/// fail silently, causing the binary to exit with code 1 instead of code 2.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 pub struct NoScanExists(pub String);
@@ -120,10 +123,11 @@ pub fn is_system_path(
     if system_patterns.is_empty() {
         return false;
     }
-    if std::path::Path::new(dir_path)
-        .components()
-        .any(|c| system_patterns.iter().any(|p| c.as_os_str() == p.as_str()))
-    {
+    if std::path::Path::new(dir_path).components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .is_some_and(|s| system_patterns.contains(s))
+    }) {
         return true;
     }
     if let Some(name) = filename {
@@ -890,7 +894,8 @@ async fn process_audio_file(
         eprintln!("  reading: {}", full_path.display());
     }
 
-    let file_meta = metadata::read_metadata(&full_path).context("reading metadata")?;
+    let file_meta = metadata::read_metadata(&full_path)
+        .with_context(|| format!("reading metadata from {}", full_path.display()))?;
 
     let all_tags: Vec<(String, String)> = file_meta
         .properties
@@ -963,7 +968,8 @@ async fn process_audio_file(
 
 /// Read metadata from a single audio file (no database). Returns JSON.
 pub fn read_file_metadata(path: &Path) -> anyhow::Result<serde_json::Value> {
-    let meta = metadata::read_metadata(path).context("reading metadata")?;
+    let meta = metadata::read_metadata(path)
+        .with_context(|| format!("reading metadata from {}", path.display()))?;
     let mut json = serde_json::to_value(&meta).context("serializing metadata")?;
 
     // Add file path and replace image data with sizes

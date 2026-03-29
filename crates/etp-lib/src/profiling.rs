@@ -2,16 +2,15 @@ use std::path::{Path, PathBuf};
 
 /// Guard that flushes the trace file on drop and prints a summary to stderr.
 pub struct ProfilingGuard {
-    _guard: tracing_chrome::FlushGuard,
+    guard: Option<tracing_chrome::FlushGuard>,
     trace_path: PathBuf,
 }
 
 impl Drop for ProfilingGuard {
     fn drop(&mut self) {
-        // FlushGuard is dropped first (as part of self), then we print the summary.
-        // We need to print after the flush, so we defer the summary to a separate step.
-        // Unfortunately Drop can't control ordering of field drops, so we just print
-        // the path — the FlushGuard will flush when it's dropped.
+        // Explicitly drop the FlushGuard first to flush all buffered trace data,
+        // then read the final file size for the summary.
+        drop(self.guard.take());
         if let Ok(meta) = std::fs::metadata(&self.trace_path) {
             let size = crate::ops::format_size(meta.len());
             eprintln!("profiling: wrote {} ({})", self.trace_path.display(), size);
@@ -46,7 +45,7 @@ pub fn init_profiling(trace_path: &Path) -> ProfilingGuard {
     tracing_subscriber::registry().with(chrome_layer).init();
 
     ProfilingGuard {
-        _guard: guard,
+        guard: Some(guard),
         trace_path: trace_path.to_path_buf(),
     }
 }
