@@ -288,17 +288,23 @@ async fn main() {
                         println!(".{ext},{count}");
                     }
                 }
-                _ => {
+                "text" => {
                     println!("Files: {file_count}");
                     println!("Total size: {}", ops::format_size(total));
 
                     if !sorted.is_empty() {
-                        let max_ext = sorted.iter().map(|(e, _)| e.len()).max().unwrap_or(0);
+                        // +1 for the leading dot
+                        let max_width = sorted.iter().map(|(e, _)| e.len() + 1).max().unwrap_or(0);
                         println!("\nBy extension:");
                         for (ext, count) in &sorted {
-                            println!("  .{ext:>max_ext$}  {count}");
+                            let label = format!(".{ext}");
+                            println!("  {label:>max_width$}: {count}");
                         }
                     }
+                }
+                other => {
+                    eprintln!("error: unknown format \"{other}\"; expected text, csv, or json");
+                    std::process::exit(1);
                 }
             }
         }
