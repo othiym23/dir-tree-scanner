@@ -1,4 +1,4 @@
 bin.name = "etp-query"
-args = ["--db", "tests/cmd/stats-fixture.db", "stats", "--format", "json"]
+args = ["--db", "../../test-data/stats-fixture.db", "stats", "--format", "json"]
 status = "success"
 stderr = ""

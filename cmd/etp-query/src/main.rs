@@ -83,29 +83,7 @@ async fn main() {
 
     let config = etp_lib::config::RuntimeConfig::load_or_default();
 
-    // Resolve --db: accept a path, a nickname, or fall back to default-database.
-    let db_path = if let Some(ref db_arg) = cli.db {
-        ops::resolve_db_path(db_arg, &config)
-    } else if let Some(ref default_name) = config.default_database {
-        match config.resolve_database(default_name) {
-            Some(entry) => {
-                eprintln!(
-                    "using default database \"{default_name}\": db={}",
-                    entry.db.display()
-                );
-                entry.db.clone()
-            }
-            None => {
-                eprintln!(
-                    "error: --db is required (default-database \"{default_name}\" not found)"
-                );
-                std::process::exit(1);
-            }
-        }
-    } else {
-        eprintln!("error: --db is required");
-        std::process::exit(1);
-    };
+    let db_path = ops::resolve_db_or_default(cli.db.as_deref(), &config);
 
     let pool = db::open_db(&db_path, cli.verbose)
         .await

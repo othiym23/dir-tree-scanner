@@ -1,14 +1,16 @@
 use std::path::Path;
 
-/// Generate the stats fixture database if it doesn't exist.
-/// Called before trycmd tests so snapshot tests have data to query.
-fn ensure_fixture_db() {
-    let db_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/cmd/stats-fixture.db");
-    if db_path.exists() {
-        return;
-    }
+/// Generate the stats fixture database. Regenerated on every test run to
+/// stay in sync with the schema and DAO code.
+fn generate_fixture_db() {
+    let db_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/stats-fixture.db");
 
-    // Build a minimal tokio runtime to run async DB setup.
+    // Remove old DB + WAL/SHM files
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(db_path.with_extension("db-wal"));
+    let _ = std::fs::remove_file(db_path.with_extension("db-shm"));
+    let _ = std::fs::create_dir_all(db_path.parent().unwrap());
+
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -88,6 +90,6 @@ fn ensure_fixture_db() {
 
 #[test]
 fn cli_tests() {
-    ensure_fixture_db();
+    generate_fixture_db();
     trycmd::TestCases::new().case("tests/cmd/*.toml");
 }

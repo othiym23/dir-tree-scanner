@@ -48,6 +48,8 @@ system-files {
 // calculations. Uses glob patterns matched against file/directory
 // names. Dotfile hiding is separate (controlled by -a/--all).
 user-excludes {
+    // Note: dotfile hiding (.hidden, .DS_Store, etc.) is controlled by
+    // -a/--all, not by patterns here.
     // pattern "*.bak"
     // pattern "Thumbs.db"
 }

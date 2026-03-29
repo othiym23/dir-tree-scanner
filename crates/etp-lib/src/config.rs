@@ -206,31 +206,26 @@ fn resolve_raw_config(raw: RawRuntimeConfig) -> Result<RuntimeConfig, ConfigErro
     let databases: Vec<DatabaseEntry> = raw
         .databases
         .into_iter()
-        .filter_map(|d| {
-            match (&d.root, &d.db) {
-                (None, _) => {
-                    eprintln!(
-                        "warning: database \"{}\" missing 'root' field, skipping",
-                        d.name
-                    );
-                    return None;
-                }
-                (_, None) => {
-                    eprintln!(
-                        "warning: database \"{}\" missing 'db' field, skipping",
-                        d.name
-                    );
-                    return None;
-                }
-                _ => {}
-            }
-            let root = d.root?;
-            let db = d.db?;
-            Some(DatabaseEntry {
+        .filter_map(|d| match (d.root, d.db) {
+            (Some(root), Some(db)) => Some(DatabaseEntry {
                 name: d.name,
                 root: PathBuf::from(root),
                 db: PathBuf::from(db),
-            })
+            }),
+            (None, _) => {
+                eprintln!(
+                    "warning: database \"{}\" missing 'root' field, skipping",
+                    d.name
+                );
+                None
+            }
+            (_, None) => {
+                eprintln!(
+                    "warning: database \"{}\" missing 'db' field, skipping",
+                    d.name
+                );
+                None
+            }
         })
         .collect();
 

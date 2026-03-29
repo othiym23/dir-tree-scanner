@@ -268,6 +268,32 @@ pub fn resolve_db_path(db_arg: &Path, config: &crate::config::RuntimeConfig) -> 
     process::exit(1);
 }
 
+/// Resolve `--db` with fallback to `default-database` from config.
+/// Accepts a path, a nickname, or falls back to the configured default.
+/// Exits with an error if nothing resolves.
+pub fn resolve_db_or_default(
+    db_arg: Option<&Path>,
+    config: &crate::config::RuntimeConfig,
+) -> PathBuf {
+    if let Some(db) = db_arg {
+        return resolve_db_path(db, config);
+    }
+    if let Some(ref default_name) = config.default_database {
+        if let Some(entry) = config.resolve_database(default_name) {
+            eprintln!(
+                "using default database \"{default_name}\": db={}",
+                entry.db.display()
+            );
+            return entry.db.clone();
+        }
+        // Validated at config load time, but guard against it anyway
+        eprintln!("error: --db is required (default-database \"{default_name}\" not found)");
+        process::exit(1);
+    }
+    eprintln!("error: --db is required");
+    process::exit(1);
+}
+
 /// Result of opening a database and resolving a scan for a directory.
 pub struct ScanContext {
     pub pool: SqlitePool,
