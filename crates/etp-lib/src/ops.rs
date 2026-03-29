@@ -321,6 +321,16 @@ pub struct ScanContext {
     pub directory: PathBuf,
 }
 
+/// CLI-derived options for opening a database and resolving a scan.
+pub struct ScanOptions<'a> {
+    pub directory: &'a Path,
+    pub db: Option<PathBuf>,
+    pub scan: bool,
+    pub no_scan: bool,
+    pub exclude: &'a [String],
+    pub verbose: bool,
+}
+
 /// Open the database for a directory and resolve the scan_id.
 ///
 /// Handles the common setup sequence shared by etp-tree and etp-csv:
@@ -330,21 +340,14 @@ pub struct ScanContext {
 /// 4. Open the database
 /// 5. Canonicalize the directory and resolve the scan_id
 pub async fn open_and_resolve_scan(
-    directory: &Path,
-    db: Option<PathBuf>,
-    scan: bool,
-    no_scan: bool,
-    exclude: &[String],
-    verbose: bool,
+    opts: ScanOptions<'_>,
     config: &crate::config::RuntimeConfig,
 ) -> anyhow::Result<ScanContext> {
     let cas_dir = config.cas_dir.as_deref();
-    validate_directory(directory)?;
+    validate_directory(opts.directory)?;
 
-    // When a directory is given, the DB is co-located or explicit via --db.
-    // default-database doesn't apply here — it's for a different scan root.
-    let db_path = db.unwrap_or_else(|| directory.join(".etp.db"));
-    let do_scan = resolve_bool_pair(scan, no_scan, "scan", false);
+    let db_path = opts.db.unwrap_or_else(|| opts.directory.join(".etp.db"));
+    let do_scan = resolve_bool_pair(opts.scan, opts.no_scan, "scan", false);
 
     if !do_scan && !db_path.exists() {
         return Err(NoScanExists(
@@ -353,23 +356,34 @@ pub async fn open_and_resolve_scan(
         .into());
     }
 
-    let pool = crate::db::open_db(&db_path, verbose)
+    let pool = crate::db::open_db(&db_path, opts.verbose)
         .await
         .context("opening database")?;
 
-    let canon = directory.canonicalize().unwrap_or(directory.to_path_buf());
+    let canon = opts
+        .directory
+        .canonicalize()
+        .unwrap_or(opts.directory.to_path_buf());
     let run_type = canon.to_string_lossy();
 
     let scan_id = if do_scan {
-        run_scan_to_db(directory, &pool, &run_type, exclude, verbose, cas_dir).await?
+        run_scan_to_db(
+            opts.directory,
+            &pool,
+            &run_type,
+            opts.exclude,
+            opts.verbose,
+            cas_dir,
+        )
+        .await?
     } else {
-        resolve_latest_scan_id(&pool, &run_type, verbose).await?
+        resolve_latest_scan_id(&pool, &run_type, opts.verbose).await?
     };
 
     Ok(ScanContext {
         pool,
         scan_id,
-        directory: directory.to_path_buf(),
+        directory: opts.directory.to_path_buf(),
     })
 }
 

@@ -16,12 +16,14 @@ async fn scan_mode_creates_db_and_returns_scan_id() {
 
     let defaults = RuntimeConfig::defaults();
     let ctx = ops::open_and_resolve_scan(
-        &root,
-        Some(db_path),
-        true,  // --scan
-        false, // --no-scan
-        &[],
-        false,
+        ops::ScanOptions {
+            directory: &root,
+            db: Some(db_path),
+            scan: true,     // --scan,
+            no_scan: false, // --no-scan,
+            exclude: &[],
+            verbose: false,
+        },
         &defaults,
     )
     .await
@@ -49,12 +51,14 @@ async fn no_scan_mode_reads_existing_db() {
 
     // First: scan to create the DB
     let ctx1 = ops::open_and_resolve_scan(
-        &root,
-        Some(db_path.clone()),
-        true,
-        false,
-        &[],
-        false,
+        ops::ScanOptions {
+            directory: &root,
+            db: Some(db_path.clone()),
+            scan: true,
+            no_scan: false,
+            exclude: &[],
+            verbose: false,
+        },
         &RuntimeConfig::defaults(),
     )
     .await
@@ -64,12 +68,14 @@ async fn no_scan_mode_reads_existing_db() {
 
     // Second: read without scanning
     let ctx2 = ops::open_and_resolve_scan(
-        &root,
-        Some(db_path),
-        false,
-        false,
-        &[],
-        false,
+        ops::ScanOptions {
+            directory: &root,
+            db: Some(db_path),
+            scan: false,
+            no_scan: false,
+            exclude: &[],
+            verbose: false,
+        },
         &RuntimeConfig::defaults(),
     )
     .await
@@ -94,12 +100,14 @@ async fn custom_db_path() {
 
     let defaults = RuntimeConfig::defaults();
     let ctx = ops::open_and_resolve_scan(
-        &root,
-        Some(custom_db.clone()),
-        true,
-        false,
-        &[],
-        false,
+        ops::ScanOptions {
+            directory: &root,
+            db: Some(custom_db.clone()),
+            scan: true,
+            no_scan: false,
+            exclude: &[],
+            verbose: false,
+        },
         &defaults,
     )
     .await
@@ -127,12 +135,14 @@ async fn scan_respects_exclude() {
     let db_path = tmp.path().join("test.db");
     let exclude = vec!["skip".to_string()];
     let ctx = ops::open_and_resolve_scan(
-        &root,
-        Some(db_path),
-        true,
-        false,
-        &exclude,
-        false,
+        ops::ScanOptions {
+            directory: &root,
+            db: Some(db_path),
+            scan: true,
+            no_scan: false,
+            exclude: &exclude,
+            verbose: false,
+        },
         &RuntimeConfig::defaults(),
     )
     .await
@@ -154,12 +164,14 @@ async fn directory_is_preserved() {
 
     let db_path = tmp.path().join("test.db");
     let ctx = ops::open_and_resolve_scan(
-        &root,
-        Some(db_path),
-        true,
-        false,
-        &[],
-        false,
+        ops::ScanOptions {
+            directory: &root,
+            db: Some(db_path),
+            scan: true,
+            no_scan: false,
+            exclude: &[],
+            verbose: false,
+        },
         &RuntimeConfig::defaults(),
     )
     .await

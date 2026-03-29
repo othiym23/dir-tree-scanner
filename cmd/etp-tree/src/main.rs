@@ -89,12 +89,14 @@ async fn run(cli: Cli) -> Result<()> {
     }
 
     let ctx = ops::open_and_resolve_scan(
-        &directory,
-        db,
-        cli.scan,
-        cli.no_scan,
-        &cli.exclude,
-        cli.verbose,
+        ops::ScanOptions {
+            directory: &directory,
+            db,
+            scan: cli.scan,
+            no_scan: cli.no_scan,
+            exclude: &cli.exclude,
+            verbose: cli.verbose,
+        },
         &config,
     )
     .await?;
