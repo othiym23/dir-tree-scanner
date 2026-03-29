@@ -312,6 +312,7 @@ pub struct ScanContext {
 ///
 /// Exits with `EXIT_NO_SCAN` (code 2) if no scan exists and `--scan` was not
 /// passed. Exits with code 1 on database or I/O errors.
+#[allow(clippy::too_many_arguments)]
 pub async fn open_and_resolve_scan(
     directory: &Path,
     db: Option<PathBuf>,
@@ -319,11 +320,33 @@ pub async fn open_and_resolve_scan(
     no_scan: bool,
     exclude: &[String],
     verbose: bool,
-    cas_dir: Option<&Path>,
+    config: &crate::config::RuntimeConfig,
 ) -> ScanContext {
+    let cas_dir = config.cas_dir.as_deref();
     validate_directory(directory);
 
-    let db_path = db.unwrap_or_else(|| directory.join(".etp.db"));
+    let db_path = if let Some(db) = db {
+        db
+    } else {
+        let default = directory.join(".etp.db");
+        if default.exists() {
+            default
+        } else if let Some(ref default_name) = config.default_database {
+            // Fall back to default-database from config.kdl
+            match config.resolve_database(default_name) {
+                Some(entry) => {
+                    eprintln!(
+                        "using default database \"{default_name}\": db={}",
+                        entry.db.display()
+                    );
+                    entry.db.clone()
+                }
+                None => default, // validated at config load, but guard
+            }
+        } else {
+            default
+        }
+    };
     let do_scan = resolve_bool_pair(scan, no_scan, "scan", false);
 
     if !do_scan && !db_path.exists() {

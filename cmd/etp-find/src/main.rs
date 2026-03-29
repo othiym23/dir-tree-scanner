@@ -106,10 +106,7 @@ async fn main() {
             dir.join(".etp.db")
         }
         (None, Some(db)) => db.clone(),
-        (None, None) => {
-            eprintln!("error: --db is required when no directory is given");
-            std::process::exit(1);
-        }
+        (None, None) => ops::resolve_db_or_default(None, &config),
     };
 
     // Check before open_db, which creates the file if missing.
