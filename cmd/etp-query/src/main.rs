@@ -51,7 +51,11 @@ enum Commands {
         value: String,
     },
     /// Show collection statistics
-    Stats,
+    Stats {
+        /// Output format: text (default), csv, or json
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
     /// Show total size of a directory subtree
     Size {
         /// Directory path (relative to scan root)
@@ -130,7 +134,7 @@ async fn main() {
     // except stats which excludes them (they skew statistics). show_hidden is
     // always true — etp-query doesn't hide dotfiles.
     // See docs/adrs/2026-03-28-03-query-system-file-defaults.md.
-    let include_default = !matches!(cli.command, Commands::Stats);
+    let include_default = !matches!(cli.command, Commands::Stats { .. });
     let filter = ops::FilterConfig::from_config(
         &config,
         cli.include_system_files,
@@ -217,7 +221,7 @@ async fn main() {
                 eprintln!("{count} match(es)");
             }
         }
-        Commands::Stats => {
+        Commands::Stats { format } => {
             // Stats uses the filter to exclude system files by default,
             // since their counts and sizes would badly skew the statistics.
             // Streams rows to avoid loading all FileRecords into memory.
@@ -259,15 +263,42 @@ async fn main() {
                 }
             }
 
-            println!("Files: {file_count}");
-            println!("Total size: {}", ops::format_size(total));
+            let mut sorted: Vec<_> = ext_counts.into_iter().collect();
+            sorted.sort_by(|a, b| b.1.cmp(&a.1));
 
-            if !ext_counts.is_empty() {
-                let mut sorted: Vec<_> = ext_counts.into_iter().collect();
-                sorted.sort_by(|a, b| b.1.cmp(&a.1));
-                println!("\nBy extension:");
-                for (ext, count) in &sorted {
-                    println!("  .{ext}: {count}");
+            match format.as_str() {
+                "json" => {
+                    let extensions: serde_json::Map<String, serde_json::Value> = sorted
+                        .iter()
+                        .map(|(ext, count)| {
+                            (ext.clone(), serde_json::Value::Number((*count).into()))
+                        })
+                        .collect();
+                    let obj = serde_json::json!({
+                        "files": file_count,
+                        "total_size": total,
+                        "total_size_human": ops::format_size(total),
+                        "extensions": extensions,
+                    });
+                    println!("{}", serde_json::to_string_pretty(&obj).unwrap());
+                }
+                "csv" => {
+                    println!("extension,count");
+                    for (ext, count) in &sorted {
+                        println!(".{ext},{count}");
+                    }
+                }
+                _ => {
+                    println!("Files: {file_count}");
+                    println!("Total size: {}", ops::format_size(total));
+
+                    if !sorted.is_empty() {
+                        let max_ext = sorted.iter().map(|(e, _)| e.len()).max().unwrap_or(0);
+                        println!("\nBy extension:");
+                        for (ext, count) in &sorted {
+                            println!("  .{ext:>max_ext$}  {count}");
+                        }
+                    }
                 }
             }
         }
