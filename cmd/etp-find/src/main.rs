@@ -86,7 +86,7 @@ async fn main() {
 
     let pattern = ops::compile_pattern(&cli.pattern, cli.insensitive);
 
-    // Resolve nickname if directory is given but doesn't exist as a path.
+    // Resolve nicknames on -R/--root and/or --db.
     let (directory, explicit_db) = if let Some(ref dir) = cli.directory {
         match ops::resolve_nickname(dir, &config) {
             Some((root, db_path)) => (Some(root), Some(db_path)),
@@ -96,8 +96,19 @@ async fn main() {
         (None, cli.db.clone())
     };
 
+    // --db also accepts a nickname (for searching all scans without -R).
+    let resolved_db = explicit_db.map(|db| {
+        if db.exists() {
+            db
+        } else if let Some((_, resolved)) = ops::resolve_nickname(&db, &config) {
+            resolved
+        } else {
+            db
+        }
+    });
+
     // When no directory is given, --db is required and we search all scans.
-    let db_path = match (&directory, &explicit_db) {
+    let db_path = match (&directory, &resolved_db) {
         (Some(dir), Some(db)) => {
             ops::validate_directory(dir);
             db.clone()
