@@ -92,7 +92,6 @@ async fn main() {
             std::process::exit(1);
         });
 
-    // Find the latest scan (or the only one)
     let scan_id = match db::dao::latest_any_scan_id(&pool).await {
         Ok(Some(id)) => id,
         Ok(None) => {

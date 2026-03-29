@@ -89,6 +89,7 @@ async fn main() {
             exclude,
             force,
         } => {
+            let cas_dir = config.cas_dir.as_deref();
             let db_path = match (&directory, &db) {
                 (Some(dir), Some(db)) => {
                     ops::validate_directory(dir);
@@ -120,15 +121,7 @@ async fn main() {
                 let run_type = canon.to_string_lossy();
 
                 if is_new || force {
-                    ops::run_scan_to_db(
-                        dir,
-                        &pool,
-                        &run_type,
-                        &exclude,
-                        cli.verbose,
-                        config.cas_dir.as_deref(),
-                    )
-                    .await
+                    ops::run_scan_to_db(dir, &pool, &run_type, &exclude, cli.verbose, cas_dir).await
                 } else {
                     match etp_lib::db::dao::latest_scan_id(&pool, &run_type).await {
                         Ok(Some(id)) => id,
@@ -139,7 +132,7 @@ async fn main() {
                                 &run_type,
                                 &exclude,
                                 cli.verbose,
-                                config.cas_dir.as_deref(),
+                                cas_dir,
                             )
                             .await
                         }
@@ -159,14 +152,7 @@ async fn main() {
                 }
             };
 
-            let stats = ops::run_metadata_scan(
-                &pool,
-                scan_id,
-                force,
-                cli.verbose,
-                config.cas_dir.as_deref(),
-            )
-            .await;
+            let stats = ops::run_metadata_scan(&pool, scan_id, force, cli.verbose, cas_dir).await;
 
             eprintln!(
                 "metadata scan complete: {} scanned, {} errors in {}ms",
