@@ -12,31 +12,29 @@ implemented.
 - [x] etp-scan: extract the scanning portion into its own plumbing command
 - [ ] scan/display separation and two-tier filtering
       (docs/plans/2026-03-28-scan-display-separation.md)
-  - [ ] Phase 1: scan everything, default to `--no-scan`
-    - [ ] remove `@eaDir` default exclude from etp-scan, etp-tree, etp-csv,
-          etp-find
-    - [ ] add `--[no-]scan` boolean pair to etp-tree and etp-csv (default: no
+  - [x] Phase 1: scan everything, default to `--no-scan`
+    - [x] remove `@eaDir` default exclude from etp-scan, etp-tree, etp-csv,
+          etp-find (also etp-meta)
+    - [x] add `--[no-]scan` boolean pair to etp-tree and etp-csv (default: no
           scan)
-    - [ ] exit code 2 when no scan exists (for porcelain auto-scan)
-  - [ ] Phase 2: two-tier display filtering
-    - [ ] system file patterns (hidden from display, counted in du)
-    - [ ] user exclude patterns (hidden from display AND du)
-    - [ ] `--[no-]include-system-files` flag on etp-tree, etp-csv, etp-find,
+    - [x] exit code 2 when no scan exists (for porcelain auto-scan)
+  - [x] Phase 2: two-tier display filtering
+    - [x] system file patterns (hidden from display, counted in du)
+    - [x] user exclude patterns (hidden from display AND du)
+    - [x] `--[no-]include-system-files` flag on etp-tree, etp-csv, etp-find,
           etp-query
-    - [ ] configurable default patterns for both lists
+    - [x] configurable default patterns for both lists
     - [ ] `is_system_path` checks all absolute path components — strip scan root
           before matching to prevent false positives on generic patterns
     - [ ] unify or document `should_show_name` vs `should_show` contract — the
           tree rendering ordering dependency (filter dirs before descending) is
           implicit
-  - [ ] Phase 3: runtime config + etp-init
-    - [ ] `config.kdl` with system patterns, user excludes, database nicknames,
-          and CAS directory path (currently hardcoded to platform data dir;
-          making it configurable allows sharing a single CAS between NAS and
-          workstation)
-    - [ ] `etp-init` plumbing command to generate commented config template
-    - [ ] database nickname resolution in all Rust commands
-    - [ ] wire up `default-database` from config.kdl — used as fallback when no
+  - [x] Phase 3: runtime config + etp-init
+    - [x] `config.kdl` with system patterns, user excludes, database nicknames,
+          and CAS directory path
+    - [x] `etp-init` plumbing command to generate commented config template
+    - [x] database nickname resolution in all Rust commands
+    - [x] wire up `default-database` from config.kdl — used as fallback when no
           `--db` is specified and no `.etp.db` exists in the target directory
   - [ ] Phase 4: smart porcelain dispatch
     - [ ] replace os.execv with subprocess.run for orchestrated commands

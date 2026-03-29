@@ -33,7 +33,10 @@ Library crate (`crates/etp-lib/src/lib.rs`) re-exports shared modules:
 - `db/dao.rs` — all database queries (scan CRUD, file UPSERT, metadata, blobs,
   images, cue sheets, move tracking). `FULL_PATH_SQL` constant for path
   reconstruction used across query functions.
-- `config.rs` — KDL configuration parsing
+- `config.rs` — KDL configuration parsing: catalog config (`Config`) for
+  catalog.kdl and runtime config (`RuntimeConfig`) for config.kdl. Runtime
+  config provides system file patterns, user excludes, CAS directory override,
+  database nicknames, and default database setting.
 - `paths.rs` — XDG/native path resolution (etcetera crate)
 - `profiling.rs` — self-instrumentation (feature-gated behind `profiling`)
 
@@ -112,6 +115,29 @@ System files are exempt from both dotfile hiding and user exclude matching.
 excludes, `include_system_files`, and `show_hidden`. It provides `should_show()`
 (for full path + filename checks) and `should_show_name()` (for individual name
 checks in tree rendering).
+
+## Runtime Configuration (config.kdl)
+
+`config.kdl` lives in the platform config directory (`etp-init` generates it).
+It provides:
+
+- **System file patterns** — override `DEFAULT_SYSTEM_PATTERNS`
+- **User exclude patterns** — override `DEFAULT_USER_EXCLUDES`
+- **CAS directory** — override the platform default for blob storage
+- **Database nicknames** — map short names to `(root, db)` path pairs
+- **Default database** — nickname used when no `--db` and no `.etp.db` exists
+
+All commands load config via `RuntimeConfig::load_or_default()`. If the file
+doesn't exist, hardcoded defaults are used. Invalid config (e.g.,
+`default-database` naming a nonexistent nickname) errors at load time.
+
+Database nicknames resolve in this order: if the argument exists as a directory
+or file, use it as a path; otherwise look it up in config. `resolve_nickname`
+prints the resolution to stderr so users can see what's happening.
+
+The `default-database` fallback is used by etp-tree, etp-csv, etp-find, and
+etp-query. etp-scan is excluded to prevent accidental writes to the wrong
+database. See `docs/adrs/2026-03-28-04-default-database-fallback.md`.
 
 ## CLI Boolean Flag Pairs
 
