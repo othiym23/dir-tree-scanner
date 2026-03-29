@@ -264,7 +264,7 @@ async fn main() {
             }
 
             let mut sorted: Vec<_> = ext_counts.into_iter().collect();
-            sorted.sort_by(|a, b| b.1.cmp(&a.1));
+            sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
             match format.as_str() {
                 "json" => {

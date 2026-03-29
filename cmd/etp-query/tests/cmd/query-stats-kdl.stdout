@@ -1,0 +1,11 @@
+stats {
+    files 6
+    total-size 64501000
+    total-size-human "61.51 MiB"
+    extensions {
+        ext ".flac" 2
+        ext ".mp3" 2
+        ext ".jpg" 1
+        ext ".txt" 1
+    }
+}
