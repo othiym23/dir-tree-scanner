@@ -1,9 +1,9 @@
 use crate::db::dao;
 use crate::finder::FindMatch;
+use crate::ops;
 use crate::ops::FilterConfig;
 use glob::Pattern;
 use icu_collator::CollatorBorrowed;
-use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
 use sqlx::SqlitePool;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, Write};
@@ -34,14 +34,6 @@ struct TreeContext<'a> {
     filter: &'a FilterConfig,
     collator: CollatorBorrowed<'static>,
     no_escape: bool,
-}
-
-fn make_collator() -> io::Result<CollatorBorrowed<'static>> {
-    let mut options = CollatorOptions::default();
-    options.strength = Some(Strength::Quaternary);
-    options.alternate_handling = Some(AlternateHandling::Shifted);
-    CollatorBorrowed::try_new(Default::default(), options)
-        .map_err(|e| io::Error::other(format!("collator initialization failed: {e}")))
 }
 
 #[cfg_attr(
@@ -91,7 +83,7 @@ pub async fn render_tree_from_db(
         children,
         patterns,
         filter,
-        collator: make_collator()?,
+        collator: ops::make_collator()?,
         no_escape,
     };
 
@@ -161,7 +153,7 @@ pub fn render_tree_from_paths(
         children,
         patterns: &no_patterns,
         filter: &show_all,
-        collator: make_collator()?,
+        collator: ops::make_collator()?,
         no_escape: true,
     };
 

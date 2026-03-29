@@ -1,7 +1,5 @@
 use crate::db::dao::{self, FileRecord};
 use crate::ops;
-use icu_collator::CollatorBorrowed;
-use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::io;
@@ -38,11 +36,7 @@ pub async fn write_csv_from_db(
         by_dir.entry(f.dir_path.clone()).or_default().push(f);
     }
 
-    let mut options = CollatorOptions::default();
-    options.strength = Some(Strength::Quaternary);
-    options.alternate_handling = Some(AlternateHandling::Shifted);
-    let collator = CollatorBorrowed::try_new(Default::default(), options)
-        .map_err(|e| io::Error::other(format!("collator initialization failed: {e}")))?;
+    let collator = ops::make_collator()?;
 
     let mut dirs: Vec<String> = by_dir.keys().cloned().collect();
     dirs.sort_by(|a, b| collator.compare(a, b));

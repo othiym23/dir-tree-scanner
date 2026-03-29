@@ -7,6 +7,17 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Instant;
 
+/// Create an ICU collator for locale-aware Unicode sorting (Quaternary
+/// strength with shifted alternate handling for consistent punctuation ordering).
+pub fn make_collator() -> std::io::Result<icu_collator::CollatorBorrowed<'static>> {
+    use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
+    let mut options = CollatorOptions::default();
+    options.strength = Some(Strength::Quaternary);
+    options.alternate_handling = Some(AlternateHandling::Shifted);
+    icu_collator::CollatorBorrowed::try_new(Default::default(), options)
+        .map_err(|e| std::io::Error::other(format!("collator initialization failed: {e}")))
+}
+
 /// Exit code for "no scan exists" — recoverable by running etp-scan first.
 pub const EXIT_NO_SCAN: i32 = 2;
 
@@ -963,7 +974,6 @@ async fn process_audio_file(
 
     let file_meta = metadata::read_metadata(&full_path).map_err(|e| format!("{e}"))?;
 
-    // Store tags + audio properties as metadata
     let all_tags: Vec<(String, String)> = file_meta
         .properties
         .iter()
@@ -975,7 +985,6 @@ async fn process_audio_file(
         .await
         .map_err(|e| format!("metadata: {e}"))?;
 
-    // Store embedded images in CAS + DB
     if !file_meta.images.is_empty() {
         let mut image_inputs = Vec::new();
         for img in &file_meta.images {
@@ -1006,12 +1015,10 @@ async fn process_audio_file(
         }
     }
 
-    // Store embedded cue sheet if present
     if let Some(cue) = &file_meta.cue_sheet {
         let _ = dao::upsert_cue_sheet(pool, record.file_id, "embedded", cue).await;
     }
 
-    // Check for standalone .cue file alongside the audio file
     let cue_path = full_path.with_extension("cue");
     if cue_path.is_file() {
         match std::fs::read_to_string(&cue_path) {

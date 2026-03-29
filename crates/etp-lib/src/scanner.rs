@@ -98,12 +98,6 @@ pub async fn scan_to_db(
         #[cfg(feature = "profiling")]
         let _dir_span = tracing::info_span!("scan_directory", path = %relative).entered();
 
-        if verbose {
-            let file_count = fs::read_dir(dir_path)?.count();
-            let display_path = if relative.is_empty() { "." } else { &relative };
-            eprintln!("scanning: {display_path} ({file_count} files)");
-        }
-
         let mut files = Vec::new();
         let mut dir_size: u64 = 0;
 
@@ -122,6 +116,11 @@ pub async fn scan_to_db(
                     mtime: child_meta.mtime(),
                 });
             }
+        }
+
+        if verbose {
+            let display_path = if relative.is_empty() { "." } else { &relative };
+            eprintln!("scanning: {display_path} ({} files)", files.len());
         }
 
         #[cfg(feature = "profiling")]
