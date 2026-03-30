@@ -491,59 +491,11 @@ _HDR_KEYWORDS = frozenset(
 def _classify_text_content(text: str) -> TokenKind | None:
     """Try to classify a bare text string as a known metadata type.
 
-    Returns the TokenKind if recognized, None otherwise.
+    Delegates to the scanner's parsy-based recognizers.
     """
-    lower = text.lower().strip()
+    from etp_lib.media_scanner import classify_text
 
-    # Resolution
-    if lower in _RESOLUTIONS or _RE_RESOLUTION_DIMS.match(text):
-        return TokenKind.RESOLUTION
-
-    # Video codec
-    if lower in _VIDEO_CODECS:
-        return TokenKind.VIDEO_CODEC
-
-    # Audio codec (simple)
-    if lower in _AUDIO_CODECS:
-        return TokenKind.AUDIO_CODEC
-
-    # Audio codec (compound like AAC2.0)
-    if _RE_AUDIO_COMPOUND.match(text):
-        return TokenKind.AUDIO_CODEC
-
-    # Source
-    if lower in _SOURCES:
-        return TokenKind.SOURCE
-
-    # Language
-    if lower in _LANGUAGES:
-        return TokenKind.LANGUAGE
-
-    # Subtitle
-    if lower in _SUBTITLE_KEYWORDS:
-        return TokenKind.SUBTITLE_INFO
-
-    # Remux
-    if _RE_REMUX.match(text):
-        return TokenKind.REMUX
-
-    # Repack (treat as metadata, not title)
-    if _RE_REPACK.match(text):
-        return TokenKind.UNKNOWN
-
-    # HDR
-    if lower in _HDR_KEYWORDS:
-        return TokenKind.UNKNOWN  # Could add HDR token kind later
-
-    # Version alone (v2, v3)
-    if _RE_VERSION.match(text):
-        return TokenKind.VERSION
-
-    # Site prefix
-    if _RE_SITE_PREFIX.match(text):
-        return TokenKind.SITE_PREFIX
-
-    return None
+    return classify_text(text)
 
 
 def _classify_episode_text(text: str) -> Token | None:
@@ -768,63 +720,25 @@ def _split_text_with_embedded(token: Token) -> list[Token]:
 def _expand_metadata_words(text: str) -> list[Token]:
     """Split text on whitespace/commas and classify each word.
 
-    Dash-separated compounds like ``Bluray-1080p`` are sub-split so each
-    part can be classified individually.
+    Delegates to the scanner's parsy-based recognizers.
     """
-    tokens: list[Token] = []
-    for w in re.split(r"[\s,]+", text):
-        w = w.strip()
-        if not w:
-            continue
-        kind = _classify_text_content(w)
-        if kind:
-            tokens.append(Token(kind=kind, text=w))
-        else:
-            sub_parts = w.split("-")
-            if len(sub_parts) > 1:
-                sub_tokens: list[Token] = []
-                for sp in sub_parts:
-                    sp = sp.strip()
-                    if not sp:
-                        continue
-                    sk = _classify_text_content(sp)
-                    if sk:
-                        sub_tokens.append(Token(kind=sk, text=sp))
-                    else:
-                        sub_tokens.append(Token(kind=TokenKind.UNKNOWN, text=sp))
-                # Scene convention: last unclassified part after metadata
-                # is the release group (e.g., "REMUX-FraMeSToR")
-                has_meta = any(t.kind != TokenKind.UNKNOWN for t in sub_tokens)
-                if has_meta and sub_tokens and sub_tokens[-1].kind == TokenKind.UNKNOWN:
-                    sub_tokens[-1] = Token(
-                        kind=TokenKind.RELEASE_GROUP,
-                        text=sub_tokens[-1].text,
-                    )
-                tokens.extend(sub_tokens)
-            else:
-                tokens.append(Token(kind=TokenKind.UNKNOWN, text=w))
-    return tokens
+    from etp_lib.media_scanner import expand_metadata_words
+
+    return expand_metadata_words(text)
 
 
 def _is_metadata_word(word: str) -> bool:
     """Check if a word (or any of its dash-separated parts) is metadata."""
-    if _classify_text_content(word) is not None:
-        return True
-    if "-" in word:
-        return any(
-            _classify_text_content(sp) is not None for sp in word.split("-") if sp
-        )
-    return False
+    from etp_lib.media_scanner import is_metadata_word
+
+    return is_metadata_word(word)
 
 
 def _count_metadata_words(text: str) -> int:
     """Count how many whitespace/comma-separated words classify as metadata."""
-    count = 0
-    for w in re.split(r"[\s,]+", text):
-        w = w.strip()
-        if w and _classify_text_content(w) is not None:
-            count += 1
-    return count
+    from etp_lib.media_scanner import count_metadata_words
+
+    return count_metadata_words(text)
 
 
 def _classify_paren(token: Token) -> Token | list[Token]:

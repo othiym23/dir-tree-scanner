@@ -22,9 +22,11 @@ from etp_lib.media_parser import (
     Token,
     TokenKind,
     _AUDIO_CODECS,
+    _HDR_KEYWORDS,
     _LANGUAGES,
     _SOURCE_TYPE_MAP,
     _SOURCES,
+    _SUBTITLE_KEYWORDS,
     _VIDEO_CODECS,
 )
 
@@ -129,6 +131,26 @@ class Language:
 class BonusKeyword:
     bonus_type: str
     raw: str
+
+
+@dataclass(frozen=True, slots=True)
+class SubtitleInfo:
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
+class HDRInfo:
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
+class Repack:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class SitePrefix:
+    value: str
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +321,20 @@ crc32: Parser = regex(r"[0-9A-Fa-f]{8}(?![0-9A-Fa-f])").map(lambda s: CRC32(s.up
 # Language
 language: Parser = _match_set_ci(_LANGUAGES, Language)
 
+# Subtitle info
+subtitle_info: Parser = _match_set_ci(_SUBTITLE_KEYWORDS, SubtitleInfo)
+
+# HDR
+hdr_info: Parser = _match_set_ci(_HDR_KEYWORDS, HDRInfo)
+
+# Repack
+repack: Parser = regex(r"REPACK\d?", re.IGNORECASE).map(lambda _: Repack())
+
+# Site prefix (www.example.com)
+site_prefix: Parser = regex(r"www\.\w+\.\w+", re.IGNORECASE).map(
+    lambda s: SitePrefix(s)
+)
+
 # Bonus keywords (English)
 _RE_BONUS_EN_P = re.compile(
     r"NC\s*(?:OP|ED)\d*|NCOP\d*|NCED\d*|Creditless\s+(?:OP|ED)\d*",
@@ -343,6 +379,10 @@ _TYPE_TO_KIND: dict[type, TokenKind] = {
     CRC32: TokenKind.CRC32,
     Language: TokenKind.LANGUAGE,
     BonusKeyword: TokenKind.BONUS,
+    SubtitleInfo: TokenKind.SUBTITLE_INFO,
+    HDRInfo: TokenKind.UNKNOWN,  # HDR stored as UNKNOWN (no dedicated kind yet)
+    Repack: TokenKind.UNKNOWN,
+    SitePrefix: TokenKind.SITE_PREFIX,
 }
 
 
@@ -411,6 +451,10 @@ _RECOGNIZERS: list[Parser] = [
     version,  # v2, v3
     # Context
     language,  # jpn, eng, dual
+    subtitle_info,  # multisub, msubs
+    hdr_info,  # HDR, HDR10, DoVi
+    repack,  # REPACK, REPACK2
+    site_prefix,  # www.example.com
 ]
 
 
@@ -639,3 +683,84 @@ def _try_recognize(text: str) -> Token | None:
         if result.status and result.index == len(text):
             return _result_to_token(result.value, text)
     return None
+
+
+# ---------------------------------------------------------------------------
+# Public API — replacements for media_parser classification functions
+# ---------------------------------------------------------------------------
+
+
+def classify_text(text: str) -> TokenKind | None:
+    """Classify a bare text string as a known metadata type.
+
+    Drop-in replacement for media_parser._classify_text_content, using
+    parsy recognizers instead of manual regex/set checks.
+    """
+    token = _try_recognize(text.strip())
+    return token.kind if token is not None else None
+
+
+def is_metadata_word(word: str) -> bool:
+    """Check if a word (or any of its dash-separated parts) is metadata.
+
+    Drop-in replacement for media_parser._is_metadata_word.
+    """
+    if classify_text(word) is not None:
+        return True
+    if "-" in word:
+        return any(classify_text(sp) is not None for sp in word.split("-") if sp)
+    return False
+
+
+def count_metadata_words(text: str) -> int:
+    """Count how many whitespace/comma-separated words classify as metadata.
+
+    Drop-in replacement for media_parser._count_metadata_words.
+    """
+    count = 0
+    for w in re.split(r"[\s,]+", text):
+        w = w.strip()
+        if w and is_metadata_word(w):
+            count += 1
+    return count
+
+
+def expand_metadata_words(text: str) -> list[Token]:
+    """Split text on whitespace/commas and classify each word.
+
+    Drop-in replacement for media_parser._expand_metadata_words.
+    Dash-separated compounds are sub-split so each part can be classified.
+    """
+    tokens: list[Token] = []
+    for w in re.split(r"[\s,]+", text):
+        w = w.strip()
+        if not w:
+            continue
+        token = _try_recognize(w)
+        if token is not None:
+            tokens.append(token)
+        else:
+            sub_parts = w.split("-")
+            if len(sub_parts) > 1:
+                sub_tokens: list[Token] = []
+                for sp in sub_parts:
+                    sp = sp.strip()
+                    if not sp:
+                        continue
+                    st = _try_recognize(sp)
+                    if st is not None:
+                        sub_tokens.append(st)
+                    else:
+                        sub_tokens.append(Token(kind=TokenKind.UNKNOWN, text=sp))
+                # Scene convention: last unclassified part after metadata
+                # is the release group (e.g., "REMUX-FraMeSToR")
+                has_meta = any(t.kind != TokenKind.UNKNOWN for t in sub_tokens)
+                if has_meta and sub_tokens and sub_tokens[-1].kind == TokenKind.UNKNOWN:
+                    sub_tokens[-1] = Token(
+                        kind=TokenKind.RELEASE_GROUP,
+                        text=sub_tokens[-1].text,
+                    )
+                tokens.extend(sub_tokens)
+            else:
+                tokens.append(Token(kind=TokenKind.UNKNOWN, text=w))
+    return tokens

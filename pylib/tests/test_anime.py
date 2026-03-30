@@ -971,7 +971,7 @@ class TestMatchToDownloads:
 
         assert len(enriched) == 1
         assert enriched[0].matched_download is None
-        assert enriched[0].release_group == "VARYG WEBDL-1080p"  # unchanged
+        assert enriched[0].release_group == "VARYG"  # metadata parsed out of bracket
 
     def test_picks_closest_size(self, tmp_path):
         src = tmp_path / "source" / "Show - s01e01 - Title.mkv"
