@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from parsy import Parser, Result, regex
 
-from etp_lib.media_parser import (
+from etp_lib.media_vocab import (
     Token,
     TokenKind,
     _AUDIO_CODECS,

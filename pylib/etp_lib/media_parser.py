@@ -15,70 +15,31 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from enum import Enum, auto
 
-
-class TokenKind(Enum):
-    """Token types produced by the tokenizer and classifier."""
-
-    # Structural (phase 1)
-    BRACKET = auto()  # [content]
-    PAREN = auto()  # (content) -- depth-tracked for nesting
-    LENTICULAR = auto()  # 「content」
-    TEXT = auto()  # bare text between delimiters
-    DOT_TEXT = auto()  # individual segment from dot-separated scene name
-    SEPARATOR = auto()  # " - "
-    EXTENSION = auto()  # .mkv, .mp4, etc.
-    PATH_SEP = auto()  # / boundary between path components
-
-    # Semantic (phase 2)
-    RELEASE_GROUP = auto()
-    CRC32 = auto()
-    EPISODE = auto()
-    SEASON = auto()
-    VERSION = auto()
-    RESOLUTION = auto()
-    VIDEO_CODEC = auto()
-    AUDIO_CODEC = auto()
-    SOURCE = auto()
-    REMUX = auto()
-    YEAR = auto()
-    TITLE = auto()
-    EPISODE_TITLE = auto()
-    BATCH_RANGE = auto()
-    SUBTITLE_INFO = auto()
-    LANGUAGE = auto()
-    SITE_PREFIX = auto()
-    BONUS = auto()  # 映像特典, ノンテロップOP, etc.
-    UNKNOWN = auto()
-
-
-@dataclass
-class Token:
-    """A single token from the tokenizer/classifier pipeline."""
-
-    kind: TokenKind
-    text: str
-    # Extracted numeric values (populated by classifier for EPISODE/SEASON/YEAR)
-    season: int | None = None
-    episode: int | None = None
-    version: int | None = None
-    year: int | None = None
-    batch_start: int | None = None
-    batch_end: int | None = None
-
-
-# ---------------------------------------------------------------------------
-# Media file extensions
-# ---------------------------------------------------------------------------
-
-_MEDIA_EXTENSIONS = frozenset({".mkv", ".mp4", ".avi"})
-_ALL_EXTENSIONS = frozenset(
-    {".mkv", ".mp4", ".avi", ".rar", ".iso", ".zip", ".7z", ".webdl"}
+# Import and re-export vocabulary — external consumers import from media_parser
+from etp_lib.media_vocab import (  # noqa: F401 (re-exports)
+    Token,
+    TokenKind,
+    _ALL_EXTENSIONS,
+    _ALL_EXTENSIONS_SORTED,
+    _AUDIO_CODECS,
+    _HDR_KEYWORDS,
+    _LANGUAGES,
+    _MEDIA_EXTENSIONS,
+    _METADATA_KINDS,
+    _SOURCE_TYPE_MAP,
+    _SOURCES,
+    _SUBTITLE_KEYWORDS,
+    _VIDEO_CODECS,
 )
-# Pre-sorted longest-first for _strip_extension (avoids sorting per call)
-_ALL_EXTENSIONS_SORTED = tuple(
-    sorted(_ALL_EXTENSIONS, key=lambda e: len(e), reverse=True)
+from etp_lib.media_scanner import (
+    _try_recognize,
+    classify_text,
+    count_metadata_words,
+    expand_metadata_words,
+    find_episode_in_text,
+    is_metadata_word,
+    scan_dot_segments,
 )
 
 # ---------------------------------------------------------------------------
@@ -144,8 +105,6 @@ def tokenize_component(text: str) -> list[Token]:
         if not raw:
             return
         if _is_scene_style(raw):
-            from etp_lib.media_scanner import scan_dot_segments
-
             tokens.extend(scan_dot_segments(raw))
         else:
             tokens.extend(_split_separators(raw))
@@ -234,146 +193,6 @@ def tokenize(path: str) -> list[Token]:
 # Phase 2: Semantic classifier
 # ---------------------------------------------------------------------------
 
-# Vocabulary sets (all lowercase for case-insensitive matching)
-
-_VIDEO_CODECS = frozenset(
-    {
-        "hevc",
-        "avc",
-        "x265",
-        "x264",
-        "h.264",
-        "h.265",
-        "h264",
-        "h265",
-        "av1",
-        "xvid",
-        "divx",
-        "mpeg2",
-    }
-)
-
-_AUDIO_CODECS = frozenset(
-    {
-        "aac",
-        "flac",
-        "opus",
-        "dd",
-        "ddp",
-        "dts",
-        "dts-hd",
-        "e-ac-3",
-        "eac3",
-        "ac3",
-        "truehd",
-        "pcm",
-        "lpcm",
-    }
-)
-
-_SOURCES = frozenset(
-    {
-        "bd",
-        "blu-ray",
-        "bluray",
-        "bdrip",
-        "bdremux",
-        "web",
-        "web-dl",
-        "webdl",
-        "webrip",
-        "cr",
-        "amzn",
-        "dsnp",
-        "nf",
-        "hidive",
-        "hidi",
-        "hulu",
-        "adn",
-        "unext",
-        "atvp",
-        "funi",
-        "hdtv",
-        "dvd",
-        "dvd-r",
-        "dvdr",
-        "dvdrip",
-        "vcd",
-        "cd-r",
-        "cdr",
-        "sdtv",
-        "raw",
-    }
-)
-
-# Map lowercase source keywords to canonical source_type values.
-# Keywords not in this map (e.g. "raw") are recognized as SOURCE tokens
-# but don't set a source_type.
-_SOURCE_TYPE_MAP: dict[str, str] = {
-    # Blu-ray
-    "bd": "BD",
-    "blu-ray": "BD",
-    "bluray": "BD",
-    "bdrip": "BD",
-    "bdremux": "BD",
-    # Web / streaming
-    "web": "Web",
-    "web-dl": "Web",
-    "webdl": "Web",
-    "webrip": "Web",
-    "cr": "Web",
-    "amzn": "Web",
-    "dsnp": "Web",
-    "nf": "Web",
-    "hidive": "Web",
-    "hidi": "Web",
-    "hulu": "Web",
-    "adn": "Web",
-    "unext": "Web",
-    "atvp": "Web",
-    "funi": "Web",
-    # DVD
-    "dvd": "DVD",
-    "dvdrip": "DVD",
-    "dvd-r": "DVD-R",
-    "dvdr": "DVD-R",
-    # TV capture
-    "hdtv": "HDTV",
-    "sdtv": "SDTV",
-    # Optical
-    "vcd": "VCD",
-    "cd-r": "CD-R",
-    "cdr": "CD-R",
-}
-
-_LANGUAGES = frozenset(
-    {
-        "dual",
-        "multi",
-        "jpn",
-        "eng",
-        "ger",
-        "fre",
-        "spa",
-        "ita",
-        "chi",
-        "kor",
-        "rus",
-        "ara",
-        "por",
-        "tha",
-    }
-)
-
-_SUBTITLE_KEYWORDS = frozenset(
-    {
-        "multisub",
-        "msubs",
-        "subtitle",
-        "multiple subtitle",
-    }
-)
-
 _RE_SUBTITLE_SOFT = re.compile(r"softsub", re.IGNORECASE)
 
 _RE_CRC32 = re.compile(r"^[0-9A-Fa-f]{8}$")
@@ -435,25 +254,11 @@ def classify_bonus_type(text: str) -> str:
     return ""
 
 
-# HDR
-_HDR_KEYWORDS = frozenset(
-    {
-        "hdr",
-        "hdr10",
-        "hdr10+",
-        "dovi",
-        "dolby vision",
-    }
-)
-
-
 def _classify_text_content(text: str) -> TokenKind | None:
     """Try to classify a bare text string as a known metadata type.
 
     Delegates to the scanner's parsy-based recognizers.
     """
-    from etp_lib.media_scanner import classify_text
-
     return classify_text(text)
 
 
@@ -462,8 +267,6 @@ def _classify_episode_text(text: str) -> Token | None:
 
     Delegates to the scanner's parsy-based recognizers.
     """
-    from etp_lib.media_scanner import _try_recognize
-
     token = _try_recognize(text.strip())
     if token is not None and token.kind in (
         TokenKind.EPISODE,
@@ -516,8 +319,6 @@ def _split_text_with_embedded(token: Token) -> list[Token]:
         return result
 
     # Try SxxExx embedded in text with spaces
-    from etp_lib.media_scanner import find_episode_in_text
-
     ep_match = find_episode_in_text(text)
     if ep_match:
         start, end, ep_token = ep_match
@@ -575,22 +376,16 @@ def _expand_metadata_words(text: str) -> list[Token]:
 
     Delegates to the scanner's parsy-based recognizers.
     """
-    from etp_lib.media_scanner import expand_metadata_words
-
     return expand_metadata_words(text)
 
 
 def _is_metadata_word(word: str) -> bool:
     """Check if a word (or any of its dash-separated parts) is metadata."""
-    from etp_lib.media_scanner import is_metadata_word
-
     return is_metadata_word(word)
 
 
 def _count_metadata_words(text: str) -> int:
     """Count how many whitespace/comma-separated words classify as metadata."""
-    from etp_lib.media_scanner import count_metadata_words
-
     return count_metadata_words(text)
 
 
@@ -603,8 +398,6 @@ def _classify_paren(token: Token) -> Token | list[Token]:
     text = token.text.strip()
 
     # Try scanner recognizers for year, season, special, etc.
-    from etp_lib.media_scanner import _try_recognize
-
     recognized = _try_recognize(text)
     if recognized is not None and recognized.kind in (
         TokenKind.YEAR,
@@ -790,8 +583,6 @@ def classify(tokens: list[Token]) -> list[Token]:
 
             # DOT_TEXT with embedded SxxExx (e.g., "S01E05----Is")
             if token.kind == TokenKind.DOT_TEXT:
-                from etp_lib.media_scanner import find_episode_in_text
-
                 ep_match = find_episode_in_text(text)
                 if ep_match:
                     _, _, ep_token = ep_match
@@ -859,32 +650,6 @@ class ParsedMedia:
     # From directory component
     path_series_name: str = ""
     path_is_batch: bool = False
-
-
-# Token kinds that are metadata (not title)
-_METADATA_KINDS = frozenset(
-    {
-        TokenKind.RELEASE_GROUP,
-        TokenKind.CRC32,
-        TokenKind.EPISODE,
-        TokenKind.SEASON,
-        TokenKind.VERSION,
-        TokenKind.RESOLUTION,
-        TokenKind.VIDEO_CODEC,
-        TokenKind.AUDIO_CODEC,
-        TokenKind.SOURCE,
-        TokenKind.REMUX,
-        TokenKind.YEAR,
-        TokenKind.BATCH_RANGE,
-        TokenKind.SUBTITLE_INFO,
-        TokenKind.LANGUAGE,
-        TokenKind.SITE_PREFIX,
-        TokenKind.BONUS,
-        TokenKind.UNKNOWN,
-        TokenKind.EXTENSION,
-        TokenKind.PATH_SEP,
-    }
-)
 
 
 def _extract_title_from_tokens(tokens: list[Token]) -> tuple[str, str]:
