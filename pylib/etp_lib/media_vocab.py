@@ -1,8 +1,7 @@
 """Vocabulary sets and data types for media filename parsing.
 
-Shared between the tokenizer/classifier (media_parser) and the
-position-based scanner (media_scanner).  No parsing logic here —
-just data definitions.
+Separated from media_parser to avoid circular imports with parsy
+primitives.  No parsing logic here — just data definitions.
 """
 
 from __future__ import annotations

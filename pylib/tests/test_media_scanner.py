@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from etp_lib.media_scanner import scan_words, scan_dot_segments, _try_recognize
+from etp_lib.media_parser import scan_words, scan_dot_segments, _try_recognize
 from etp_lib.media_parser import TokenKind
 
 
