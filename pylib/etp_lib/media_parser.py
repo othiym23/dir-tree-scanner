@@ -955,14 +955,6 @@ def classify_bonus_type(text: str) -> str:
     return ""
 
 
-def _classify_text_content(text: str) -> TokenKind | None:
-    """Try to classify a bare text string as a known metadata type.
-
-    Delegates to the scanner's parsy-based recognizers.
-    """
-    return classify_text(text)
-
-
 def _classify_episode_text(text: str) -> Token | None:
     """Try to parse text as an episode/season identifier.
 
@@ -1072,25 +1064,6 @@ def _split_text_with_embedded(token: Token) -> list[Token]:
     return [token]
 
 
-def _expand_metadata_words(text: str) -> list[Token]:
-    """Split text on whitespace/commas and classify each word.
-
-    Delegates to scan_words which handles multi-word patterns,
-    dash-compound splitting, and release group detection.
-    """
-    return scan_words(text)
-
-
-def _is_metadata_word(word: str) -> bool:
-    """Check if a word (or any of its dash-separated parts) is metadata."""
-    return is_metadata_word(word)
-
-
-def _count_metadata_words(text: str) -> int:
-    """Count how many whitespace/comma-separated words classify as metadata."""
-    return count_metadata_words(text)
-
-
 def _classify_paren(token: Token) -> Token | list[Token]:
     """Classify a PAREN token by its content.
 
@@ -1113,8 +1086,8 @@ def _classify_paren(token: Token) -> Token | list[Token]:
         return Token(kind=TokenKind.SUBTITLE_INFO, text=text)
 
     # Technical metadata paren: contains resolution/codec/source keywords
-    if _count_metadata_words(text) >= 2:
-        return _expand_metadata_words(text)
+    if count_metadata_words(text) >= 2:
+        return scan_words(text)
 
     # Region/variant: (US), (JP)
     if len(text) == 2 and text.isalpha():
@@ -1163,7 +1136,7 @@ def classify(tokens: list[Token]) -> list[Token]:
                 continue
 
             words = re.split(r"[\s,]+", token.text)
-            meta_count = _count_metadata_words(token.text)
+            meta_count = count_metadata_words(token.text)
             is_metadata_bracket = meta_count > 0 and meta_count >= len(words) // 2
 
             # First bracket: release group unless it's metadata
@@ -1183,10 +1156,10 @@ def classify(tokens: list[Token]) -> list[Token]:
             # a release group (Sonarr-style: [GROUP QUALITY-res,...])
             if is_metadata_bracket:
                 first_word = words[0].strip() if words else ""
-                first_is_meta = bool(first_word and _classify_text_content(first_word))
+                first_is_meta = bool(first_word and classify_text(first_word))
                 if not first_is_meta and first_word:
                     first_sub_meta = any(
-                        _classify_text_content(sp.strip())
+                        classify_text(sp.strip())
                         for sp in first_word.split("-")
                         if sp.strip()
                     )
@@ -1199,10 +1172,10 @@ def classify(tokens: list[Token]) -> list[Token]:
                         )
                         # Expand remaining words only
                         rest = token.text[len(first_word) :].strip(" ,")
-                        result.extend(_expand_metadata_words(rest))
+                        result.extend(scan_words(rest))
                         continue
 
-                result.extend(_expand_metadata_words(token.text))
+                result.extend(scan_words(token.text))
                 continue
 
             # Short alpha-only bracket (2-6 chars): likely a release group
@@ -1251,7 +1224,7 @@ def classify(tokens: list[Token]) -> list[Token]:
                 continue
 
             # Known metadata keyword?
-            kind = _classify_text_content(text)
+            kind = classify_text(text)
             if kind is not None:
                 result.append(Token(kind=kind, text=text))
                 continue
@@ -1272,7 +1245,7 @@ def classify(tokens: list[Token]) -> list[Token]:
                 words = text.split()
                 meta_start = None
                 for i, w in enumerate(words):
-                    if _is_metadata_word(w):
+                    if is_metadata_word(w):
                         meta_start = i
                         break
                 if meta_start is not None:
@@ -1280,7 +1253,7 @@ def classify(tokens: list[Token]) -> list[Token]:
                     meta_part = " ".join(words[meta_start:])
                     if title_part:
                         result.append(Token(kind=TokenKind.TEXT, text=title_part))
-                    result.extend(_expand_metadata_words(meta_part))
+                    result.extend(scan_words(meta_part))
                     continue
 
             # DOT_TEXT with embedded SxxExx (e.g., "S01E05----Is")
@@ -1300,7 +1273,7 @@ def classify(tokens: list[Token]) -> list[Token]:
                     prefix = m.group(1)
                     group = m.group(2)
                     # Classify the prefix part
-                    prefix_kind = _classify_text_content(prefix)
+                    prefix_kind = classify_text(prefix)
                     if prefix_kind:
                         result.append(Token(kind=prefix_kind, text=prefix))
                     else:

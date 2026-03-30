@@ -434,30 +434,30 @@ class TestClassifyYear:
 
 class TestClassifyResolution:
     def test_1080p(self):
-        assert mp._classify_text_content("1080p") == mp.TokenKind.RESOLUTION
+        assert mp.classify_text("1080p") == mp.TokenKind.RESOLUTION
 
     def test_dims(self):
-        assert mp._classify_text_content("1920x1080") == mp.TokenKind.RESOLUTION
+        assert mp.classify_text("1920x1080") == mp.TokenKind.RESOLUTION
 
     def test_2160p(self):
-        assert mp._classify_text_content("2160p") == mp.TokenKind.RESOLUTION
+        assert mp.classify_text("2160p") == mp.TokenKind.RESOLUTION
 
 
 class TestClassifyCodec:
     def test_hevc(self):
-        assert mp._classify_text_content("HEVC") == mp.TokenKind.VIDEO_CODEC
+        assert mp.classify_text("HEVC") == mp.TokenKind.VIDEO_CODEC
 
     def test_x264(self):
-        assert mp._classify_text_content("x264") == mp.TokenKind.VIDEO_CODEC
+        assert mp.classify_text("x264") == mp.TokenKind.VIDEO_CODEC
 
     def test_aac(self):
-        assert mp._classify_text_content("AAC") == mp.TokenKind.AUDIO_CODEC
+        assert mp.classify_text("AAC") == mp.TokenKind.AUDIO_CODEC
 
     def test_flac(self):
-        assert mp._classify_text_content("FLAC") == mp.TokenKind.AUDIO_CODEC
+        assert mp.classify_text("FLAC") == mp.TokenKind.AUDIO_CODEC
 
     def test_aac20(self):
-        assert mp._classify_text_content("AAC2.0") == mp.TokenKind.AUDIO_CODEC
+        assert mp.classify_text("AAC2.0") == mp.TokenKind.AUDIO_CODEC
 
 
 class TestClassifyLenticular:
