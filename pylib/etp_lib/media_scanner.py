@@ -532,62 +532,6 @@ def scan_words(text: str) -> list[Token]:
     return tokens
 
 
-def scan_words_simple(text: str) -> list[Token]:
-    """Simple word-by-word scanning (no multi-word support).
-
-    For backward compatibility and bracket content where multi-word
-    patterns are less common.
-    """
-    tokens: list[Token] = []
-    words = re.split(r"([\s,]+)", text)
-
-    for word in words:
-        if not word or not word.strip():
-            continue
-        word = word.strip()
-
-        # Try each recognizer
-        matched = False
-        for recognizer in _RECOGNIZERS:
-            result = recognizer(word, 0)
-            if result.status and result.index == len(word):
-                # Full match — the recognizer consumed the entire word
-                token = _result_to_token(result.value, word)
-                tokens.append(token)
-                matched = True
-                break
-
-        if not matched:
-            # Try dash-split: "REMUX-FraMeSToR" → try each part
-            if "-" in word and not word.startswith("-"):
-                parts = word.split("-")
-                sub_tokens = []
-                all_recognized = False
-                for part in parts:
-                    if not part:
-                        continue
-                    part_matched = False
-                    for recognizer in _RECOGNIZERS:
-                        result = recognizer(part, 0)
-                        if result.status and result.index == len(part):
-                            sub_tokens.append(_result_to_token(result.value, part))
-                            part_matched = True
-                            break
-                    if not part_matched:
-                        sub_tokens.append(Token(kind=TokenKind.UNKNOWN, text=part))
-                    else:
-                        all_recognized = True
-
-                if all_recognized:
-                    tokens.extend(sub_tokens)
-                    matched = True
-
-            if not matched:
-                tokens.append(Token(kind=TokenKind.TEXT, text=word))
-
-    return tokens
-
-
 def scan_dot_segments(text: str) -> list[Token]:
     """Scan dot-separated scene-style text.
 
