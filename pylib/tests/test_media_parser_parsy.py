@@ -315,6 +315,124 @@ class TestBonusEN:
         assert result.bonus_type == bonus_type
 
 
+class TestParseFansub:
+    """Test fansub convention parser against known inputs."""
+
+    def test_basic(self):
+        pm = pp.parse_fansub(
+            "[Cyan] Champignon no Majo - 08 [WEB 1080p x265][AAC][D98B31F3].mkv"
+        )
+        assert pm is not None
+        assert pm.release_group == "Cyan"
+        assert pm.series_name == "Champignon no Majo"
+        assert pm.episode == 8
+        assert pm.hash_code == "D98B31F3"
+
+    def test_erai_raws(self):
+        pm = pp.parse_fansub(
+            "[Erai-raws] Champignon no Majo - 11 "
+            "[1080p CR WEB-DL AVC AAC][MultiSub][0A021911].mkv"
+        )
+        assert pm is not None
+        assert pm.release_group == "Erai-raws"
+        assert pm.series_name == "Champignon no Majo"
+        assert pm.episode == 11
+        assert pm.hash_code == "0A021911"
+
+    def test_special_ep(self):
+        pm = pp.parse_fansub(
+            "[ak-Submarines] Girls und Panzer - MLLSD - SP1 [WEB 1080p][D227DE6D].mkv"
+        )
+        assert pm is not None
+        assert pm.release_group == "ak-Submarines"
+        assert pm.episode == 1
+        assert pm.is_special is True
+
+
+class TestParseScene:
+    """Test scene convention parser against known inputs."""
+
+    def test_basic(self):
+        pm = pp.parse_scene(
+            "You.and.I.Are.Polar.Opposites.S01E01.You.My.Polar.Opposite."
+            "1080p.CR.WEB-DL.DUAL.AAC2.0.H.264-VARYG.mkv"
+        )
+        assert pm is not None
+        assert pm.release_group == "VARYG"
+        assert pm.season == 1
+        assert pm.episode == 1
+        assert "You" in pm.series_name and "Polar" in pm.series_name
+
+    def test_movie_with_year(self):
+        pm = pp.parse_scene("Movie.2005.WEB-DL.2160p.mkv")
+        assert pm is not None
+        assert pm.year == 2005
+        assert pm.series_name == "Movie"
+
+
+class TestParseJapanese:
+    """Test Japanese convention parser against known inputs."""
+
+    def test_season_and_episode(self):
+        pm = pp.parse_japanese(
+            "[アニメ BD] 探偵オペラミルキィホームズ(第1期) "
+            "第01話「屋根裏の入居者」"
+            "(1920x1080 HEVC 10bit FLAC softSub(chi+eng) chap).mkv"
+        )
+        assert pm is not None
+        assert pm.release_group == "アニメ"
+        assert pm.source_type == "BD"
+        assert pm.season == 1
+        assert pm.episode == 1
+        assert pm.episode_title == "屋根裏の入居者"
+        assert "探偵オペラミルキィホームズ" in pm.series_name
+
+
+class TestConventionDetection:
+    """Test detect_convention dispatching."""
+
+    def test_fansub(self):
+        assert pp.detect_convention("[Group] Title - 01.mkv") == "fansub"
+
+    def test_scene(self):
+        assert (
+            pp.detect_convention("Title.S01E05.1080p.BluRay.x265-GROUP.mkv") == "scene"
+        )
+
+    def test_japanese(self):
+        assert pp.detect_convention("[G] 探偵 第01話「Title」.mkv") == "japanese"
+
+    def test_bare(self):
+        assert pp.detect_convention("Movie (2005).mkv") == "bare"
+
+
+class TestParseComponentParsy:
+    """Test the unified parse_component_parsy entry point."""
+
+    def test_fansub(self):
+        pm = pp.parse_component_parsy(
+            "[Cyan] Champignon no Majo - 08 [WEB 1080p x265][D98B31F3].mkv"
+        )
+        assert pm.release_group == "Cyan"
+        assert pm.episode == 8
+
+    def test_scene(self):
+        pm = pp.parse_component_parsy("Show.S01E05.1080p.WEB-DL.AAC2.0.H.264-VARYG.mkv")
+        assert pm.season == 1
+        assert pm.episode == 5
+        assert pm.release_group == "VARYG"
+
+    def test_japanese(self):
+        pm = pp.parse_component_parsy(
+            "[アニメ BD] 探偵オペラミルキィホームズ(第1期) "
+            "第01話「屋根裏の入居者」"
+            "(1920x1080 HEVC 10bit FLAC).mkv"
+        )
+        assert pm.season == 1
+        assert pm.episode == 1
+        assert pm.episode_title == "屋根裏の入居者"
+
+
 class TestMetadataWord:
     """metadata_word should match any resolution, codec, source, remux, or language."""
 
