@@ -100,7 +100,7 @@ class SeasonOnly:
 
 @dataclass(frozen=True, slots=True)
 class SeasonSpecial:
-    """S01OVA, S02SP1 — combined season + special marker."""
+    """S01OVA, S02SP1, S03OP, S03ED — combined season + special/credit marker."""
 
     season: int
     tag: str
@@ -348,7 +348,9 @@ def _parse_special(s: str) -> Special:
 special: Parser = regex(r"(SP|OVA|OAD|ONA)(\d*)", re.IGNORECASE).map(_parse_special)
 
 # Season + special: S01OVA, S02SP1
-_RE_SEASON_SPECIAL = re.compile(r"[Ss](\d{1,2})(OVA|OAD|ONA|SP)(\d*)", re.IGNORECASE)
+_RE_SEASON_SPECIAL = re.compile(
+    r"[Ss](\d{1,2})(OVA|OAD|ONA|SP|OP|ED)(\d*)", re.IGNORECASE
+)
 
 
 def _season_special_parser(stream: str, index: int):
@@ -1478,6 +1480,14 @@ def _build_parsed_media(tokens: list[Token]) -> ParsedMedia:
                 if _RE_SPECIAL.match(stripped) or _RE_SEASON_SPECIAL.match(stripped):
                     pm.is_special = True
                     pm.special_tag = token.text.strip()
+                    # S03OP/S03ED → set bonus_type for credit specials
+                    m_ss = _RE_SEASON_SPECIAL.match(stripped)
+                    if m_ss:
+                        tag = m_ss.group(2).upper()
+                        if tag == "OP":
+                            pm.bonus_type = "NCOP"
+                        elif tag == "ED":
+                            pm.bonus_type = "NCED"
         elif token.kind == TokenKind.SEASON:
             if pm.season is None:
                 pm.season = token.season
@@ -1590,6 +1600,8 @@ def parse_media_path(rel_path: str) -> ParsedMedia:
                     dir_pm.resolution = t.text
                 elif t.kind == TokenKind.VIDEO_CODEC and not dir_pm.video_codec:
                     dir_pm.video_codec = t.text
+                elif t.kind == TokenKind.AUDIO_CODEC:
+                    dir_pm.audio_codecs.append(t.text)
                 elif t.kind == TokenKind.RELEASE_GROUP and not dir_pm.release_group:
                     dir_pm.release_group = t.text
 
@@ -1624,6 +1636,8 @@ def parse_media_path(rel_path: str) -> ParsedMedia:
                     dir_pm.resolution = t.text
                 elif t.kind == TokenKind.VIDEO_CODEC and not dir_pm.video_codec:
                     dir_pm.video_codec = t.text
+                elif t.kind == TokenKind.AUDIO_CODEC:
+                    dir_pm.audio_codecs.append(t.text)
                 elif t.kind == TokenKind.RELEASE_GROUP and not dir_pm.release_group:
                     dir_pm.release_group = t.text
 
@@ -1651,6 +1665,10 @@ def parse_media_path(rel_path: str) -> ParsedMedia:
     # Video codec fallback
     if not result.video_codec and dir_pm.video_codec:
         result.video_codec = dir_pm.video_codec
+
+    # Audio codec fallback
+    if not result.audio_codecs and dir_pm.audio_codecs:
+        result.audio_codecs = dir_pm.audio_codecs
 
     # Year fallback
     if result.year is None and dir_pm.year is not None:

@@ -1248,3 +1248,24 @@ class TestQARegression:
         assert pm.resolution == "1080p"
         assert pm.release_group == "EMBER"
         assert pm.source_type == "BD"
+
+    def test_directory_audio_codec_propagation(self):
+        """FLAC in directory should propagate to file audio_codecs."""
+        pm = mp.parse_media_path(
+            "Show S03 1080p BD Remux FLAC-TTGA/S03E01-Episode Title.mkv"
+        )
+        assert any("FLAC" in c for c in pm.audio_codecs)
+
+    def test_s03ed_recognized_as_credit_special(self):
+        """S03ED should be parsed as season 3 ED (credit special)."""
+        pm = mp.parse_component("S03ED-Kotoba ni Dekinai [Maaya Sakamoto].mkv")
+        assert pm.season == 3
+        assert pm.is_special is True
+        assert pm.bonus_type == "NCED"
+
+    def test_s03op_recognized_as_credit_special(self):
+        """S03OP should be parsed as season 3 OP (credit special)."""
+        pm = mp.parse_component("S03OP-Ano hi No Kotoba [Nao Toyama].mkv")
+        assert pm.season == 3
+        assert pm.is_special is True
+        assert pm.bonus_type == "NCOP"
