@@ -56,6 +56,7 @@ def _format_pm(pm: ParsedMedia) -> str:
         ),
         ("group", pm.release_group),
         ("source", pm.source_type),
+        ("streamer", pm.streaming_service if pm.streaming_service else None),
         ("remux", pm.is_remux if pm.is_remux else None),
         ("res", pm.resolution),
         ("video", pm.video_codec),
