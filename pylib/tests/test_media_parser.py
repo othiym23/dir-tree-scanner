@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from etp_lib import media_parser as mp
+from etp_lib.media_parser import scan_words, scan_dot_segments, _try_recognize
 
 
 # ===================================================================
@@ -946,3 +947,229 @@ class TestCorpusSmoke:
         assert not missing, f"{len(missing)} files with no series name:\n" + "\n".join(
             missing[:20]
         )
+
+
+# ===================================================================
+# Scanner: word-level scanning
+# ===================================================================
+
+
+class TestScanWords:
+    """Test word-level scanning with parsy recognizers."""
+
+    def test_audio_codec_compound(self):
+        tokens = scan_words("AAC2.0")
+        assert len(tokens) == 1
+        assert tokens[0].kind == mp.TokenKind.AUDIO_CODEC
+        assert tokens[0].text == "AAC2.0"
+
+    def test_dts_hdma(self):
+        tokens = scan_words("DTS-HDMA")
+        assert len(tokens) == 1
+        assert tokens[0].kind == mp.TokenKind.AUDIO_CODEC
+        assert tokens[0].text == "DTS-HDMA"
+
+    def test_episode_se(self):
+        tokens = scan_words("S01E05")
+        assert len(tokens) == 1
+        assert tokens[0].kind == mp.TokenKind.EPISODE
+        assert tokens[0].season == 1
+        assert tokens[0].episode == 5
+
+    def test_episode_se_version(self):
+        tokens = scan_words("S01E01v2")
+        assert len(tokens) == 1
+        assert tokens[0].version == 2
+
+    def test_episode_bare(self):
+        tokens = scan_words("08")
+        assert len(tokens) == 1
+        assert tokens[0].kind == mp.TokenKind.EPISODE
+        assert tokens[0].episode == 8
+
+    def test_year_not_episode(self):
+        tokens = scan_words("2019")
+        assert len(tokens) == 1
+        assert tokens[0].kind == mp.TokenKind.YEAR
+        assert tokens[0].year == 2019
+
+    def test_unrecognized_text(self):
+        tokens = scan_words("Champignon")
+        assert len(tokens) == 1
+        assert tokens[0].kind == mp.TokenKind.TEXT
+        assert tokens[0].text == "Champignon"
+
+    def test_mixed_content(self):
+        """Bracket content like 'WEB 1080p x265' should produce typed tokens."""
+        tokens = scan_words("WEB 1080p x265")
+        kinds = [t.kind for t in tokens]
+        assert mp.TokenKind.SOURCE in kinds
+        assert mp.TokenKind.RESOLUTION in kinds
+        assert mp.TokenKind.VIDEO_CODEC in kinds
+
+    def test_bracket_audio_metadata(self):
+        """[LPCM 2.0 + DTS-HDMA 2.1] content should recognize audio codecs."""
+        tokens = scan_words("LPCM 2.0 + DTS-HDMA 2.1")
+        audio = [t for t in tokens if t.kind == mp.TokenKind.AUDIO_CODEC]
+        assert len(audio) >= 1
+        texts = [t.text for t in audio]
+        assert any("LPCM" in t for t in texts)
+
+    def test_dash_compound_remux_group(self):
+        """REMUX-FraMeSToR should split into REMUX + unknown FraMeSToR."""
+        tokens = scan_words("REMUX-FraMeSToR")
+        kinds = [t.kind for t in tokens]
+        assert mp.TokenKind.REMUX in kinds
+        texts = [t.text for t in tokens]
+        assert "FraMeSToR" in texts
+
+    def test_sonarr_bracket_content(self):
+        """Sonarr-style [Group source,res,...] bracket content."""
+        tokens = scan_words("Hinna Bluray-1080p Remux,8bit,AVC,FLAC")
+        assert tokens[0].kind == mp.TokenKind.TEXT
+        assert tokens[0].text == "Hinna"
+
+    def test_bonus_ncop(self):
+        tokens = scan_words("NCOP")
+        assert len(tokens) == 1
+        assert tokens[0].kind == mp.TokenKind.BONUS
+
+    def test_bonus_nc_ed1(self):
+        tokens = scan_words("NC ED1")
+        assert len(tokens) == 1
+        assert tokens[0].kind == mp.TokenKind.BONUS
+
+    def test_japanese_episode(self):
+        tokens = scan_words("第01話")
+        assert len(tokens) == 1
+        assert tokens[0].kind == mp.TokenKind.EPISODE
+        assert tokens[0].episode == 1
+
+
+# ===================================================================
+# Scanner: dot-separated scene scanning
+# ===================================================================
+
+
+class TestScanDotSegments:
+    """Test dot-separated scene scanning with compound token handling."""
+
+    def test_simple_scene(self):
+        tokens = scan_dot_segments("Show.S01E05.1080p.BluRay.x265-GROUP")
+        texts = [t.text for t in tokens]
+        kinds = [t.kind for t in tokens]
+        assert "Show" in texts
+        assert mp.TokenKind.EPISODE in kinds
+        assert mp.TokenKind.RESOLUTION in kinds
+        assert mp.TokenKind.SOURCE in kinds
+
+    def test_compound_h264(self):
+        """H.264 should be recognized as a single video codec token."""
+        tokens = scan_dot_segments("Show.S01E05.1080p.H.264-VARYG")
+        video = [t for t in tokens if t.kind == mp.TokenKind.VIDEO_CODEC]
+        assert len(video) == 1
+        assert video[0].text == "H.264"
+
+    def test_compound_h264_with_trailing_group(self):
+        """H.264-VARYG should produce H.264 (codec) + VARYG (group)."""
+        tokens = scan_dot_segments("Show.S01E05.H.264-VARYG")
+        groups = [t for t in tokens if t.kind == mp.TokenKind.RELEASE_GROUP]
+        assert len(groups) == 1
+        assert groups[0].text == "VARYG"
+
+    def test_compound_aac20(self):
+        """AAC2.0 should be recognized as a single audio codec token."""
+        tokens = scan_dot_segments("Show.S01E05.AAC2.0.x265")
+        audio = [t for t in tokens if t.kind == mp.TokenKind.AUDIO_CODEC]
+        assert len(audio) == 1
+        assert audio[0].text == "AAC2.0"
+
+    def test_scene_trailing_group(self):
+        """x265-GROUP should split into codec + release group."""
+        tokens = scan_dot_segments("Show.S01E05.1080p.x265-GROUP")
+        groups = [t for t in tokens if t.kind == mp.TokenKind.RELEASE_GROUP]
+        assert len(groups) == 1
+        assert groups[0].text == "GROUP"
+
+    def test_full_scene_filename(self):
+        """Full scene filename with all metadata types."""
+        tokens = scan_dot_segments(
+            "You.and.I.Are.Polar.Opposites.S01E01.You.My.Polar.Opposite"
+            ".1080p.CR.WEB-DL.DUAL.AAC2.0.H.264-VARYG"
+        )
+        kinds = {t.kind for t in tokens}
+        assert mp.TokenKind.EPISODE in kinds
+        assert mp.TokenKind.RESOLUTION in kinds
+        assert mp.TokenKind.AUDIO_CODEC in kinds
+        assert mp.TokenKind.VIDEO_CODEC in kinds
+        assert mp.TokenKind.RELEASE_GROUP in kinds
+
+        video = [t for t in tokens if t.kind == mp.TokenKind.VIDEO_CODEC]
+        assert video[0].text == "H.264"
+        audio = [t for t in tokens if t.kind == mp.TokenKind.AUDIO_CODEC]
+        assert audio[0].text == "AAC2.0"
+
+    def test_season_only(self):
+        """S01 without E should be recognized as season."""
+        tokens = scan_dot_segments("Golden.Kamuy.S01.1080p.BluRay")
+        seasons = [t for t in tokens if t.kind == mp.TokenKind.SEASON]
+        assert len(seasons) == 1
+        assert seasons[0].season == 1
+
+    def test_unrecognized_words_are_dot_text(self):
+        """Words that don't match any recognizer stay as DOT_TEXT."""
+        tokens = scan_dot_segments("You.and.I.Are.Polar.Opposites")
+        assert all(t.kind == mp.TokenKind.DOT_TEXT for t in tokens)
+        assert [t.text for t in tokens] == [
+            "You",
+            "and",
+            "I",
+            "Are",
+            "Polar",
+            "Opposites",
+        ]
+
+
+# ===================================================================
+# Scanner: individual word recognition
+# ===================================================================
+
+
+class TestTryRecognize:
+    """Test individual word recognition via parsy primitives."""
+
+    @pytest.mark.parametrize(
+        "word,expected_kind",
+        [
+            ("1080p", mp.TokenKind.RESOLUTION),
+            ("HEVC", mp.TokenKind.VIDEO_CODEC),
+            ("x265", mp.TokenKind.VIDEO_CODEC),
+            ("FLAC", mp.TokenKind.AUDIO_CODEC),
+            ("AAC2.0", mp.TokenKind.AUDIO_CODEC),
+            ("DTS-HDMA", mp.TokenKind.AUDIO_CODEC),
+            ("BD", mp.TokenKind.SOURCE),
+            ("BluRay", mp.TokenKind.SOURCE),
+            ("WEB-DL", mp.TokenKind.SOURCE),
+            ("REMUX", mp.TokenKind.REMUX),
+            ("S01E05", mp.TokenKind.EPISODE),
+            ("OVA", mp.TokenKind.EPISODE),
+            ("v2", mp.TokenKind.VERSION),
+            ("2019", mp.TokenKind.YEAR),
+            ("D98B31F3", mp.TokenKind.CRC32),
+            ("jpn", mp.TokenKind.LANGUAGE),
+            ("NCOP", mp.TokenKind.BONUS),
+        ],
+    )
+    def test_recognized(self, word, expected_kind):
+        token = _try_recognize(word)
+        assert token is not None, f"{word!r} was not recognized"
+        assert token.kind == expected_kind, (
+            f"{word!r}: expected {expected_kind.name}, got {token.kind.name}"
+        )
+
+    @pytest.mark.parametrize(
+        "word",
+        ["Champignon", "the", "of", "Hello", "FraMeSToR", "VARYG"],
+    )
+    def test_not_recognized(self, word):
+        assert _try_recognize(word) is None
