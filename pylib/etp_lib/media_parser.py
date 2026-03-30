@@ -193,6 +193,19 @@ resolution: Parser = regex(
 # Video codec
 video_codec: Parser = _match_set_ci(_VIDEO_CODECS, VideoCodec)
 
+# Pre-compiled patterns for parsy recognizer functions (avoid per-call compilation)
+_RE_BARE_EP = re.compile(r"(\d{1,4})(?:v(\d+))?(?=\s|$|\.)")
+_RE_EP_PREFIX = re.compile(r"[Ee][Pp]?(\d{1,4})(?:v(\d+))?$")
+_RE_EP_FINAL = re.compile(r"(\d{1,4})(?:v(\d+))?\s*END$", re.IGNORECASE)
+_RE_TRAILING_DIGITS = re.compile(r"(\d+)$")
+_RE_BONUS_OP = re.compile(r"OP\d*$", re.IGNORECASE)
+_RE_BONUS_ED = re.compile(r"ED\d*$", re.IGNORECASE)
+_RE_BATCH_SPLIT = re.compile(r"\s*[~～]\s*")
+_RE_WORD_SPLIT = re.compile(r"[\s,]+")
+_RE_DASH_SUFFIX = re.compile(r"-[A-Za-z].*$")
+_RE_DASH_GROUP = re.compile(r"^(.+)-([A-Za-z][A-Za-z0-9]+)$")
+_RE_LEADING_BARE_EP = re.compile(r"^(\d{1,4})(?:v(\d+))?\s")
+
 # Audio codec (compound forms like AAC2.0, DTS-HD MA)
 _RE_AC = re.compile(
     r"(?:DTS-HDMA|DTS-HD\s*MA|DTS-HD|DTS|DDP|DD|EAC3|E-AC-3|AC3|AAC|FLAC|TrueHD|PCM|LPCM)"
@@ -259,7 +272,7 @@ episode_se: Parser = regex(r"[Ss](\d{1,2})[Ee](\d{1,4})(?:v(\d+))?").map(
 
 # Episode: bare number
 def _bare_episode_parser(stream: str, index: int):
-    m = re.match(r"(\d{1,4})(?:v(\d+))?(?=\s|$|\.)", stream[index:])
+    m = _RE_BARE_EP.match(stream[index:])
     if not m:
         return Result.failure(index, frozenset({"bare_episode"}))
     num = int(m.group(1))
@@ -274,7 +287,7 @@ episode_bare: Parser = Parser(_bare_episode_parser)  # type: ignore[arg-type]  #
 
 # Episode: EP05, E5 format
 def _ep_prefix_parser(stream: str, index: int):
-    m = re.match(r"[Ee][Pp]?(\d{1,4})(?:v(\d+))?$", stream[index:])
+    m = _RE_EP_PREFIX.match(stream[index:])
     if not m:
         return Result.failure(index, frozenset({"ep_prefix"}))
     version = int(m.group(2)) if m.group(2) else None
@@ -286,7 +299,7 @@ episode_ep: Parser = Parser(_ep_prefix_parser)  # type: ignore[arg-type]  # ty: 
 
 # Episode: "05 END", "05v2 END" (final episode marker)
 def _ep_final_parser(stream: str, index: int):
-    m = re.match(r"(\d{1,4})(?:v(\d+))?\s*END$", stream[index:], re.IGNORECASE)
+    m = _RE_EP_FINAL.match(stream[index:])
     if not m:
         return Result.failure(index, frozenset({"ep_final"}))
     version = int(m.group(2)) if m.group(2) else None
@@ -319,7 +332,7 @@ season_only: Parser = regex(r"[Ss](\d{1,2})(?!\d|[Ee])").map(
 # Special: SP1, OVA, OAD, ONA
 def _parse_special(s: str) -> Special:
     tag = _re_group(r"(SP|OVA|OAD|ONA)", s, flags=re.IGNORECASE).upper()
-    m = re.search(r"(\d+)$", s)
+    m = _RE_TRAILING_DIGITS.search(s)
     return Special(tag=tag, number=int(m.group(1)) if m else None)
 
 
@@ -328,7 +341,7 @@ special: Parser = regex(r"(SP|OVA|OAD|ONA)(\d*)", re.IGNORECASE).map(_parse_spec
 
 # Batch range: "01~26"
 def _parse_batch_range(s: str) -> BatchRange:
-    parts = re.split(r"\s*[~～]\s*", s)
+    parts = _RE_BATCH_SPLIT.split(s)
     return BatchRange(start=int(parts[0]), end=int(parts[1]))
 
 
@@ -373,9 +386,9 @@ def _bonus_parser(stream: str, index: int):
     m = _RE_BONUS_EN_P.match(stream, index)
     if m:
         matched = m.group(0)
-        if re.search(r"OP\d*$", matched, re.IGNORECASE):
+        if _RE_BONUS_OP.search(matched):
             return Result.success(m.end(), BonusKeyword("NCOP", matched))
-        if re.search(r"ED\d*$", matched, re.IGNORECASE):
+        if _RE_BONUS_ED.search(matched):
             return Result.success(m.end(), BonusKeyword("NCED", matched))
     return Result.failure(index, frozenset({"bonus_keyword"}))
 
@@ -550,7 +563,7 @@ def scan_words(text: str) -> list[Token]:
         gap_text = gap_text.strip(" ,-")
         if not gap_text:
             return
-        for w in re.split(r"[\s,]+", gap_text):
+        for w in _RE_WORD_SPLIT.split(gap_text):
             w = w.strip()
             if not w:
                 continue
@@ -635,7 +648,7 @@ def scan_dot_segments(text: str) -> list[Token]:
                 continue
 
             # Strip trailing -suffix and try: "H" + "264-VARYG" → "H.264"
-            next_base = re.sub(r"-[A-Za-z].*$", "", next_part)
+            next_base = _RE_DASH_SUFFIX.sub("", next_part)
             if next_base != next_part:
                 compound2_stripped = f"{part}.{next_base}"
                 token = _try_recognize(compound2_stripped)
@@ -661,7 +674,7 @@ def scan_dot_segments(text: str) -> list[Token]:
             tokens.append(token)
         else:
             # Check if it has a trailing "-GROUP" (scene convention)
-            dash_m = re.match(r"^(.+)-([A-Za-z][A-Za-z0-9]+)$", part)
+            dash_m = _RE_DASH_GROUP.match(part)
             if dash_m:
                 prefix = dash_m.group(1)
                 suffix = dash_m.group(2)
@@ -737,7 +750,7 @@ def count_metadata_words(text: str) -> int:
     Drop-in replacement for media_parser._count_metadata_words.
     """
     count = 0
-    for w in re.split(r"[\s,]+", text):
+    for w in _RE_WORD_SPLIT.split(text):
         w = w.strip()
         if w and is_metadata_word(w):
             count += 1
@@ -972,7 +985,6 @@ def _classify_episode_text(text: str) -> Token | None:
 
 # Patterns for searching *within* a TEXT token for embedded episodes/seasons
 _RE_EP_JP_SEARCH = re.compile(r"第(\d{1,4})話")
-_RE_SEASON_JP_SEARCH = re.compile(r"第(\d{1,2})期")
 _RE_SEASON_WORD_SEARCH = re.compile(r"(\d+)(?:st|nd|rd|th)\s+Season", re.IGNORECASE)
 
 
@@ -1045,7 +1057,7 @@ def _split_text_with_embedded(token: Token) -> list[Token]:
         return result
 
     # Try leading bare number: "01 Shiroi Koibito-tachi" → EPISODE + TEXT
-    m = re.match(r"^(\d{1,4})(?:v(\d+))?\s", text)
+    m = _RE_LEADING_BARE_EP.match(text)
     if m and not _RE_YEAR.match(m.group(1)):
         ep_text = m.group(0).strip()
         after = text[m.end() :].strip()
@@ -1135,7 +1147,7 @@ def classify(tokens: list[Token]) -> list[Token]:
                 result.append(Token(kind=TokenKind.SUBTITLE_INFO, text=token.text))
                 continue
 
-            words = re.split(r"[\s,]+", token.text)
+            words = _RE_WORD_SPLIT.split(token.text)
             meta_count = count_metadata_words(token.text)
             is_metadata_bracket = meta_count > 0 and meta_count >= len(words) // 2
 
