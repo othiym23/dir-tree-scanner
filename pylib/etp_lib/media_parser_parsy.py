@@ -600,6 +600,9 @@ def parse_fansub(text: str) -> ParsedMedia | None:
         y = int(year_m.group(1))
         if 1900 <= y <= 2099:
             pm.year = y
+            pm.series_name = (
+                pm.series_name[: year_m.start()] + pm.series_name[year_m.end() :]
+            ).strip()
 
     return pm
 
@@ -940,8 +943,14 @@ def parse_bare(text: str) -> ParsedMedia | None:
         pm.extension = m.group(0).lower()
         remaining = remaining[: m.start()]
 
-    # Check for embedded SxxExx
+    # Check for embedded SxxExx or "Title - NN" bare episode
     ep_m = re.search(r"[Ss](\d{1,2})[Ee](\d{1,4})(?:v(\d+))?", remaining)
+    bare_ep_m = None
+    if not ep_m:
+        # Try "Title - NNvV" at end (after last separator)
+        bare_ep_m = re.search(
+            r"\s+-\s+(\d{1,4})(?:v(\d+))?\s*(?:END)?\s*$", remaining, re.IGNORECASE
+        )
     if ep_m:
         pm.season = int(ep_m.group(1))
         pm.episode = int(ep_m.group(2))
@@ -967,6 +976,13 @@ def parse_bare(text: str) -> ParsedMedia | None:
             _apply_metadata(pm, meta)
         elif after:
             pm.episode_title = after
+    elif bare_ep_m:
+        num = int(bare_ep_m.group(1))
+        if not (1900 <= num <= 2099):
+            pm.episode = num
+            if bare_ep_m.group(2):
+                pm.version = int(bare_ep_m.group(2))
+        pm.series_name = remaining[: bare_ep_m.start()].strip()
     else:
         # No episode: just title, maybe with year
         year_m = re.search(r"\((\d{4})\)", remaining)
