@@ -622,6 +622,22 @@ def scan_dot_segments(text: str) -> list[Token]:
     return tokens
 
 
+def find_episode_in_text(text: str) -> tuple[int, int, Token] | None:
+    """Search for an SxxExx episode marker at any position in text.
+
+    Returns (start, end, token) or None. Replaces _RE_EP_SE_SEARCH.search().
+    """
+    for pos in range(len(text)):
+        result = episode_se(text, pos)
+        if result.status:
+            return (
+                pos,
+                result.index,
+                _result_to_token(result.value, text[pos : result.index]),
+            )
+    return None
+
+
 def _try_recognize(text: str) -> Token | None:
     """Try all recognizers against a complete text. Returns Token or None."""
     for recognizer in _RECOGNIZERS:

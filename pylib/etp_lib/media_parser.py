@@ -587,7 +587,6 @@ def _classify_episode_text(text: str) -> Token | None:
 # Patterns for searching *within* a TEXT token for embedded episodes/seasons
 _RE_EP_JP_SEARCH = re.compile(r"第(\d{1,4})話")
 _RE_SEASON_JP_SEARCH = re.compile(r"第(\d{1,2})期")
-_RE_EP_SE_SEARCH = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,4})(?:v(\d+))?")
 _RE_SEASON_WORD_SEARCH = re.compile(r"(\d+)(?:st|nd|rd|th)\s+Season", re.IGNORECASE)
 
 
@@ -627,22 +626,17 @@ def _split_text_with_embedded(token: Token) -> list[Token]:
         return result
 
     # Try SxxExx embedded in text with spaces
-    m = _RE_EP_SE_SEARCH.search(text)
-    if m:
-        before = text[: m.start()].strip()
-        after = text[m.end() :].strip()
+    from etp_lib.media_scanner import find_episode_in_text
+
+    ep_match = find_episode_in_text(text)
+    if ep_match:
+        start, end, ep_token = ep_match
+        before = text[:start].strip()
+        after = text[end:].strip()
         result = []
         if before:
             result.append(Token(kind=TokenKind.TEXT, text=before))
-        t = Token(
-            kind=TokenKind.EPISODE,
-            text=m.group(0),
-            season=int(m.group(1)),
-            episode=int(m.group(2)),
-        )
-        if m.group(3):
-            t.version = int(m.group(3))
-        result.append(t)
+        result.append(ep_token)
         if after:
             result.append(Token(kind=TokenKind.TEXT, text=after))
         return result
@@ -910,17 +904,14 @@ def classify(tokens: list[Token]) -> list[Token]:
 
             # DOT_TEXT with embedded SxxExx (e.g., "S01E05----Is")
             if token.kind == TokenKind.DOT_TEXT:
-                m = _RE_EP_SE_SEARCH.search(text)
-                if m:
-                    t = Token(
-                        kind=TokenKind.EPISODE,
-                        text=m.group(0),
-                        season=int(m.group(1)),
-                        episode=int(m.group(2)),
-                    )
-                    if m.group(3):
-                        t.version = int(m.group(3))
-                    result.append(t)
+                from etp_lib.media_scanner import find_episode_in_text
+
+                ep_match = find_episode_in_text(text)
+                if ep_match:
+                    _, _, ep_token = ep_match
+                    result.append(ep_token)
+                    if ep_token.kind == TokenKind.EPISODE:
+                        seen_episode = True
                     continue
 
             # Scene trailing group: "H.264-VARYG" -> split into codec + group
