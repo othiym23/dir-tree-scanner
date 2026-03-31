@@ -235,6 +235,7 @@ _SOURCE_TYPE_MAP: dict[str, str] = {
     "vcd": "VCD",
     "cd-r": "CD-R",
     "cdr": "CD-R",
+    "raw": "HDTV",  # RAW HD captures — closest equivalent source type
 }
 
 _LANGUAGES = frozenset(

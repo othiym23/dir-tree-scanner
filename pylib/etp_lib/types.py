@@ -250,6 +250,7 @@ class MatchedFile:
             release_group=self.effective_release_group,
             is_dual_audio=self.effective_is_dual_audio,
             is_uncensored=self.effective_is_uncensored,
+            episodes=list(self.source.parsed.episodes),
         )
         return SourceFile(
             path=self.source.path,

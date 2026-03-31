@@ -1807,12 +1807,16 @@ def parse_component(text: str) -> ParsedMedia:
 def _merge_scanned_metadata(tokens: list[Token], pm: ParsedMedia) -> None:
     """Merge metadata tokens from scan_words into a ParsedMedia, filling gaps."""
     for t in tokens:
-        if t.kind == TokenKind.SOURCE and not pm.source_type:
-            mapped = _SOURCE_TYPE_MAP.get(t.text.lower(), "")
-            if mapped:
-                pm.source_type = mapped
-            if "remux" in t.text.lower():
-                pm.is_remux = True
+        if t.kind == TokenKind.SOURCE:
+            lower = t.text.lower()
+            if not pm.source_type:
+                mapped = _SOURCE_TYPE_MAP.get(lower, "")
+                if mapped:
+                    pm.source_type = mapped
+                if "remux" in lower:
+                    pm.is_remux = True
+            if not pm.streaming_service and lower in _STREAMING_SERVICES:
+                pm.streaming_service = t.text
         elif t.kind == TokenKind.REMUX and not pm.is_remux:
             pm.is_remux = True
             if not pm.source_type:
@@ -1914,6 +1918,10 @@ def parse_media_path(rel_path: str) -> ParsedMedia:
     # Audio codec fallback
     if not result.audio_codecs and dir_pm.audio_codecs:
         result.audio_codecs = dir_pm.audio_codecs
+
+    # Streaming service fallback
+    if not result.streaming_service and dir_pm.streaming_service:
+        result.streaming_service = dir_pm.streaming_service
 
     # Year fallback
     if result.year is None and dir_pm.year is not None:
