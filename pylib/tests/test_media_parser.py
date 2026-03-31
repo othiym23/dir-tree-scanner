@@ -1438,6 +1438,46 @@ class TestQARegression:
         assert pm.release_group == "DB"
         assert pm.bit_depth == 10
 
+    def test_version_after_space(self):
+        """S01E01 v2 — version as separate token after episode."""
+        pm = mp.parse_component("Jigokuraku - S01E01 v2 (BD 1080p HEVC) [Vodes].mkv")
+        assert pm.version == 2
+        assert pm.episode == 1
+
+    def test_truehd_5_1_compound(self):
+        """TrueHD.5.1 should be recognized as compound audio codec."""
+        pm = mp.parse_media_path(
+            "Golden.Kamuy.S01.1080p.BluRay.Remux.AVC.TrueHD.5.1-Hinna/"
+            "Golden.Kamuy.S01E04.1080p.BluRay.Remux.AVC.TrueHD.5.1-Hinna.mkv"
+        )
+        assert "TrueHD 5.1" in pm.audio_codecs
+        assert pm.release_group == "Hinna"
+
+    def test_resolution_with_p_suffix(self):
+        """1440x1080p should be recognized as resolution."""
+        pm = mp.parse_component(
+            "Show - 01 (BDRip 1440x1080p x265 HEVC FLAC 2.0)[sxales].mkv"
+        )
+        assert pm.resolution == "1440x1080p"
+
+    def test_ova_space_episode(self):
+        """OVA 01 with space should detect special + episode."""
+        pm = mp.parse_component(
+            "Show - OVA 01 Notice (BDRip 720x480p x265 HEVC AC3 2.0)[sxales].mkv"
+        )
+        assert pm.is_special is True
+        assert pm.episode == 1
+        assert pm.episode_title == "Notice"
+
+    def test_eraserhead_aac_2_0(self):
+        """AAC.2.0 should be parsed as compound audio, not episode."""
+        pm = mp.parse_component(
+            "Eraserhead.1977.Criterion.1080p.BluRay.x265.hevc.10bit.AAC.2.0-HeVK.mkv"
+        )
+        assert "AAC 2.0" in pm.audio_codecs
+        assert pm.episode is None
+        assert pm.year == 1977
+
     def test_dual_standalone_scene(self):
         """Scene-style DUAL (without Audio) should set is_dual_audio."""
         pm = mp.parse_component(

@@ -228,7 +228,9 @@ def _re_group(pattern: str, s: str, group: int = 1, flags: int = 0) -> str:
 # Resolution
 resolution: Parser = regex(
     r"(?:480|540|576|720|1080)[pi]|2160p|4[kK]", re.IGNORECASE
-).map(lambda s: Resolution(s)) | regex(r"\d{3,4}x\d{3,4}").map(lambda s: Resolution(s))
+).map(lambda s: Resolution(s)) | regex(r"\d{3,4}x\d{3,4}p?").map(
+    lambda s: Resolution(s)
+)
 
 # Video codec
 video_codec: Parser = _match_set_ci(_VIDEO_CODECS, VideoCodec)
@@ -256,7 +258,11 @@ _RE_AC = re.compile(
 def _audio_codec_parser(stream: str, index: int):
     m = _RE_AC.match(stream, index)
     if m:
-        return Result.success(m.end(), AudioCodec(m.group(0)))
+        # Normalize the separator dot between codec name and channel count:
+        # AAC.2.0 → AAC 2.0, TrueHD.5.1 → TrueHD 5.1
+        # But preserve AAC2.0 (no separator dot — digit directly follows letters)
+        text = re.sub(r"(?<=[a-zA-Z])\.(?=\d)", " ", m.group(0))
+        return Result.success(m.end(), AudioCodec(text))
     end = index
     while end < len(stream) and not stream[end].isspace():
         end += 1
@@ -641,6 +647,9 @@ _REDISTRIBUTORS = frozenset({"tgx", "eztv", "eztvx.to", "rartv", "ettv", "ion10"
 def _result_to_token(result: object, text: str) -> Token:
     """Convert a parsy primitive result to a Token for the existing pipeline."""
     kind = _TYPE_TO_KIND.get(type(result), TokenKind.UNKNOWN)
+    # Use normalized value from result when available (e.g., AAC.2.0 → AAC 2.0)
+    if isinstance(result, AudioCodec):
+        text = result.value
     token = Token(kind=kind, text=text)
 
     # Populate numeric fields
@@ -865,14 +874,27 @@ def scan_dot_segments(text: str) -> list[Token]:
             continue
 
         # Try multi-segment compounds first (longest match)
-        # Check 3-segment: "MA.5.1", "FLAC.2.0"
+        # Check 3-segment: "MA.5.1", "FLAC.2.0", "TrueHD.5.1"
         if i + 2 < len(raw_parts):
-            compound3 = f"{part}.{raw_parts[i + 1]}.{raw_parts[i + 2]}"
+            third = raw_parts[i + 2]
+            compound3 = f"{part}.{raw_parts[i + 1]}.{third}"
             token = _try_recognize(compound3)
             if token is not None:
                 tokens.append(token)
                 i += 3
                 continue
+            # Strip trailing -suffix from third part: "TrueHD.5.1-Hinna"
+            third_base = _RE_DASH_SUFFIX.sub("", third)
+            if third_base != third:
+                compound3_stripped = f"{part}.{raw_parts[i + 1]}.{third_base}"
+                token = _try_recognize(compound3_stripped)
+                if token is not None:
+                    tokens.append(token)
+                    suffix = third[len(third_base) + 1 :]
+                    if suffix:
+                        tokens.append(Token(kind=TokenKind.RELEASE_GROUP, text=suffix))
+                    i += 3
+                    continue
 
         # Check 2-segment: "H.264", "AAC2.0"
         if i + 1 < len(raw_parts):
@@ -958,6 +980,7 @@ _EMBEDDED_RECOGNIZERS = (
     episode_multi_se,  # S01E01-E06
     episode_se,  # S01E05
     season_special,  # S01OVA, S03OP
+    special,  # OVA, SP1, OAD, ONA
     episode_jp,  # 第01話
     season_jp,  # 第1期
     season_word,  # 4th Season, Season 01
@@ -1463,10 +1486,11 @@ def classify(tokens: list[Token]) -> list[Token]:
                     result.append(Token(kind=TokenKind.YEAR, text=text, year=y))
                     continue
 
-            # Known metadata keyword?
-            kind = classify_text(text)
-            if kind is not None:
-                result.append(Token(kind=kind, text=text))
+            # Known metadata keyword? Use the full token from _try_recognize
+            # to preserve numeric fields (version, season, episode, etc.)
+            recognized_meta = _try_recognize(text)
+            if recognized_meta is not None:
+                result.append(recognized_meta)
                 continue
 
             # Try splitting TEXT with embedded episode/season markers
