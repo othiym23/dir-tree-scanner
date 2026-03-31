@@ -102,6 +102,7 @@ Episode markers (most distinctive):
 
 Bonus keywords:
   bonus_en            NCOP, NC OP1, Creditless ED
+  bonus_jp            映像特典, ノンテロップOP, PV, 予告, 告知CM
 
 Technical metadata (compound before simple):
   audio_codec         AAC2.0, DTS-HD MA, FLAC, DD+2.0
@@ -143,8 +144,8 @@ Each recognizer returns a frozen dataclass on success:
 | `SeasonJP`       | `season`                                    | SEASON      |
 | `SeasonWord`     | `season`                                    | SEASON      |
 | `SeasonOnly`     | `season`                                    | SEASON      |
-| `SeasonSpecial`  | `season`, `tag`, `number?`                  | EPISODE     |
-| `Special`        | `tag`, `number?`                            | EPISODE     |
+| `SeasonSpecial`  | `season`, `tag`, `number?`                  | SPECIAL     |
+| `Special`        | `tag`, `number?`                            | SPECIAL     |
 | `BatchRange`     | `start`, `end`                              | BATCH_RANGE |
 | `Version`        | `number`                                    | VERSION     |
 | `Year`           | `value`                                     | YEAR        |
@@ -206,8 +207,10 @@ Iterates classified tokens to populate `ParsedMedia`:
 - **Bilingual titles**: `/` or `|` in series name splits into `series_name` and
   `series_name_alt` (only when one side has CJK and the other doesn't, to avoid
   breaking titles like "Fate/stay night")
-- **Special detection** (`_check_special`): season 0, decimal episodes, SP/OVA
-  tags, S##OP/S##ED season-special patterns
+- **Special detection**: `TokenKind.SPECIAL` tokens (SP/OVA/OAD/ONA, S##OVA,
+  S##OP, S##ED) set `is_special`, `special_tag`, and `bonus_type` directly.
+  Season 0 and decimal episodes are handled by `_check_special` on EPISODE
+  tokens
 - **Multi-episode expansion**: `EpisodeMultiSE` populates `episodes: list[int]`
   with the expanded range (capped at 100 episodes)
 - **Season upgrade**: when a bare episode (no season) is followed by an

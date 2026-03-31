@@ -118,8 +118,10 @@ Sonarr-inspired enhancements (using `~/projects/sonarr` as reference):
 - LoliHouse dual numbering: bare `001` + `(S01E01)` → season from parens
 - Bilingual title splitting: CJK-aware `/` and `|` → `series_name_alt`
 
-`DualAudio`, `Uncensored`, and `Edition` have dedicated `TokenKind` values
-consumed in `_build_parsed_media` — no post-pass regex searches needed.
+`DualAudio`, `Uncensored`, `Edition`, and `Special`/`SeasonSpecial` have
+dedicated `TokenKind` values consumed directly in `_build_parsed_media`.
+Japanese bonus keywords (`bonus_jp` recognizer) are detected at classification
+time alongside English keywords (`bonus_en`).
 
 `parse_media_path` handles full relative paths by parsing directory and filename
 components separately, then merging: the filename is primary for
