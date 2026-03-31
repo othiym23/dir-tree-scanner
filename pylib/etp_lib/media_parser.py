@@ -1212,6 +1212,8 @@ def tokenize(path: str) -> list[Token]:
 # ---------------------------------------------------------------------------
 
 _RE_SUBTITLE_SOFT = re.compile(r"softsub", re.IGNORECASE)
+# Split letter→digit before resolution patterns in underscored parens: BD1080p → BD 1080p
+_RE_PAREN_RES_SPLIT = re.compile(r"([a-zA-Z])(\d+p\b)")
 
 _RE_CRC32 = re.compile(r"^[0-9A-Fa-f]{8}$")
 
@@ -1333,13 +1335,12 @@ def _classify_paren(token: Token) -> Token | list[Token]:
     if _RE_SUBTITLE_SOFT.search(text):
         return Token(kind=TokenKind.SUBTITLE_INFO, text=text)
 
-    # Technical metadata paren: contains resolution/codec/source keywords.
-    # Normalize underscores to spaces for old fansub convention (10bit_BD1080p_x265)
-    # Also split at letter/digit boundaries for compounds like BD1080p
-    normalized = text.replace("_", " ") if "_" in text else text
+    # Old fansub convention: underscores as separators (10bit_BD1080p_x265)
     if "_" in text:
-        # Split letter→digit only before resolution-like patterns (NNNp)
-        normalized = re.sub(r"([a-zA-Z])(\d+p\b)", r"\1 \2", normalized)
+        normalized = text.replace("_", " ")
+        normalized = _RE_PAREN_RES_SPLIT.sub(r"\1 \2", normalized)
+    else:
+        normalized = text
     if count_metadata_words(normalized) >= 2:
         return scan_words(normalized)
 

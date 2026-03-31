@@ -6,6 +6,7 @@ primitives.  No parsing logic here — just data definitions.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -328,6 +329,10 @@ def normalize_resolution(height: int, width: int = 0, scan_type: str = "p") -> s
     return f"{height}{scan_type}"
 
 
+_RE_RES_NP = re.compile(r"^(\d{3,4})([pi])$", re.IGNORECASE)
+_RE_RES_WXH = re.compile(r"^(\d{3,4})x(\d{3,4})([pi])?$", re.IGNORECASE)
+
+
 def parse_resolution_text(text: str) -> str:
     """Normalize a resolution string from a filename to a standard tag.
 
@@ -336,23 +341,18 @@ def parse_resolution_text(text: str) -> str:
     """
     text = text.strip()
 
-    # Already a standard tag like "1080p", "720i", "4K"
     if text.upper() == "4K":
         return "4K"
-    import re
 
-    # NNNp or NNNi format
-    m = re.match(r"^(\d{3,4})([pi])$", text, re.IGNORECASE)
+    m = _RE_RES_NP.match(text)
     if m:
         return normalize_resolution(int(m.group(1)), scan_type=m.group(2).lower())
 
-    # WxH or WxHp/WxHi format
-    m = re.match(r"^(\d{3,4})x(\d{3,4})([pi])?$", text, re.IGNORECASE)
+    m = _RE_RES_WXH.match(text)
     if m:
-        width = int(m.group(1))
         height = int(m.group(2))
         scan = m.group(3).lower() if m.group(3) else "p"
-        return normalize_resolution(height, width=width, scan_type=scan)
+        return normalize_resolution(height, scan_type=scan)
 
     return text
 
