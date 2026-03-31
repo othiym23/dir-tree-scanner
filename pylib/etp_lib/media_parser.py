@@ -255,13 +255,16 @@ _RE_AC = re.compile(
 )
 
 
+_RE_AC_DOT_NORM = re.compile(r"(?<=[a-zA-Z])\.(?=\d)")
+
+
 def _audio_codec_parser(stream: str, index: int):
     m = _RE_AC.match(stream, index)
     if m:
         # Normalize the separator dot between codec name and channel count:
         # AAC.2.0 → AAC 2.0, TrueHD.5.1 → TrueHD 5.1
         # But preserve AAC2.0 (no separator dot — digit directly follows letters)
-        text = re.sub(r"(?<=[a-zA-Z])\.(?=\d)", " ", m.group(0))
+        text = _RE_AC_DOT_NORM.sub(" ", m.group(0))
         return Result.success(m.end(), AudioCodec(text))
     end = index
     while end < len(stream) and not stream[end].isspace():
@@ -851,6 +854,32 @@ def scan_words(text: str) -> list[Token]:
     return tokens
 
 
+def _try_compound_dash_strip(prefix: str, last_part: str) -> list[Token] | None:
+    """Try recognizing a compound after stripping a trailing -suffix.
+
+    Given a prefix (e.g., "H" or "TrueHD.5") and a last_part with a dash
+    suffix (e.g., "264-VARYG" or "1-Hinna"), strips the suffix from
+    last_part, tries recognizing prefix.base as a compound, and if
+    successful returns the compound token + suffix token(s).
+    """
+    base = _RE_DASH_SUFFIX.sub("", last_part)
+    if base == last_part:
+        return None
+    compound = f"{prefix}.{base}"
+    token = _try_recognize(compound)
+    if token is None:
+        return None
+    result = [token]
+    suffix = last_part[len(base) + 1 :]
+    if suffix:
+        suffix_token = _try_recognize(suffix)
+        if suffix_token is not None:
+            result.append(suffix_token)
+        else:
+            result.append(Token(kind=TokenKind.RELEASE_GROUP, text=suffix))
+    return result
+
+
 def scan_dot_segments(text: str) -> list[Token]:
     """Scan dot-separated scene-style text.
 
@@ -884,21 +913,17 @@ def scan_dot_segments(text: str) -> list[Token]:
                 i += 3
                 continue
             # Strip trailing -suffix from third part: "TrueHD.5.1-Hinna"
-            third_base = _RE_DASH_SUFFIX.sub("", third)
-            if third_base != third:
-                compound3_stripped = f"{part}.{raw_parts[i + 1]}.{third_base}"
-                token = _try_recognize(compound3_stripped)
-                if token is not None:
-                    tokens.append(token)
-                    suffix = third[len(third_base) + 1 :]
-                    if suffix:
-                        tokens.append(Token(kind=TokenKind.RELEASE_GROUP, text=suffix))
+            if "-" in third:
+                stripped_tokens = _try_compound_dash_strip(
+                    f"{part}.{raw_parts[i + 1]}", third
+                )
+                if stripped_tokens is not None:
+                    tokens.extend(stripped_tokens)
                     i += 3
                     continue
 
         # Check 2-segment: "H.264", "AAC2.0"
         if i + 1 < len(raw_parts):
-            # Also try with trailing "-suffix" stripped for "H.264-VARYG"
             next_part = raw_parts[i + 1]
             compound2 = f"{part}.{next_part}"
             token = _try_recognize(compound2)
@@ -908,23 +933,10 @@ def scan_dot_segments(text: str) -> list[Token]:
                 continue
 
             # Strip trailing -suffix and try: "H" + "264-VARYG" → "H.264"
-            next_base = _RE_DASH_SUFFIX.sub("", next_part)
-            if next_base != next_part:
-                compound2_stripped = f"{part}.{next_base}"
-                token = _try_recognize(compound2_stripped)
-                if token is not None:
-                    tokens.append(token)
-                    # The suffix after the dash is the release group
-                    # (scene convention: codec-GROUP)
-                    suffix = next_part[len(next_base) + 1 :]
-                    if suffix:
-                        suffix_token = _try_recognize(suffix)
-                        if suffix_token is not None:
-                            tokens.append(suffix_token)
-                        else:
-                            tokens.append(
-                                Token(kind=TokenKind.RELEASE_GROUP, text=suffix)
-                            )
+            if "-" in next_part:
+                stripped_tokens = _try_compound_dash_strip(part, next_part)
+                if stripped_tokens is not None:
+                    tokens.extend(stripped_tokens)
                     i += 2
                     continue
 
