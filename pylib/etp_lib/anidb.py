@@ -10,7 +10,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 from etp_lib.paths import cache_dir
-from etp_lib.types import CACHE_MAX_AGE_SECONDS, AnimeInfo, Episode
+from etp_lib.types import CACHE_MAX_AGE_SECONDS, AnimeInfo, Episode, EpisodeType
 
 # AniDB's HTTP API only supports plaintext HTTP on port 9001 — there is no
 # HTTPS endpoint.  The "client" and "clientver" params are a registered app
@@ -26,13 +26,13 @@ _ANIDB_EP_TRAILER = "4"
 _ANIDB_EP_PARODY = "5"
 _ANIDB_EP_OTHER = "6"
 
-_ANIDB_EP_TYPE_MAP = {
-    _ANIDB_EP_REGULAR: "regular",
-    _ANIDB_EP_SPECIAL: "special",
-    _ANIDB_EP_CREDIT: "credit",
-    _ANIDB_EP_TRAILER: "trailer",
-    _ANIDB_EP_PARODY: "parody",
-    _ANIDB_EP_OTHER: "other",
+_ANIDB_EP_TYPE_MAP: dict[str, EpisodeType] = {
+    _ANIDB_EP_REGULAR: EpisodeType.REGULAR,
+    _ANIDB_EP_SPECIAL: EpisodeType.SPECIAL,
+    _ANIDB_EP_CREDIT: EpisodeType.CREDIT,
+    _ANIDB_EP_TRAILER: EpisodeType.TRAILER,
+    _ANIDB_EP_PARODY: EpisodeType.PARODY,
+    _ANIDB_EP_OTHER: EpisodeType.OTHER,
 }
 
 
@@ -106,7 +106,7 @@ def _parse_anidb_xml(xml_text: str, aid: int) -> AnimeInfo:
             continue
 
         ep_type_str = epno_elem.get("type", _ANIDB_EP_REGULAR)
-        ep_type = _ANIDB_EP_TYPE_MAP.get(ep_type_str, "other")
+        ep_type = _ANIDB_EP_TYPE_MAP.get(ep_type_str, EpisodeType.OTHER)
         epno_text = (epno_elem.text or "").strip()
 
         # Parse episode number
@@ -144,7 +144,7 @@ def _parse_anidb_xml(xml_text: str, aid: int) -> AnimeInfo:
         )
 
     # Sort episodes: regulars by number, then specials by tag
-    episodes.sort(key=lambda e: (e.ep_type != "regular", e.number))
+    episodes.sort(key=lambda e: (e.ep_type != EpisodeType.REGULAR, e.number))
 
     return AnimeInfo(
         anidb_id=aid,

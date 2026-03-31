@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import platform
 import re
+import readline as _rl  # enables line editing in input()
 import subprocess
 import sys
 import zlib
@@ -15,6 +16,12 @@ from etp_lib.types import MediaInfo, SourceFile
 
 _IS_LINUX = platform.system() == "Linux"
 
+# macOS uses libedit which needs different tab-complete binding
+if "libedit" in (_rl.__doc__ or ""):
+    _rl.parse_and_bind("bind ^I rl_complete")
+else:
+    _rl.parse_and_bind("tab: complete")
+
 
 # ---------------------------------------------------------------------------
 # Interactive prompts
@@ -22,9 +29,22 @@ _IS_LINUX = platform.system() == "Linux"
 
 
 def prompt_value(label: str, default: str = "") -> str:
-    """Prompt for a value with an optional default."""
+    """Prompt for a value with an optional editable default.
+
+    When a default is provided, it is pre-filled in the input buffer so
+    the user can edit it in place (rather than retyping from scratch).
+    """
     if default:
-        raw = input(f"{label} [{default}]: ").strip()
+
+        def _prefill():
+            _rl.insert_text(default)
+            _rl.redisplay()
+
+        _rl.set_startup_hook(_prefill)
+        try:
+            raw = input(f"{label}: ").strip()
+        finally:
+            _rl.set_startup_hook()
         return raw if raw else default
     return input(f"{label}: ").strip()
 
@@ -59,10 +79,10 @@ def verify_hash(source: SourceFile) -> tuple[bool, str] | None:
     ``(False, actual_hash)`` if it mismatches, or ``None`` if no hash is
     present in the filename.
     """
-    if not source.hash_code:
+    if not source.parsed.hash_code:
         return None
     actual = compute_crc32(source.path)
-    return (actual.upper() == source.hash_code.upper(), actual)
+    return (actual.upper() == source.parsed.hash_code.upper(), actual)
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +108,7 @@ def _extract_key_metadata(sf: SourceFile) -> tuple[str, str, str, str]:
     if sf.media and sf.media.audio_tracks:
         audio = "+".join(unique_audio_codecs(sf.media.audio_tracks))
     codec = sf.media.video_codec if sf.media else ""
-    return (sf.release_group, sf.source_type, codec, audio)
+    return (sf.parsed.release_group, sf.parsed.source_type, codec, audio)
 
 
 def check_destination_conflict(

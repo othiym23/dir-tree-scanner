@@ -16,24 +16,32 @@ import kdl
 from etp_lib.conflicts import (
     copy_reflink,
     handle_conflict,
+    prompt_confirm,
     prompt_value,
     verify_hash,
 )
-from etp_lib.media_parser import normalize_for_matching, parse_component
+from etp_lib.media_parser import normalize_for_matching
 from etp_lib.naming import format_episode_filename, format_series_dirname
-from etp_lib.types import AnimeInfo, Episode, ManifestEntry, SourceFile
+from etp_lib.types import (
+    AnimeInfo,
+    BonusType,
+    Episode,
+    EpisodeType,
+    ManifestEntry,
+    SourceFile,
+)
 
 # HamaTV-compatible special episode ranges.
 # Offset by +20 from each range start to avoid collisions with
 # AniDB-tracked specials that may be added later.
 _HAMATV_RANGES: dict[str, int] = {
-    "NCOP": 171,  # s0e151+ range, +20 buffer
-    "NCED": 191,  # separate from NCOP to avoid collisions
-    "PV": 321,  # s0e301+ range, +20 buffer
-    "Preview": 321,  # alias for PV — same HamaTV category
-    "CM": 521,  # s0e501+ range, +20 buffer
-    "Bonus": 521,  # alias for CM — same HamaTV category
-    "Menu": 921,  # s0e901+ range, +20 buffer
+    BonusType.NCOP: 171,  # s0e151+ range, +20 buffer
+    BonusType.NCED: 191,  # separate from NCOP to avoid collisions
+    BonusType.PV: 321,  # s0e301+ range, +20 buffer
+    BonusType.PREVIEW: 321,  # alias for PV — same HamaTV category
+    BonusType.CM: 521,  # s0e501+ range, +20 buffer
+    BonusType.BONUS: 521,  # alias for CM — same HamaTV category
+    BonusType.MENU: 921,  # s0e901+ range, +20 buffer
 }
 
 
@@ -50,13 +58,13 @@ def _match_bonus_to_anidb_special(
     if not specials:
         return None
 
-    if bonus_type == "NCOP":
+    if bonus_type == BonusType.NCOP:
         for ep in specials:
-            if ep.ep_type == "credit" and "opening" in ep.title_en.lower():
+            if ep.ep_type == EpisodeType.CREDIT and "opening" in ep.title_en.lower():
                 return ep
-    elif bonus_type == "NCED":
+    elif bonus_type == BonusType.NCED:
         for ep in specials:
-            if ep.ep_type == "credit" and "ending" in ep.title_en.lower():
+            if ep.ep_type == EpisodeType.CREDIT and "ending" in ep.title_en.lower():
                 return ep
     elif episode_title:
         ep_norm = normalize_for_matching(episode_title)
@@ -91,13 +99,20 @@ def build_manifest_entries(
     destination paths using defaults.
     """
     entries: list[ManifestEntry] = []
-    hamatv_counters: dict[str, int] = {}
     # Track AniDB specials already matched so each is used at most once
     matched_special_tags: set[str] = set()
-    specials = [ep for ep in info.episodes if ep.ep_type != "regular"]
+    specials = [ep for ep in info.episodes if ep.ep_type != EpisodeType.REGULAR]
     specials_by_num: dict[int, Episode] = {
         ep.number: ep for ep in specials if ep.season == 0
     }
+
+    # When using TVDB, start HamaTV ranges after the highest existing
+    # TVDB special number to avoid collisions in the single Specials/ dir.
+    max_special_num = max((ep.number for ep in specials_by_num.values()), default=0)
+    hamatv_counters: dict[str, int] = {}
+    if info.tvdb_id is not None and max_special_num > 0:
+        for key, default_start in _HAMATV_RANGES.items():
+            hamatv_counters[key] = max(default_start, max_special_num + 20)
     total = len(parsed)
     for i, sf in enumerate(parsed, 1):
         print(f"  Analyzing {i}/{total}: {sf.path.name}")
@@ -116,40 +131,64 @@ def build_manifest_entries(
         if hash_result is not None:
             ok, actual = hash_result
             if not ok:
-                print(f"    CRC32 MISMATCH: expected {sf.hash_code}, got {actual}")
-                sf.hash_code = ""
+                print(
+                    f"    CRC32 MISMATCH: expected {sf.parsed.hash_code}, got {actual}"
+                )
+                sf.parsed.hash_code = ""
                 hash_failed = True
             elif verbose:
-                print(f"    CRC32 verified: {sf.hash_code}")
+                print(f"    CRC32 verified: {sf.parsed.hash_code}")
 
-        ep_number = sf.parsed_episode
-        season = sf.parsed_season if sf.parsed_season is not None else 1
-        is_special = season == 0
+        ep_number = sf.parsed.episode
+        season = sf.parsed.season if sf.parsed.season is not None else 1
+        is_special = season == 0 or sf.parsed.is_special
         special_tag = ""
         episode_name = ""
         is_unmatched_special = False
 
-        file_pm = parse_component(sf.path.name)
-        bonus_type = file_pm.bonus_type
+        bonus_type = sf.parsed.bonus_type
+        episode_title = sf.parsed.episode_title
 
-        if ep_number is not None and is_special:
-            # TVDB specials (s00eXX): look up by special episode number
+        if ep_number is not None and is_special and not bonus_type:
             ep = specials_by_num.get(ep_number)
             if ep is not None:
                 episode_name = ep.title_en
                 special_tag = ep.special_tag
-        elif ep_number is not None:
+                season = 0
+        elif ep_number is not None and not is_special:
             episode_name = info.find_episode_title(ep_number, season)
+        elif ep_number is not None and is_special and bonus_type:
+            # Parser detected both an episode number and a bonus type
+            # (e.g. S03ED from SeasonSpecial) — try bonus matching first
+            available = [
+                ep for ep in specials if ep.special_tag not in matched_special_tags
+            ]
+            matched_ep = _match_bonus_to_anidb_special(
+                bonus_type, episode_title, available
+            )
+            if matched_ep is not None:
+                special_tag = sf.parsed.special_tag or matched_ep.special_tag
+                episode_name = episode_title or matched_ep.title_en
+                matched_special_tags.add(matched_ep.special_tag)
+                sf.parsed.episode = matched_ep.number
+                sf.parsed.season = 0
+                ep_number = matched_ep.number
+                season = 0
+            else:
+                # Use parser special tag directly (e.g. S03OP, S01OVA)
+                special_tag = sf.parsed.special_tag
+                episode_name = episode_title
+                season = 0
         elif bonus_type:
             available = [
                 ep for ep in specials if ep.special_tag not in matched_special_tags
             ]
             matched_ep = _match_bonus_to_anidb_special(
-                bonus_type, file_pm.episode_title, available
+                bonus_type, episode_title, available
             )
             if matched_ep is not None:
                 is_special = True
-                if bonus_type in ("NCOP", "NCED"):
+                if bonus_type in (BonusType.NCOP, BonusType.NCED):
                     # Build tag like NCOP1, NCED1a from AniDB title.
                     # AniDB titles: "Opening", "Opening 1", "Ending 1a"
                     m = re.search(r"(\d+)([a-z]*)\s*$", matched_ep.title_en)
@@ -160,10 +199,10 @@ def build_manifest_entries(
                 else:
                     special_tag = matched_ep.special_tag
                 ep_number = matched_ep.number
-                episode_name = file_pm.episode_title or matched_ep.title_en
+                episode_name = episode_title or matched_ep.title_en
                 matched_special_tags.add(matched_ep.special_tag)
-                sf.parsed_episode = ep_number
-                sf.parsed_season = 0
+                sf.parsed.episode = ep_number
+                sf.parsed.season = 0
             else:
                 # Assign HamaTV-compatible s0e number, tagged (todo)
                 is_special = True
@@ -171,12 +210,12 @@ def build_manifest_entries(
                 ep_number = hamatv_counters.get(bonus_type, range_start)
                 hamatv_counters[bonus_type] = ep_number + 1
                 episode_name = bonus_type
-                if file_pm.episode_title:
-                    episode_name = f"{bonus_type} - {file_pm.episode_title}"
+                if episode_title:
+                    episode_name = f"{bonus_type} - {episode_title}"
                 season = 0
                 is_unmatched_special = True
-                sf.parsed_episode = ep_number
-                sf.parsed_season = 0
+                sf.parsed.episode = ep_number
+                sf.parsed.season = 0
 
         # Build destination path
         if ep_number is None:
@@ -271,7 +310,7 @@ def write_manifest(
 
     for group_key in sorted(groups.keys()):
         group_entries = sorted(
-            groups[group_key], key=lambda e: e.source.parsed_episode or 0
+            groups[group_key], key=lambda e: e.source.parsed.episode or 0
         )
         if group_key == "specials":
             lines.append("specials {")
@@ -281,7 +320,7 @@ def write_manifest(
             lines.append(f"season {season_num} {{")
 
         for entry in group_entries:
-            ep_num = entry.source.parsed_episode or 0
+            ep_num = entry.source.parsed.episode or 0
             tag = "(todo)" if entry.is_todo else ""
             if entry.hash_failed:
                 lines.append("  // CRC32 MISMATCH — hash stripped from destination")
@@ -353,6 +392,12 @@ def parse_manifest(
     extras: list[tuple[Path, Path]] = []
     errors: list[str] = []
 
+    def _ep_label(ep_node: object, group_name: str) -> str:
+        """Format a label like 'episode 5 in season 1' for error messages."""
+        ep_arg = getattr(ep_node, "args", [])
+        ep_str = str(ep_arg[0]) if ep_arg else "?"
+        return f"episode {ep_str} in {group_name}"
+
     for group_node in doc.nodes:
         # Extras section: non-video files
         if group_node.name == "extras":
@@ -365,7 +410,13 @@ def parse_manifest(
                 for child in file_node.nodes:
                     if child.name == "dest" and child.args:
                         dest_name = str(child.args[0])
-                if source_path and dest_name:
+                if not source_path:
+                    errors.append("  extras file: missing source path")
+                elif not dest_name:
+                    errors.append(
+                        f"  extras file '{Path(source_path).name}': missing dest"
+                    )
+                else:
                     extras.append((Path(source_path), extras_dir / dest_name))
             continue
 
@@ -373,7 +424,11 @@ def parse_manifest(
         if group_node.name == "specials":
             dest_subdir = series_dir / "Specials"
         elif group_node.name == "season" and group_node.args:
-            season_num = int(group_node.args[0])
+            try:
+                season_num = int(group_node.args[0])
+            except ValueError, TypeError:
+                errors.append(f"  invalid season number: '{group_node.args[0]}'")
+                continue
             dest_subdir = series_dir / f"Season {season_num:02d}"
         else:
             continue
@@ -381,13 +436,11 @@ def parse_manifest(
         for ep_node in group_node.nodes:
             if ep_node.name != "episode":
                 continue
+            label = _ep_label(ep_node, group_node.name)
 
             # Check for (todo) tag
             if ep_node.tag == "todo":
-                errors.append(
-                    f"  episode {ep_node.args[0] if ep_node.args else '?'}"
-                    f" in {group_node.name}: unresolved (todo) entry"
-                )
+                errors.append(f"  {label}: unresolved (todo) entry")
                 continue
 
             # Extract source and dest from children
@@ -400,17 +453,24 @@ def parse_manifest(
                     dest_name = str(child.args[0])
 
             if not dest_name:
-                errors.append(
-                    f"  episode {ep_node.args[0] if ep_node.args else '?'}"
-                    f" in {group_node.name}: missing dest"
-                )
+                errors.append(f"  {label}: missing dest")
+                continue
+
+            if not source_name:
+                errors.append(f"  {label}: missing source")
                 continue
 
             sf = known_sources.get(source_name)
             if sf is None:
-                errors.append(
-                    f"  episode in {group_node.name}: unknown source '{source_name}'"
-                )
+                # Show a few available sources to help the user find the right path
+                available = list(known_sources.keys())[:5]
+                hint = ""
+                if available:
+                    hint = (
+                        f"\n    available sources ({len(known_sources)} total):"
+                        + "".join(f"\n      {p}" for p in available)
+                    )
+                errors.append(f"  {label}: unknown source '{source_name}'{hint}")
                 continue
 
             entries.append((sf, dest_subdir / dest_name))
@@ -491,3 +551,166 @@ def execute_manifest(
                 failed += 1
 
     return success, failed, triaged_paths
+
+
+# ---------------------------------------------------------------------------
+# ManifestWorkflow — encapsulates the build → write → edit → parse → execute
+# sequence used by both triage and series commands.
+# ---------------------------------------------------------------------------
+
+
+class ManifestWorkflow:
+    """Orchestrates the manifest editing workflow for a batch of files.
+
+    Encapsulates the full sequence: build manifest entries (with mediainfo
+    analysis and CRC verification), write to a temp file, open in $EDITOR
+    for user editing, parse the result, and execute the copy operations.
+
+    Usage::
+
+        wf = ManifestWorkflow(parsed, info, concise_name, series_dir,
+                              verbose=True, analyze_file_fn=analyze_file)
+        success, failed, triaged = wf.run(
+            dry_run=False,
+            extras=extras,
+            parse_source_filename_fn=parse_source_filename,
+        )
+    """
+
+    def __init__(
+        self,
+        parsed: list[SourceFile],
+        info: AnimeInfo,
+        concise_name: str,
+        series_dir: Path,
+        verbose: bool = False,
+        analyze_file_fn=None,
+    ) -> None:
+        self.parsed = parsed
+        self.info = info
+        self.concise_name = concise_name
+        self.series_dir = series_dir
+        self.verbose = verbose
+        self.analyze_file_fn = analyze_file_fn
+
+        self.entries: list[ManifestEntry] = []
+        self.manifest_path: Path | None = None
+
+    def build(self) -> list[ManifestEntry]:
+        """Build manifest entries (mediainfo + CRC32 verification)."""
+        print()
+        self.entries = build_manifest_entries(
+            self.parsed,
+            self.info,
+            self.concise_name,
+            self.series_dir,
+            self.verbose,
+            analyze_file_fn=self.analyze_file_fn,
+        )
+        return self.entries
+
+    def write(self, extras: list[Path] | None = None) -> Path:
+        """Write manifest to a temp file for editing."""
+        self.manifest_path = write_manifest(
+            self.entries,
+            self.info,
+            self.concise_name,
+            self.series_dir,
+            extras=extras or [],
+        )
+        return self.manifest_path
+
+    def edit_loop(
+        self,
+    ) -> tuple[list[tuple[SourceFile, Path]], list[tuple[Path, Path]]]:
+        """Open editor, parse, and retry on errors. Returns (entries, extras).
+
+        Raises ValueError if the user cancels or the manifest is empty.
+        """
+        assert self.manifest_path is not None
+        known_sources: dict[str, SourceFile] = {
+            str(e.source.path): e.source for e in self.entries
+        }
+
+        while True:
+            if not open_editor(self.manifest_path):
+                raise ValueError("Editor failed")
+
+            parsed_entries, errors, extra_entries = parse_manifest(
+                self.manifest_path, known_sources, self.series_dir
+            )
+
+            if errors:
+                print(f"\n  Manifest has {len(errors)} error(s):")
+                for err in errors:
+                    print(err)
+                if prompt_confirm("\n  Re-open editor to fix?"):
+                    continue
+                raise ValueError("User cancelled after errors")
+
+            if not parsed_entries:
+                raise ValueError("Manifest is empty")
+
+            return parsed_entries, extra_entries
+
+    def execute(
+        self,
+        parsed_entries: list[tuple[SourceFile, Path]],
+        extra_entries: list[tuple[Path, Path]],
+        dry_run: bool,
+        parse_source_filename_fn=None,
+    ) -> tuple[int, int, list[Path]]:
+        """Execute the manifest: copy files and extras."""
+        print(f"\n  Copying {len(parsed_entries)} file(s)...")
+        result = execute_manifest(
+            parsed_entries,
+            dry_run,
+            self.verbose,
+            parse_source_filename_fn=parse_source_filename_fn,
+            analyze_file_fn=self.analyze_file_fn,
+        )
+
+        if extra_entries:
+            print(f"  Copying {len(extra_entries)} extra(s)...")
+            for src, dst in extra_entries:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                copy_reflink(src, dst, dry_run=dry_run)
+
+        return result
+
+    def cleanup(self) -> None:
+        """Remove the temp manifest file."""
+        if self.manifest_path is not None:
+            try:
+                self.manifest_path.unlink()
+            except OSError:
+                pass
+
+    def run(
+        self,
+        dry_run: bool = False,
+        extras: list[Path] | None = None,
+        parse_source_filename_fn=None,
+    ) -> tuple[int, int, list[Path]]:
+        """Run the full workflow: build → write → edit → execute → cleanup.
+
+        Returns ``(success, failed, triaged_paths)``.
+        """
+        self.build()
+        self.write(extras=extras)
+        file_count = len(self.parsed)
+
+        try:
+            parsed_entries, extra_entries = self.edit_loop()
+        except ValueError as e:
+            print(f"  {e}. Skipping group.")
+            return 0, file_count, []
+        finally:
+            self.cleanup()
+
+        return self.execute(
+            parsed_entries,
+            extra_entries,
+            dry_run,
+            parse_source_filename_fn=parse_source_filename_fn,
+        )

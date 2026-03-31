@@ -8,7 +8,13 @@ import urllib.error
 import urllib.request
 
 from etp_lib.paths import cache_dir
-from etp_lib.types import CACHE_MAX_AGE_SECONDS, TVDB_MAX_PAGES, AnimeInfo, Episode
+from etp_lib.types import (
+    CACHE_MAX_AGE_SECONDS,
+    TVDB_MAX_PAGES,
+    AnimeInfo,
+    Episode,
+    EpisodeType,
+)
 
 _TVDB_API_BASE = "https://api4.thetvdb.com/v4"
 
@@ -81,7 +87,7 @@ def _parse_tvdb_json(
         ep_name = ep.get("name", "")
 
         is_special = season_num == 0
-        ep_type = "special" if is_special else "regular"
+        ep_type = EpisodeType.SPECIAL if is_special else EpisodeType.REGULAR
         special_tag = f"s0e{ep_num:02d}" if is_special else ""
 
         episodes.append(
@@ -95,7 +101,7 @@ def _parse_tvdb_json(
             )
         )
 
-    episodes.sort(key=lambda e: (e.ep_type != "regular", e.number))
+    episodes.sort(key=lambda e: (e.ep_type != EpisodeType.REGULAR, e.number))
 
     return AnimeInfo(
         anidb_id=None,

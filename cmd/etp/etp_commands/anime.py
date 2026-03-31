@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import re
+import readline  # noqa: F401 — enables line editing in input()
 import shutil
 import subprocess
 import sys
@@ -36,14 +37,7 @@ from etp_lib.conflicts import (
     prompt_value,
     verify_hash,
 )
-from etp_lib.manifest import (
-    build_manifest_entries,
-    escape_kdl,
-    execute_manifest,
-    open_editor,
-    parse_manifest,
-    write_manifest,
-)
+from etp_lib.manifest import ManifestWorkflow, escape_kdl
 from etp_lib.mediainfo import analyze_file
 from etp_lib.naming import (
     build_metadata_block,  # noqa: F401 (re-export for tests)
@@ -60,8 +54,12 @@ from etp_lib.types import (
     DEFAULT_DOWNLOADS_DIR,  # noqa: F401 (re-export for tests)
     DownloadIndex,
     Episode,  # noqa: F401 (re-export for tests)
+    EpisodeType,
     GroupDefaults,
+    MatchedFile,
     MediaInfo,  # noqa: F401 (re-export for tests)
+    MetadataProvider,
+    ParsedMetadata,
     SourceFile,
 )
 
@@ -133,11 +131,11 @@ def load_anime_config(path: Path | None = None) -> AnimeConfig:
         ids: list[tuple[str, int]] = config.series_mappings.setdefault(name, [])
         for child in node.nodes:
             if child.name == "anidb" and child.args:
-                entry = ("anidb", int(child.args[0]))
+                entry = (MetadataProvider.ANIDB, int(child.args[0]))
                 if entry not in ids:
                     ids.append(entry)
             elif child.name == "tvdb" and child.args:
-                entry = ("tvdb", int(child.args[0]))
+                entry = (MetadataProvider.TVDB, int(child.args[0]))
                 if entry not in ids:
                     ids.append(entry)
             elif child.name == "concise" and child.args:
@@ -240,15 +238,27 @@ def parse_source_filename(filename: str) -> SourceFile:
     Delegates to media_parser for tokenization and classification.
     """
     pm = media_parser.parse_component(filename)
-    sf = SourceFile(path=Path(filename))
-    sf.release_group = pm.release_group
-    sf.source_type = pm.source_type
-    sf.is_remux = pm.is_remux
-    sf.hash_code = pm.hash_code
-    sf.parsed_episode = pm.episode
-    sf.parsed_season = pm.season
-    sf.version = pm.version
-    return sf
+    return SourceFile(
+        path=Path(filename),
+        parsed=ParsedMetadata(
+            release_group=pm.release_group,
+            source_type=pm.source_type,
+            is_remux=pm.is_remux,
+            hash_code=pm.hash_code,
+            episode=pm.episode,
+            season=pm.season,
+            version=pm.version,
+            bonus_type=pm.bonus_type,
+            is_special=pm.is_special,
+            special_tag=pm.special_tag,
+            episode_title=pm.episode_title,
+            is_dual_audio=pm.is_dual_audio,
+            is_uncensored=pm.is_uncensored,
+            series_name_alt=pm.series_name_alt,
+            episodes=pm.episodes,
+            streaming_service=pm.streaming_service,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +279,10 @@ def scan_dest_ids(dest: Path) -> dict[tuple[str, int], Path]:
     for entry in dest.iterdir():
         if not entry.is_dir():
             continue
-        for id_filename, provider in (("anidb.id", "anidb"), ("tvdb.id", "tvdb")):
+        for id_filename, provider in (
+            ("anidb.id", MetadataProvider.ANIDB),
+            ("tvdb.id", MetadataProvider.TVDB),
+        ):
             id_file = entry / id_filename
             if id_file.is_file():
                 try:
@@ -353,13 +366,13 @@ def resolve_series_directory(
     # Step 1: ID match
     if id_map:
         if info.anidb_id is not None:
-            match = id_map.get(("anidb", info.anidb_id))
+            match = id_map.get((MetadataProvider.ANIDB, info.anidb_id))
             if match is not None:
                 print(f"  Found existing directory by AniDB ID: {match.name}")
                 _ensure_subdirs(match, seasons, dry_run)
                 return match
         if info.tvdb_id is not None:
-            match = id_map.get(("tvdb", info.tvdb_id))
+            match = id_map.get((MetadataProvider.TVDB, info.tvdb_id))
             if match is not None:
                 print(f"  Found existing directory by TheTVDB ID: {match.name}")
                 _ensure_subdirs(match, seasons, dry_run)
@@ -566,7 +579,7 @@ def _match_to_downloads(
         if sf.matched_download is not None:
             enriched.append(sf)
             continue
-        if sf.parsed_season is None or sf.parsed_episode is None:
+        if sf.parsed.season is None or sf.parsed.episode is None:
             enriched.append(sf)
             continue
 
@@ -576,27 +589,37 @@ def _match_to_downloads(
             enriched.append(sf)
             continue
 
-        src_group = sf.release_group.split()[0] if sf.release_group else ""
+        src_group = (
+            sf.parsed.release_group.split()[0] if sf.parsed.release_group else ""
+        )
         best: Path | None = None
         best_sf: SourceFile | None = None
 
         # Pass 1: exact (season, episode) match.
-        key = (sf.parsed_season, sf.parsed_episode)
+        key = (sf.parsed.season, sf.parsed.episode)
         candidates = series_by_ep.get(key, [])
         ep_best = _best_size_match(candidates, src_size) if candidates else None
         if ep_best is not None:
             dl_sf = parse_source_filename(ep_best.name)
-            dl_group = dl_sf.release_group.split()[0] if dl_sf.release_group else ""
+            dl_group = (
+                dl_sf.parsed.release_group.split()[0]
+                if dl_sf.parsed.release_group
+                else ""
+            )
             if not src_group or not dl_group or src_group == dl_group:
                 best = ep_best
                 best_sf = dl_sf
 
         # Pass 2: exact-size + matching release group across all entries.
-        if best is None and src_group and sf.parsed_season != 0:
+        if best is None and src_group and sf.parsed.season != 0:
             size_candidates = series_by_size.get(src_size, [])
             for dl_path, _dl_season, _dl_ep in size_candidates:
                 dl_sf = parse_source_filename(dl_path.name)
-                dl_group = dl_sf.release_group.split()[0] if dl_sf.release_group else ""
+                dl_group = (
+                    dl_sf.parsed.release_group.split()[0]
+                    if dl_sf.parsed.release_group
+                    else ""
+                )
                 if dl_group == src_group:
                     best = dl_path
                     best_sf = dl_sf
@@ -608,14 +631,20 @@ def _match_to_downloads(
 
         # Enrich: use download's metadata but keep source path
         sf.matched_download = best
-        if best_sf.release_group:
-            sf.release_group = best_sf.release_group
-        if best_sf.hash_code:
-            sf.hash_code = best_sf.hash_code
-        if best_sf.version is not None:
-            sf.version = best_sf.version
-        if best_sf.source_type:
-            sf.source_type = best_sf.source_type
+        if best_sf.parsed.release_group:
+            sf.parsed.release_group = best_sf.parsed.release_group
+        if best_sf.parsed.hash_code:
+            sf.parsed.hash_code = best_sf.parsed.hash_code
+        if best_sf.parsed.version is not None:
+            sf.parsed.version = best_sf.parsed.version
+        if best_sf.parsed.source_type:
+            sf.parsed.source_type = best_sf.parsed.source_type
+        if best_sf.parsed.is_dual_audio:
+            sf.parsed.is_dual_audio = True
+        if best_sf.parsed.is_uncensored:
+            sf.parsed.is_uncensored = True
+        if best_sf.parsed.streaming_service and not sf.parsed.streaming_service:
+            sf.parsed.streaming_service = best_sf.parsed.streaming_service
 
         enriched.append(sf)
 
@@ -650,16 +679,38 @@ def _scan_and_group(source_dirs: list[Path]) -> dict[str, list[Path]]:
     releases typically share a directory). Files directly in a source
     directory use the filename.
 
+    Uses series_name_alt to merge groups that refer to the same series
+    under different language names (e.g. CJK vs Latin).
+
     Returns ``{display_name: [file_paths]}`` ordered by count descending.
     """
     key_to_paths: dict[str, list[Path]] = {}
     key_to_names: dict[str, list[str]] = {}
+    alt_to_primary: dict[str, str] = {}
 
     for f in _iter_media_files(source_dirs):
         raw_name = _extract_group_name(f, source_dirs)
-        key = media_parser.normalize_for_matching(raw_name)
+        pm = media_parser.parse_component(raw_name)
+        key = media_parser.normalize_for_matching(pm.series_name or raw_name)
+
+        if key in alt_to_primary:
+            key = alt_to_primary[key]
+
         key_to_paths.setdefault(key, []).append(f)
         key_to_names.setdefault(key, []).append(raw_name)
+
+        if pm.series_name_alt:
+            alt_key = media_parser.normalize_for_matching(pm.series_name_alt)
+            if alt_key and alt_key != key:
+                alt_to_primary[alt_key] = key
+
+    # Post-merge: coalesce groups created under alt keys before mappings existed
+    for alt_key, primary_key in alt_to_primary.items():
+        if alt_key in key_to_paths and alt_key != primary_key:
+            key_to_paths.setdefault(primary_key, []).extend(key_to_paths.pop(alt_key))
+            key_to_names.setdefault(primary_key, []).extend(
+                key_to_names.pop(alt_key, [])
+            )
 
     # Pick the most common display name per group
     result: dict[str, list[Path]] = {}
@@ -802,8 +853,8 @@ def _confirm_anime_info(info: AnimeInfo) -> AnimeInfo:
     print(f"  English title:  {info.title_en}")
     print(f"  Year:           {info.year}")
 
-    regular_eps = [e for e in info.episodes if e.ep_type == "regular"]
-    special_eps = [e for e in info.episodes if e.ep_type != "regular"]
+    regular_eps = [e for e in info.episodes if e.ep_type == EpisodeType.REGULAR]
+    special_eps = [e for e in info.episodes if e.ep_type != EpisodeType.REGULAR]
     print(f"  Episodes:       {len(regular_eps)} regular, {len(special_eps)} special")
 
     if not prompt_confirm("\nUse these values?"):
@@ -838,13 +889,13 @@ def _process_file(
     print(f"\n--- {source.path.name} ---")
 
     # Prompt for release group if not parsed from filename
-    if not source.release_group:
+    if not source.parsed.release_group:
         default_group = defaults.release_group if defaults else ""
-        source.release_group = prompt_value("Release group", default_group)
+        source.parsed.release_group = prompt_value("Release group", default_group)
 
     # Update sticky defaults
-    if defaults is not None and source.release_group:
-        defaults.release_group = source.release_group
+    if defaults is not None and source.parsed.release_group:
+        defaults.release_group = source.parsed.release_group
 
     # Analyze with mediainfo
     try:
@@ -865,8 +916,8 @@ def _process_file(
         return False
 
     # Determine episode type and number
-    ep_number = source.parsed_episode
-    season = source.parsed_season or 1
+    ep_number = source.parsed.episode
+    season = source.parsed.season or 1
     is_special = False
     special_tag = ""
     episode_name = ""
@@ -912,14 +963,14 @@ def _process_file(
     if hash_result is not None:
         ok, actual = hash_result
         if ok:
-            print(f"  CRC32 verified: {source.hash_code}")
+            print(f"  CRC32 verified: {source.parsed.hash_code}")
         else:
             print(
-                f"  WARNING: CRC32 mismatch! expected {source.hash_code}, got {actual}"
+                f"  WARNING: CRC32 mismatch! expected {source.parsed.hash_code}, got {actual}"
             )
             if not prompt_confirm("  Hash mismatch — copy anyway?", default=False):
                 return False
-            source.hash_code = ""
+            source.parsed.hash_code = ""
 
     # Build filename
     filename = format_episode_filename(
@@ -968,20 +1019,20 @@ def _process_file(
 def _match_files_to_season(
     pool: list[SourceFile],
     info: AnimeInfo,
-) -> tuple[list[SourceFile], list[SourceFile]]:
+) -> tuple[list[MatchedFile], list[SourceFile]]:
     """Match files from the pool against an AniDB season.
 
     Groups pool files by their parsed season number, then asks the user
     which detected season corresponds to this AniDB entry.  When a season
     has more files than the AniDB entry has regular episodes (e.g., a
     multi-cour season split across two AniDB IDs), only the first N files
-    by episode number are matched.  Their episode numbers are renumbered
-    to start at 1 so they map correctly to the AniDB episode list.
+    by episode number are matched.
 
-    Returns ``(matched, remaining)`` where matched files are removed from
-    the pool.
+    Returns ``(matched, remaining)`` where matched files are wrapped in
+    MatchedFile (with renumbered episodes if needed) and remaining files
+    keep their original SourceFile state intact.
     """
-    regular_count = sum(1 for ep in info.episodes if ep.ep_type == "regular")
+    regular_count = sum(1 for ep in info.episodes if ep.ep_type == EpisodeType.REGULAR)
 
     # Filter pool by sub-series title similarity against AniDB entry.
     # This prevents files from other sub-series in a batch from being
@@ -1014,9 +1065,9 @@ def _match_files_to_season(
         by: dict[int, list[SourceFile]] = {}
         unseasoned: list[SourceFile] = []
         for sf in files:
-            if sf.parsed_season is not None:
-                by.setdefault(sf.parsed_season, []).append(sf)
-            elif sf.parsed_episode is not None:
+            if sf.parsed.season is not None:
+                by.setdefault(sf.parsed.season, []).append(sf)
+            elif sf.parsed.episode is not None:
                 by.setdefault(1, []).append(sf)
             else:
                 unseasoned.append(sf)
@@ -1069,14 +1120,25 @@ def _match_files_to_season(
         print(f"  No files found for season {chosen}.")
         return [], pool
 
-    # Separate regular episodes from bonus files (映像特典 etc.)
-    # Bonus files always stay with the matched set; only regular episodes
-    # are counted against the AniDB episode limit.
+    # Separate regular episodes from special/bonus files.
+    # Parser-detected specials (S01OVA, S03OP, NCOP) and files without
+    # episode numbers are treated as bonus — they stay with the matched
+    # set but don't count against the AniDB regular episode limit.
     episode_files = sorted(
-        [sf for sf in by_season[chosen] if sf.parsed_episode is not None],
-        key=lambda sf: sf.parsed_episode or 0,
+        [
+            sf
+            for sf in by_season[chosen]
+            if sf.parsed.episode is not None
+            and not sf.parsed.is_special
+            and not sf.parsed.bonus_type
+        ],
+        key=lambda sf: sf.parsed.episode or 0,
     )
-    bonus_files = [sf for sf in by_season[chosen] if sf.parsed_episode is None]
+    bonus_files = [
+        sf
+        for sf in by_season[chosen]
+        if sf.parsed.episode is None or sf.parsed.is_special or sf.parsed.bonus_type
+    ]
 
     if len(episode_files) > regular_count > 0:
         matched_eps = episode_files[:regular_count]
@@ -1090,32 +1152,39 @@ def _match_files_to_season(
         matched_eps = episode_files
         leftover = []
 
-    matched = matched_eps + bonus_files
+    consumed = matched_eps + bonus_files
 
-    # Renumber episodes to start at 1 only for multi-cour splits where
+    # Determine renumbering offset for multi-cour splits where
     # e.g. S01E13 needs to become ep 1 of the second AniDB entry.
-    # Skip renumbering when the episode range already fits within the
-    # AniDB entry (e.g. a single ep 12 of a 12-episode season).
-    if matched:
-        first_ep = matched[0].parsed_episode or 1
-        last_ep = matched[-1].parsed_episode or first_ep
+    renumber_offset = 0
+    if consumed:
+        first_ep = consumed[0].parsed.episode or 1
+        last_ep = consumed[-1].parsed.episode or first_ep
         needs_renumber = first_ep != 1 and (
             regular_count > 0 and last_ep > regular_count
         )
         if needs_renumber:
+            renumber_offset = first_ep - 1
             print(f"  Renumbering: ep {first_ep}+ → ep 1+")
-            for sf in matched:
-                if sf.parsed_episode is not None:
-                    sf.parsed_episode = sf.parsed_episode - first_ep + 1
+
+    # Wrap matched files in MatchedFile (non-mutating)
+    matched: list[MatchedFile] = []
+    for sf in consumed:
+        ep = sf.parsed.episode
+        if ep is not None and renumber_offset:
+            ep = ep - renumber_offset
+        matched.append(MatchedFile(source=sf, episode=ep, season=sf.parsed.season))
 
     # Include unseasoned files as (todo) entries
-    matched_with_extras = matched + no_season
+    for sf in no_season:
+        matched.append(MatchedFile(source=sf))
 
     # Build remaining pool (everything not matched, leftover already included)
-    matched_set = set(id(sf) for sf in matched_with_extras)
+    consumed_with_extras = consumed + no_season
+    matched_set = set(id(sf) for sf in consumed_with_extras)
     remaining = [sf for sf in pool if id(sf) not in matched_set]
 
-    return matched_with_extras, remaining
+    return matched, remaining
 
 
 _RE_TRAILING_YEAR = re.compile(r"\s*\(\d{4}\)\s*$")
@@ -1134,6 +1203,7 @@ def _process_group_batch(
     dry_run: bool,
     verbose: bool,
     default_concise_name: str = "",
+    pre_matched: list[MatchedFile] | None = None,
     pre_parsed: list[SourceFile] | None = None,
     season_override: int | None = None,
     extras: list[Path] | None = None,
@@ -1141,142 +1211,96 @@ def _process_group_batch(
 ) -> tuple[int, int, list[Path]]:
     """Batch-process a group of files via an editable manifest.
 
-    Same interface as ``_process_group`` but uses a vidir-style workflow:
-    build all source->destination mappings, open in $EDITOR, then execute.
+    Uses a vidir-style workflow: build all source->destination mappings,
+    open in $EDITOR, then execute.
 
-    If *pre_parsed* is provided, uses those SourceFiles instead of parsing
-    *files*. If *season_override* is set, all episodes are renumbered as
-    that season (e.g., ``season_override=1`` forces ``s1eYY``).
+    If *pre_matched* is provided (from _match_files_to_season), uses those
+    MatchedFile objects directly. If *pre_parsed* is provided, wraps them
+    in MatchedFile. Otherwise parses *files* from scratch.
+
+    If *season_override* is set, all files get that season value
+    (e.g., ``season_override=1`` forces ``s1eYY`` for AniDB).
     """
-    parsed = pre_parsed if pre_parsed is not None else _parse_files(files)
+    # Build MatchedFile list from whichever input was provided
+    if pre_matched is not None:
+        matched = pre_matched
+    elif pre_parsed is not None:
+        matched = [MatchedFile(source=sf) for sf in pre_parsed]
+    else:
+        matched = [MatchedFile(source=sf) for sf in _parse_files(files)]
 
     # Apply season override (for AniDB per-season processing)
     if season_override is not None:
-        for sf in parsed:
-            sf.parsed_season = season_override
+        for mf in matched:
+            mf.season = season_override
 
-    # Resolve concise name default: saved config > extracted > directory name
+    # Resolve concise name
     saved_concise = ""
     if config is not None and default_concise_name:
         saved_concise = config.concise_names.get(default_concise_name, "")
     if saved_concise:
         default_concise_name = saved_concise
     elif not default_concise_name:
-        default_concise_name = _extract_concise_name(parsed)
+        sources = [mf.source for mf in matched]
+        default_concise_name = _extract_concise_name(sources)
     default_concise_name = _strip_year(default_concise_name)
     concise_name = prompt_value(
         "Concise series name for filenames", default_concise_name
     )
 
-    seasons_needed = {sf.parsed_season or 1 for sf in parsed}
+    seasons_needed = {mf.effective_season or 1 for mf in matched}
     seasons_list = sorted(seasons_needed)
 
     series_dir = resolve_series_directory(
-        dest,
-        info,
-        id_map=id_map,
-        seasons=seasons_list,
-        dry_run=dry_run,
+        dest, info, id_map=id_map, seasons=seasons_list, dry_run=dry_run
     )
     print(f"\nSeries directory: {series_dir}")
 
     if info.anidb_id is not None:
-        id_map[("anidb", info.anidb_id)] = series_dir
+        id_map[(MetadataProvider.ANIDB, info.anidb_id)] = series_dir
     if info.tvdb_id is not None:
-        id_map[("tvdb", info.tvdb_id)] = series_dir
+        id_map[(MetadataProvider.TVDB, info.tvdb_id)] = series_dir
 
-    # Always prompt for release group so the user can override
-    # auto-detected values (e.g. "アニメ BD" is a content description,
-    # not a release group name)
-    detected = next((sf.release_group for sf in parsed if sf.release_group), "")
+    # Prompt for release group — applied as batch override, not mutation
+    detected = next(
+        (
+            mf.source.parsed.release_group
+            for mf in matched
+            if mf.source.parsed.release_group
+        ),
+        "",
+    )
     group = prompt_value("Release group", detected)
-    if group != detected:
-        for sf in parsed:
-            sf.release_group = group
-    elif not detected:
-        pass  # no group detected, user left it empty
-    else:
-        # Fill in any files that were missing a group
-        for sf in parsed:
-            if not sf.release_group:
-                sf.release_group = group
+    for mf in matched:
+        mf.release_group = group
 
-    # Build manifest entries (mediainfo + CRC32 verification)
-    print()
-    entries = build_manifest_entries(
-        parsed,
+    # Detect batch-level traits (majority vote)
+    dual_count = sum(1 for mf in matched if mf.source.parsed.is_dual_audio)
+    if dual_count > len(matched) // 2:
+        for mf in matched:
+            mf.is_dual_audio = True
+
+    uncensored_count = sum(1 for mf in matched if mf.source.parsed.is_uncensored)
+    if uncensored_count > len(matched) // 2:
+        for mf in matched:
+            mf.is_uncensored = True
+
+    # Snapshot MatchedFile overrides into SourceFile copies for the workflow
+    snapshot_parsed = [mf.to_source_snapshot() for mf in matched]
+
+    workflow = ManifestWorkflow(
+        snapshot_parsed,
         info,
         concise_name,
         series_dir,
-        verbose,
+        verbose=verbose,
         analyze_file_fn=analyze_file,
     )
-
-    # Write manifest to temp file
-    manifest_path = write_manifest(
-        entries, info, concise_name, series_dir, extras=extras or []
+    return workflow.run(
+        dry_run=dry_run,
+        extras=extras,
+        parse_source_filename_fn=parse_source_filename,
     )
-
-    # Build source lookup by full path for parsing back
-    known_sources: dict[str, SourceFile] = {
-        str(e.source.path): e.source for e in entries
-    }
-
-    file_count = len(parsed)
-
-    # Edit -> parse -> re-edit loop
-    try:
-        while True:
-            if not open_editor(manifest_path):
-                print("  Editor failed. Skipping group.")
-                return 0, file_count, []
-
-            parsed_entries, errors, extra_entries = parse_manifest(
-                manifest_path, known_sources, series_dir
-            )
-
-            if errors:
-                print(f"\n  Manifest has {len(errors)} error(s):")
-                for err in errors:
-                    print(err)
-                if prompt_confirm("\n  Re-open editor to fix?"):
-                    continue
-                else:
-                    print("  Skipping group.")
-                    return 0, file_count, []
-
-            if not parsed_entries:
-                print(
-                    "  Manifest is empty (all lines deleted or commented). Skipping group."
-                )
-                return 0, file_count, []
-
-            break
-
-        # Execute the manifest
-        print(f"\n  Copying {len(parsed_entries)} file(s)...")
-        result = execute_manifest(
-            parsed_entries,
-            dry_run,
-            verbose,
-            parse_source_filename_fn=parse_source_filename,
-            analyze_file_fn=analyze_file,
-        )
-
-        # Copy extras (non-video files) if any remained in the manifest
-        if extra_entries:
-            print(f"  Copying {len(extra_entries)} extra(s)...")
-            for src, dst in extra_entries:
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                copy_reflink(src, dst, dry_run=dry_run)
-
-        return result
-
-    finally:
-        try:
-            manifest_path.unlink()
-        except OSError:
-            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1292,6 +1316,188 @@ def _process_group_batch(
 # (handle_conflict), file copying (copy_reflink), and the anime-ingestion.kdl
 # config for paths and per-series ID mappings.
 # ---------------------------------------------------------------------------
+
+
+def _process_pool(
+    pool: list[SourceFile],
+    group_name: str,
+    id_queue: list[tuple[str, int]],
+    id_map: dict[tuple[str, int], Path],
+    dest: Path,
+    config: AnimeConfig,
+    dry_run: bool,
+    verbose: bool,
+    no_cache: bool,
+    already_copied: set[str],
+    extras: list[Path] | None = None,
+    download_index: DownloadIndex | None = None,
+    title_index: media_parser.TitleAliasIndex | None = None,
+    resolved_paths: dict[Path, str] | None = None,
+) -> tuple[int, int, bool]:
+    """Process a file pool against metadata IDs interactively.
+
+    Prompts the user for AniDB/TVDB IDs (using id_queue for pre-populated
+    suggestions), fetches metadata, matches files to seasons, and delegates
+    to ``_process_group_batch()`` for manifest editing and execution.
+
+    Returns ``(total_success, total_failed, quit_requested)``.
+    """
+    total_success = 0
+    total_failed = 0
+
+    def _resolve(p: Path) -> str:
+        if resolved_paths:
+            return resolved_paths.get(p, str(p.resolve()))
+        return str(p.resolve())
+
+    while pool:
+        anidb_id: int | None = None
+        tvdb_id: int | None = None
+
+        # Try pre-populated ID queue first
+        if id_queue:
+            provider, sid = id_queue[0]
+            print(f"\n  {len(pool)} file(s) remaining in pool.")
+            raw = (
+                input(
+                    f"\n  Use {provider} {sid} from config?"
+                    f" [Y]es / [n]o / [s]kip / [d]one / [q]uit: "
+                )
+                .strip()
+                .lower()
+            )
+            if raw in ("", "y", "yes"):
+                id_queue.pop(0)
+                if provider == MetadataProvider.ANIDB:
+                    anidb_id = sid
+                else:
+                    tvdb_id = sid
+            elif raw == "n":
+                id_queue.pop(0)
+            elif raw == "s":
+                break
+            elif raw == "d":
+                if not dry_run:
+                    for sf in pool:
+                        already_copied.add(_resolve(sf.path))
+                print(f"  Marked {len(pool)} file(s) as done.")
+                pool.clear()
+                break
+            elif raw == "q":
+                return total_success, total_failed, True
+
+        # If no ID yet, prompt for one
+        if anidb_id is None and tvdb_id is None:
+            print(f"\n  {len(pool)} file(s) remaining in pool.")
+
+            saved = lookup_series_ids(group_name, config)
+            hint = ""
+            if saved:
+                hint = " [config: " + ", ".join(f"{p} {i}" for p, i in saved) + "]"
+
+            raw = input(
+                f"\nAniDB ID, TheTVDB ID (prefix with 't'),"
+                f" 's' to skip, 'd' to mark done, 'q' to quit{hint}: "
+            ).strip()
+            if not raw or raw.lower() == "s":
+                break
+            if raw.lower() == "d":
+                if not dry_run:
+                    for sf in pool:
+                        already_copied.add(_resolve(sf.path))
+                print(f"  Marked {len(pool)} file(s) as done.")
+                pool.clear()
+                break
+            if raw.lower() == "q":
+                return total_success, total_failed, True
+            anidb_id, tvdb_id = _parse_id_input(raw)
+            if anidb_id is None and tvdb_id is None:
+                print(f"  Invalid ID '{raw}', try again.")
+                continue
+            provider = (
+                MetadataProvider.ANIDB
+                if anidb_id is not None
+                else MetadataProvider.TVDB
+            )
+            pid = anidb_id if anidb_id is not None else tvdb_id
+            assert pid is not None
+            _maybe_save_mapping(
+                group_name,
+                provider,
+                pid,
+                config,
+                dry_run,
+                concise_name=_extract_concise_name(pool),
+            )
+
+        # Fetch metadata
+        try:
+            info = fetch_anime_info(
+                anidb_id=anidb_id, tvdb_id=tvdb_id, no_cache=no_cache
+            )
+        except Exception as e:
+            print(f"  Error fetching metadata: {e}")
+            continue
+
+        # Update title alias index and re-match downloads
+        if title_index is not None:
+            new_titles = [t for t in (info.title_ja, info.title_en) if t]
+            if new_titles:
+                title_index.add_series(new_titles)
+        if download_index is not None and download_index.by_series:
+            unmatched = [sf for sf in pool if sf.matched_download is None]
+            if unmatched:
+                pool = _match_to_downloads(
+                    pool,
+                    download_index,
+                    series_name=group_name,
+                    title_index=title_index,
+                )
+
+        info = _confirm_anime_info(info)
+
+        if anidb_id is not None:
+            matched, pool = _match_files_to_season(pool, info)
+            if not matched:
+                print("  No files matched. Try another ID.")
+                continue
+            success, failed, triaged = _process_group_batch(
+                [],
+                info,
+                id_map,
+                dest,
+                dry_run,
+                verbose,
+                default_concise_name=group_name,
+                pre_matched=matched,
+                season_override=1,
+                extras=extras,
+                config=config,
+            )
+            extras = None  # extras go with the first AniDB season only
+        else:
+            success, failed, triaged = _process_group_batch(
+                [],
+                info,
+                id_map,
+                dest,
+                dry_run,
+                verbose,
+                default_concise_name=group_name,
+                pre_parsed=pool,
+                extras=extras,
+                config=config,
+            )
+            pool = []
+
+        print(f"\n  Done: {success} copied, {failed} skipped/failed")
+        total_success += success
+        total_failed += failed
+        if triaged and not dry_run:
+            for p in triaged:
+                already_copied.add(_resolve(p))
+
+    return total_success, total_failed, False
 
 
 def run_series(args: argparse.Namespace, config: AnimeConfig) -> int:
@@ -1387,12 +1593,16 @@ def run_series(args: argparse.Namespace, config: AnimeConfig) -> int:
         tvdb_file = series_path / "tvdb.id"
         if anidb_file.is_file():
             try:
-                id_queue.append(("anidb", int(anidb_file.read_text().strip())))
+                id_queue.append(
+                    (MetadataProvider.ANIDB, int(anidb_file.read_text().strip()))
+                )
             except ValueError:
                 pass
         if tvdb_file.is_file():
             try:
-                id_queue.append(("tvdb", int(tvdb_file.read_text().strip())))
+                id_queue.append(
+                    (MetadataProvider.TVDB, int(tvdb_file.read_text().strip()))
+                )
             except ValueError:
                 pass
 
@@ -1406,6 +1616,15 @@ def run_series(args: argparse.Namespace, config: AnimeConfig) -> int:
 
         # Parse and enrich files
         pool = _parse_files(media_files)
+
+        # Feed parser-detected alt titles into the title alias index
+        # to improve download matching for bilingual releases
+        alt_titles = {
+            sf.parsed.series_name_alt for sf in pool if sf.parsed.series_name_alt
+        }
+        for alt in alt_titles:
+            title_index.add_series([series_path.name, alt])
+
         if download_index.by_series:
             pool = _match_to_downloads(
                 pool,
@@ -1414,143 +1633,22 @@ def run_series(args: argparse.Namespace, config: AnimeConfig) -> int:
                 title_index=title_index,
             )
 
-        # Process IDs from queue, then prompt for more if files remain
-        quit_all = False
-        while pool:
-            anidb_id: int | None = None
-            tvdb_id: int | None = None
-
-            if id_queue:
-                provider, sid = id_queue[0]
-                print(f"\n  {len(pool)} file(s) remaining in pool.")
-                raw = (
-                    input(
-                        f"\n  Use {provider} {sid} from config?"
-                        f" [Y]es / [n]o / [s]kip series / [d]one / [q]uit: "
-                    )
-                    .strip()
-                    .lower()
-                )
-                if raw in ("", "y", "yes"):
-                    id_queue.pop(0)
-                    if provider == "anidb":
-                        anidb_id = sid
-                    else:
-                        tvdb_id = sid
-                elif raw == "n":
-                    id_queue.pop(0)  # discard this ID, fall through to prompt
-                elif raw == "s":
-                    break
-                elif raw == "d":
-                    if not args.dry_run:
-                        for sf in pool:
-                            already_copied.add(str(sf.path.resolve()))
-                    print(f"  Marked {len(pool)} file(s) as done.")
-                    pool = []
-                    break
-                elif raw == "q":
-                    quit_all = True
-                    break
-
-            if anidb_id is None and tvdb_id is None:
-                print(f"\n  {len(pool)} file(s) remaining in pool.")
-                raw = input(
-                    "\n  AniDB ID, TheTVDB ID (prefix with 't'),"
-                    " 's' to skip, 'd' to mark done, 'q' to quit: "
-                ).strip()
-                if not raw or raw.lower() == "s":
-                    break
-                if raw.lower() == "d":
-                    if not args.dry_run:
-                        for sf in pool:
-                            already_copied.add(str(sf.path.resolve()))
-                    print(f"  Marked {len(pool)} file(s) as done.")
-                    pool = []
-                    break
-                if raw.lower() == "q":
-                    quit_all = True
-                    break
-                anidb_id, tvdb_id = _parse_id_input(raw)
-                if anidb_id is None and tvdb_id is None:
-                    print(f"  Invalid ID '{raw}', try again.")
-                    continue
-                provider = "anidb" if anidb_id is not None else "tvdb"
-                pid = anidb_id if anidb_id is not None else tvdb_id
-                assert pid is not None  # guaranteed by the continue above
-                _maybe_save_mapping(
-                    series_path.name,
-                    provider,
-                    pid,
-                    config,
-                    args.dry_run,
-                    concise_name=_extract_concise_name(pool),
-                )
-
-            try:
-                info = fetch_anime_info(
-                    anidb_id=anidb_id,
-                    tvdb_id=tvdb_id,
-                    no_cache=args.no_cache,
-                )
-            except Exception as e:
-                print(f"  Error fetching metadata: {e}")
-                continue
-
-            # Update title alias index with newly fetched titles and
-            # re-match any pool files that weren't matched to downloads
-            new_titles = [t for t in (info.title_ja, info.title_en) if t]
-            if new_titles:
-                title_index.add_series(new_titles)
-            unmatched = [sf for sf in pool if sf.matched_download is None]
-            if unmatched and download_index.by_series:
-                pool = _match_to_downloads(
-                    pool,
-                    download_index,
-                    series_name=series_path.name,
-                    title_index=title_index,
-                )
-
-            info = _confirm_anime_info(info)
-
-            if anidb_id is not None:
-                # AniDB: match files to this season
-                matched, pool = _match_files_to_season(pool, info)
-                if not matched:
-                    print("  No files matched.")
-                    continue
-                success, failed, triaged = _process_group_batch(
-                    [],
-                    info,
-                    id_map,
-                    args.dest,
-                    args.dry_run,
-                    args.verbose,
-                    default_concise_name=series_path.name,
-                    pre_parsed=matched,
-                    season_override=1,
-                    config=config,
-                )
-            else:
-                # TVDB: process all remaining files
-                success, failed, triaged = _process_group_batch(
-                    [],
-                    info,
-                    id_map,
-                    args.dest,
-                    args.dry_run,
-                    args.verbose,
-                    default_concise_name=series_path.name,
-                    pre_parsed=pool,
-                    config=config,
-                )
-                pool = []
-
-            print(f"\n  Done: {success} copied, {failed} skipped/failed")
-            total_success += success
-            total_failed += failed
-            if triaged and not args.dry_run:
-                for p in triaged:
-                    already_copied.add(str(p.resolve()))
+        success, failed, quit_all = _process_pool(
+            pool,
+            group_name=series_path.name,
+            id_queue=id_queue,
+            id_map=id_map,
+            dest=args.dest,
+            config=config,
+            dry_run=args.dry_run,
+            verbose=args.verbose,
+            no_cache=args.no_cache,
+            already_copied=already_copied,
+            download_index=download_index,
+            title_index=title_index,
+        )
+        total_success += success
+        total_failed += failed
 
         if quit_all:
             break
@@ -1597,9 +1695,9 @@ def run_episode(args: argparse.Namespace, config: AnimeConfig) -> int:
     series_dir: Path | None = None
     if id_map:
         if info.anidb_id is not None:
-            series_dir = id_map.get(("anidb", info.anidb_id))
+            series_dir = id_map.get((MetadataProvider.ANIDB, info.anidb_id))
         if series_dir is None and info.tvdb_id is not None:
-            series_dir = id_map.get(("tvdb", info.tvdb_id))
+            series_dir = id_map.get((MetadataProvider.TVDB, info.tvdb_id))
     if series_dir is None and conventional.is_dir():
         series_dir = conventional
 
@@ -1721,111 +1819,33 @@ def run_triage(args: argparse.Namespace, config: AnimeConfig) -> int:
                 if f.is_file() and f.suffix.lower() in _EXTRAS_EXTENSIONS
             ]
 
-        # Loop: process one metadata ID at a time against the remaining pool
-        while pool:
-            remaining_count = len(pool)
-            print(f"\n  {remaining_count} file(s) remaining in pool.")
+        # Build ID queue from config for this group
+        id_queue: list[tuple[str, int]] = []
+        saved = lookup_series_ids(name, config)
+        if saved:
+            id_queue.extend(saved)
 
-            # Check config for saved series mappings
-            saved = lookup_series_ids(name, config)
-            if saved:
-                hint = " [config: " + ", ".join(f"{p} {i}" for p, i in saved) + "]"
-            else:
-                hint = ""
+        success, failed, quit_all = _process_pool(
+            pool,
+            group_name=name,
+            id_queue=id_queue,
+            id_map=id_map,
+            dest=args.dest,
+            config=config,
+            dry_run=args.dry_run,
+            verbose=args.verbose,
+            no_cache=args.no_cache,
+            already_copied=already_copied,
+            extras=group_extras,
+            resolved_paths=resolved_paths,
+        )
+        total_success += success
+        total_failed += failed
 
-            raw = input(
-                f"\nAniDB ID, TheTVDB ID (prefix with 't'),"
-                f" 's' to skip, 'd' to mark done, 'q' to quit{hint}: "
-            ).strip()
-            if not raw or raw.lower() == "s":
-                print("  Skipping remaining files.")
-                break
-            if raw.lower() == "q":
-                # Save manifest and exit triage
-                if not args.dry_run and len(already_copied) > manifest_size_at_start:
-                    _save_triage_manifest(already_copied)
-                return 0
-            if raw.lower() == "d":
-                # Mark all remaining files as done without copying
-                if not args.dry_run:
-                    for sf in pool:
-                        already_copied.add(
-                            resolved_paths.get(sf.path, str(sf.path.resolve()))
-                        )
-                print(f"  Marked {len(pool)} file(s) as done.")
-                pool = []
-                break
-
-            anidb_id, tvdb_id = _parse_id_input(raw)
-            if anidb_id is None and tvdb_id is None:
-                print(f"  Invalid ID '{raw}', try again.")
-                continue
-
-            try:
-                info = fetch_anime_info(
-                    anidb_id=anidb_id, tvdb_id=tvdb_id, no_cache=args.no_cache
-                )
-            except Exception as e:
-                print(f"  Error fetching metadata: {e}")
-                continue
-
-            info = _confirm_anime_info(info)
-
-            provider = "anidb" if anidb_id is not None else "tvdb"
-            pid = anidb_id if anidb_id is not None else tvdb_id
-            if pid is not None:
-                _maybe_save_mapping(
-                    name,
-                    provider,
-                    pid,
-                    config,
-                    args.dry_run,
-                    concise_name=_extract_concise_name(pool),
-                )
-
-            if anidb_id is not None:
-                # AniDB per-season: match files to this season, force s1eYY
-                matched, pool = _match_files_to_season(pool, info)
-                if not matched:
-                    print("  No files matched. Try another ID.")
-                    continue
-                success, failed, copied_paths = _process_group_batch(
-                    [],
-                    info,
-                    id_map,
-                    args.dest,
-                    args.dry_run,
-                    args.verbose,
-                    default_concise_name=name,
-                    pre_parsed=matched,
-                    season_override=1,
-                    extras=group_extras,
-                    config=config,
-                )
-            else:
-                # TVDB: process all remaining files at once (multi-season)
-                success, failed, copied_paths = _process_group_batch(
-                    [],
-                    info,
-                    id_map,
-                    args.dest,
-                    args.dry_run,
-                    args.verbose,
-                    default_concise_name=name,
-                    pre_parsed=pool,
-                    extras=group_extras,  # TVDB gets all remaining extras
-                    config=config,
-                )
-                group_extras = []
-                pool = []  # TVDB consumes entire pool
-
-            print(f"\n  Season done: {success} copied, {failed} skipped/failed")
-            total_success += success
-            total_failed += failed
-
-            if copied_paths and not args.dry_run:
-                for p in copied_paths:
-                    already_copied.add(resolved_paths.get(p, str(p.resolve())))
+        if quit_all:
+            if not args.dry_run and len(already_copied) > manifest_size_at_start:
+                _save_triage_manifest(already_copied)
+            return 0
 
         groups_processed += 1
 

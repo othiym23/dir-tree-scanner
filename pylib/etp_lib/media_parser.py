@@ -15,112 +15,1012 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from enum import Enum, auto
+from datetime import date
+
+from parsy import Parser, Result, regex
+
+# Import and re-export vocabulary — external consumers import from media_parser
+from etp_lib.media_vocab import (  # noqa: F401 (re-exports)
+    Token,
+    TokenKind,
+    _ALL_EXTENSIONS,
+    _ALL_EXTENSIONS_SORTED,
+    _AUDIO_CODECS,
+    _HDR_KEYWORDS,
+    _LANGUAGES,
+    _MEDIA_EXTENSIONS,
+    _METADATA_KINDS,
+    _SOURCE_TYPE_MAP,
+    _SOURCES,
+    _STREAMING_SERVICES,
+    _SUBTITLE_KEYWORDS,
+    _VIDEO_CODECS,
+)
+# ---------------------------------------------------------------------------
+# Result types — typed wrappers for each recognizer's output
+# ---------------------------------------------------------------------------
 
 
-class TokenKind(Enum):
-    """Token types produced by the tokenizer and classifier."""
-
-    # Structural (phase 1)
-    BRACKET = auto()  # [content]
-    PAREN = auto()  # (content) -- depth-tracked for nesting
-    LENTICULAR = auto()  # 「content」
-    TEXT = auto()  # bare text between delimiters
-    DOT_TEXT = auto()  # individual segment from dot-separated scene name
-    SEPARATOR = auto()  # " - "
-    EXTENSION = auto()  # .mkv, .mp4, etc.
-    PATH_SEP = auto()  # / boundary between path components
-
-    # Semantic (phase 2)
-    RELEASE_GROUP = auto()
-    CRC32 = auto()
-    EPISODE = auto()
-    SEASON = auto()
-    VERSION = auto()
-    RESOLUTION = auto()
-    VIDEO_CODEC = auto()
-    AUDIO_CODEC = auto()
-    SOURCE = auto()
-    REMUX = auto()
-    YEAR = auto()
-    TITLE = auto()
-    EPISODE_TITLE = auto()
-    BATCH_RANGE = auto()
-    SUBTITLE_INFO = auto()
-    LANGUAGE = auto()
-    SITE_PREFIX = auto()
-    BONUS = auto()  # 映像特典, ノンテロップOP, etc.
-    UNKNOWN = auto()
+@dataclass(frozen=True, slots=True)
+class Resolution:
+    value: str
 
 
-@dataclass
-class Token:
-    """A single token from the tokenizer/classifier pipeline."""
+@dataclass(frozen=True, slots=True)
+class VideoCodec:
+    value: str
 
-    kind: TokenKind
-    text: str
-    # Extracted numeric values (populated by classifier for EPISODE/SEASON/YEAR)
-    season: int | None = None
-    episode: int | None = None
+
+@dataclass(frozen=True, slots=True)
+class AudioCodec:
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
+class Source:
+    value: str
+    source_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class Remux:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeSE:
+    season: int
+    episode: int
     version: int | None = None
-    year: int | None = None
-    batch_start: int | None = None
-    batch_end: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeMultiSE:
+    """Multi-episode: S01E01-E06, S01E01-06, S01E01E02E03."""
+
+    season: int
+    episodes: list[int]
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeBare:
+    episode: int
+    version: int | None = None
+    is_decimal_special: bool = False  # 01.5 → special between episodes
+
+
+@dataclass(frozen=True, slots=True)
+class EpisodeJP:
+    episode: int
+
+
+@dataclass(frozen=True, slots=True)
+class SeasonJP:
+    season: int
+
+
+@dataclass(frozen=True, slots=True)
+class SeasonWord:
+    season: int
+
+
+@dataclass(frozen=True, slots=True)
+class SeasonOnly:
+    season: int
+
+
+@dataclass(frozen=True, slots=True)
+class SeasonSpecial:
+    """S01OVA, S02SP1, S03OP, S03ED — combined season + special/credit marker."""
+
+    season: int
+    tag: str
+    number: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Special:
+    tag: str
+    number: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BatchRange:
+    start: int
+    end: int
+
+
+@dataclass(frozen=True, slots=True)
+class Version:
+    number: int
+
+
+@dataclass(frozen=True, slots=True)
+class Year:
+    value: int
+
+
+@dataclass(frozen=True, slots=True)
+class CRC32:
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
+class Language:
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
+class BonusKeyword:
+    bonus_type: str
+    raw: str
+
+
+@dataclass(frozen=True, slots=True)
+class SubtitleInfo:
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
+class HDRInfo:
+    value: str
+
+
+@dataclass(frozen=True, slots=True)
+class BitDepth:
+    value: int
+
+
+@dataclass(frozen=True, slots=True)
+class DualAudio:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class Edition:
+    value: str  # "Criterion", "Director's Cut", etc.
+
+
+@dataclass(frozen=True, slots=True)
+class Uncensored:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class Repack:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class SitePrefix:
+    value: str
 
 
 # ---------------------------------------------------------------------------
-# Media file extensions
+# Parsy primitives — typed recognizers for individual tokens
 # ---------------------------------------------------------------------------
 
-_MEDIA_EXTENSIONS = frozenset({".mkv", ".mp4", ".avi"})
-_ALL_EXTENSIONS = frozenset(
-    {".mkv", ".mp4", ".avi", ".rar", ".iso", ".zip", ".7z", ".webdl"}
-)
-# Pre-sorted longest-first for _strip_extension (avoids sorting per call)
-_ALL_EXTENSIONS_SORTED = tuple(
-    sorted(_ALL_EXTENSIONS, key=lambda e: len(e), reverse=True)
-)
 
-# ---------------------------------------------------------------------------
-# Compound tokens that should NOT be split on dots
-# ---------------------------------------------------------------------------
+def _match_set_ci(vocab: frozenset[str], result_type: type) -> Parser:
+    """Build a parser that matches any word in a case-insensitive vocabulary set."""
 
-_COMPOUND_TOKENS = {
-    "H.264",
-    "H.265",
-    "H264",
-    "H265",
-    "AAC2.0",
-    "AAC5.1",
-    "DD2.0",
-    "DD5.1",
-    "DDP2.0",
-    "DDP5.1",
-    "DDP7.1",
-    "DTS-HD",
-    "E-AC-3",
-    "WEB-DL",
-    "Blu-Ray",
-    "Blu-ray",
-    "BDRip",
-    "MA.2.0",
-    "MA.5.1",
-    "MA.7.1",
-    "FLAC.2.0",
-}
+    def _parser(stream: str, index: int):
+        end = index
+        while end < len(stream) and not stream[end].isspace():
+            end += 1
+        if end == index:
+            return Result.failure(index, frozenset({result_type.__name__}))
+        word = stream[index:end]
+        if word.lower() in vocab:
+            return Result.success(end, result_type(word))
+        return Result.failure(index, frozenset({result_type.__name__}))
 
-# Build a regex that matches compound tokens (case-insensitive, longest first)
-_COMPOUND_RE = re.compile(
-    "|".join(
-        re.escape(t)
-        for t in sorted(_COMPOUND_TOKENS, key=lambda s: len(s), reverse=True)
-    ),
+    return Parser(_parser)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+
+def _re_group(pattern: str, s: str, group: int = 1, flags: int = 0) -> str:
+    """Extract a regex group, asserting the match exists."""
+    m = re.match(pattern, s, flags)
+    assert m is not None
+    return m.group(group)
+
+
+# Resolution
+resolution: Parser = regex(
+    r"(?:480|540|576|720|1080)[pi]|2160p|4[kK]", re.IGNORECASE
+).map(lambda s: Resolution(s)) | regex(r"\d{3,4}x\d{3,4}").map(lambda s: Resolution(s))
+
+# Video codec
+video_codec: Parser = _match_set_ci(_VIDEO_CODECS, VideoCodec)
+
+# Pre-compiled patterns for parsy recognizer functions (avoid per-call compilation)
+_RE_BARE_EP = re.compile(r"(\d{1,4})(?:v(\d+))?(?=\s|$|\.)")
+_RE_EP_PREFIX = re.compile(r"[Ee][Pp]?(\d{1,4})(?:v(\d+))?$")
+_RE_EP_FINAL = re.compile(r"(\d{1,4})(?:v(\d+))?\s*END$", re.IGNORECASE)
+_RE_TRAILING_DIGITS = re.compile(r"(\d+)$")
+_RE_BONUS_OP = re.compile(r"OP\d*$", re.IGNORECASE)
+_RE_BONUS_ED = re.compile(r"ED\d*$", re.IGNORECASE)
+_RE_BATCH_SPLIT = re.compile(r"\s*[~～]\s*")
+_RE_WORD_SPLIT = re.compile(r"[\s,]+")
+_RE_DASH_SUFFIX = re.compile(r"-[A-Za-z].*$")
+_RE_DASH_GROUP = re.compile(r"^(.+)-([A-Za-z][A-Za-z0-9]+)$")
+
+# Audio codec (compound forms like AAC2.0, DTS-HD MA)
+_RE_AC = re.compile(
+    r"(?:DTS-HDMA|DTS-HD\s*MA|DTS-HD|DTS|DDP|DD\+|DD|EAC3|E-AC-3|AC3|AAC|FLAC|TrueHD|PCM|LPCM)"
+    r"(?:[.\s]?\d\.\d)?",
     re.IGNORECASE,
 )
 
-# Placeholder string that cannot appear in filenames (NUL bytes are stripped
-# from input before tokenization, so a single NUL is safe as a sentinel).
-_COMPOUND_PLACEHOLDER = "\x00COMPOUND\x00"
+
+def _audio_codec_parser(stream: str, index: int):
+    m = _RE_AC.match(stream, index)
+    if m:
+        return Result.success(m.end(), AudioCodec(m.group(0)))
+    end = index
+    while end < len(stream) and not stream[end].isspace():
+        end += 1
+    if end > index:
+        word = stream[index:end]
+        if word.lower() in _AUDIO_CODECS:
+            return Result.success(end, AudioCodec(word))
+    return Result.failure(index, frozenset({"audio_codec"}))
+
+
+audio_codec: Parser = Parser(_audio_codec_parser)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+
+# Source
+def _source_parser(stream: str, index: int):
+    end = index
+    while end < len(stream) and not stream[end].isspace():
+        end += 1
+    if end == index:
+        return Result.failure(index, frozenset({"source"}))
+    word = stream[index:end]
+    lower = word.lower()
+    if lower in _SOURCES:
+        source_type = _SOURCE_TYPE_MAP.get(lower, "")
+        return Result.success(end, Source(word, source_type))
+    return Result.failure(index, frozenset({"source"}))
+
+
+source: Parser = Parser(_source_parser)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+# REMUX
+remux: Parser = regex(r"REMUX", re.IGNORECASE).map(lambda _: Remux())
+
+# Episode: SxxExx (multi-episode and single)
+
+# Multi-episode: S01E01-E06, S01E01-06, S01E01E02E03
+_RE_EP_MULTI_SE = re.compile(
+    r"[Ss](\d{1,2})[Ee](\d{1,4})"
+    r"(?:"
+    r"(?:-[Ee]?(\d{1,4}))"  # S01E01-E06 or S01E01-06 (range)
+    r"|"
+    r"([Ee]\d{1,4}(?:[Ee]\d{1,4})*)"  # S01E01E02E03 (repeated E)
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _multi_episode_se_parser(stream: str, index: int):
+    m = _RE_EP_MULTI_SE.match(stream, index)
+    if not m:
+        return Result.failure(index, frozenset({"multi_episode_se"}))
+    season = int(m.group(1))
+    first = int(m.group(2))
+    if m.group(3):
+        # Range: S01E01-06 or S01E01-E06
+        last = int(m.group(3))
+        if last < first or last - first > 100:
+            return Result.failure(index, frozenset({"multi_episode_se"}))
+        episodes = list(range(first, last + 1))
+    else:
+        # Repeated: S01E01E02E03
+        extra = re.findall(r"[Ee](\d{1,4})", m.group(4))
+        episodes = [first] + [int(e) for e in extra]
+    return Result.success(m.end(), EpisodeMultiSE(season=season, episodes=episodes))
+
+
+episode_multi_se: Parser = Parser(_multi_episode_se_parser)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+# Single episode: S01E05, s1e1, S03E13v2
+_RE_EP_SE_P = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,4})(?:v(\d+))?", re.IGNORECASE)
+
+
+def _parse_episode_se(s: str) -> EpisodeSE:
+    m = _RE_EP_SE_P.match(s)
+    assert m is not None
+    return EpisodeSE(
+        season=int(m.group(1)),
+        episode=int(m.group(2)),
+        version=int(m.group(3)) if m.group(3) else None,
+    )
+
+
+episode_se: Parser = regex(r"[Ss](\d{1,2})[Ee](\d{1,4})(?:v(\d+))?").map(
+    _parse_episode_se
+)
+
+
+# Episode: bare number
+def _bare_episode_parser(stream: str, index: int):
+    m = _RE_BARE_EP.match(stream[index:])
+    if not m:
+        return Result.failure(index, frozenset({"bare_episode"}))
+    num = int(m.group(1))
+    if 1900 <= num <= 2099 and m.group(2) is None:
+        return Result.failure(index, frozenset({"bare_episode"}))
+    version = int(m.group(2)) if m.group(2) else None
+    return Result.success(index + m.end(), EpisodeBare(num, version))
+
+
+# Decimal episode special (01.5) — NOT in _RECOGNIZERS to avoid false positives
+# from scan_dot_segments compound matching.
+_RE_DECIMAL_EP = re.compile(r"^(\d{1,4})\.(\d{1,2})$")
+
+
+def _try_decimal_episode(text: str) -> Token | None:
+    """Try to parse text as a decimal episode special (01.5)."""
+    md = _RE_DECIMAL_EP.match(text)
+    if md:
+        num = int(md.group(1))
+        if not (1900 <= num <= 2099):
+            return _result_to_token(EpisodeBare(num, is_decimal_special=True), text)
+    return None
+
+
+episode_bare: Parser = Parser(_bare_episode_parser)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+
+# Episode: EP05, E5 format
+def _ep_prefix_parser(stream: str, index: int):
+    m = _RE_EP_PREFIX.match(stream[index:])
+    if not m:
+        return Result.failure(index, frozenset({"ep_prefix"}))
+    version = int(m.group(2)) if m.group(2) else None
+    return Result.success(index + m.end(), EpisodeBare(int(m.group(1)), version))
+
+
+episode_ep: Parser = Parser(_ep_prefix_parser)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+
+# Episode: "05 END", "05v2 END" (final episode marker)
+def _ep_final_parser(stream: str, index: int):
+    m = _RE_EP_FINAL.match(stream[index:])
+    if not m:
+        return Result.failure(index, frozenset({"ep_final"}))
+    version = int(m.group(2)) if m.group(2) else None
+    return Result.success(index + m.end(), EpisodeBare(int(m.group(1)), version))
+
+
+episode_final: Parser = Parser(_ep_final_parser)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+# Episode: Japanese 第NN話
+episode_jp: Parser = regex(r"第(\d{1,4})話").map(
+    lambda s: EpisodeJP(int(_re_group(r"第(\d+)話", s)))
+)
+
+# Season: Japanese 第N期
+season_jp: Parser = regex(r"第(\d{1,2})期").map(
+    lambda s: SeasonJP(int(_re_group(r"第(\d+)期", s)))
+)
+
+# Season: English ordinal "4th Season" or "Season 01" (GM-Team format)
+_RE_SEASON_WORD = re.compile(
+    r"(?:(\d+)(?:st|nd|rd|th)\s+Season|Season\s+(\d{1,2}))", re.IGNORECASE
+)
+
+
+def _season_word_parser(stream: str, index: int):
+    m = _RE_SEASON_WORD.match(stream, index)
+    if not m:
+        return Result.failure(index, frozenset({"season_word"}))
+    num = int(m.group(1) or m.group(2))
+    return Result.success(m.end(), SeasonWord(num))
+
+
+season_word: Parser = Parser(_season_word_parser)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+# Season: bare "S01"
+season_only: Parser = regex(r"[Ss](\d{1,2})(?!\d|[Ee])").map(
+    lambda s: SeasonOnly(int(_re_group(r"[Ss](\d+)", s)))
+)
+
+
+# Special: SP1, OVA, OAD, ONA
+def _parse_special(s: str) -> Special:
+    tag = _re_group(r"(SP|OVA|OAD|ONA)", s, flags=re.IGNORECASE).upper()
+    m = _RE_TRAILING_DIGITS.search(s)
+    return Special(tag=tag, number=int(m.group(1)) if m else None)
+
+
+special: Parser = regex(r"(SP|OVA|OAD|ONA)(\d*)", re.IGNORECASE).map(_parse_special)
+
+# Season + special: S01OVA, S02SP1
+_RE_SEASON_SPECIAL = re.compile(
+    r"[Ss](\d{1,2})(OVA|OAD|ONA|SP|OP|ED)(\d*)", re.IGNORECASE
+)
+
+
+def _season_special_parser(stream: str, index: int):
+    m = _RE_SEASON_SPECIAL.match(stream[index:])
+    if not m:
+        return Result.failure(index, frozenset({"season_special"}))
+    season = int(m.group(1))
+    tag = m.group(2).upper()
+    num = int(m.group(3)) if m.group(3) else None
+    return Result.success(
+        index + m.end(), SeasonSpecial(season=season, tag=tag, number=num)
+    )
+
+
+season_special: Parser = Parser(_season_special_parser)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+
+# Batch range: "01~26"
+def _parse_batch_range(s: str) -> BatchRange:
+    parts = _RE_BATCH_SPLIT.split(s)
+    return BatchRange(start=int(parts[0]), end=int(parts[1]))
+
+
+batch_range: Parser = regex(r"(\d{1,4})\s*[~～]\s*(\d{1,4})").map(_parse_batch_range)
+
+# Version: "v2"
+version: Parser = regex(r"v(\d+)", re.IGNORECASE).map(
+    lambda s: Version(int(_re_group(r"v(\d+)", s, flags=re.IGNORECASE)))
+)
+
+# Year — reject pre-1940 (oldest content of interest) and future years
+_CURRENT_YEAR = date.today().year
+_RE_YEAR_P = re.compile(r"((?:19|20)\d{2})(?!\d)")
+
+
+def _year_parser(stream: str, index: int):
+    m = _RE_YEAR_P.match(stream, index)
+    if not m:
+        return Result.failure(index, frozenset({"year"}))
+    y = int(m.group(1))
+    if y < 1940 or y > _CURRENT_YEAR + 1:
+        return Result.failure(index, frozenset({"year"}))
+    return Result.success(m.end(), Year(y))
+
+
+year: Parser = Parser(_year_parser)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+# CRC32
+crc32: Parser = regex(r"[0-9A-Fa-f]{8}(?![0-9A-Fa-f])").map(lambda s: CRC32(s.upper()))
+
+# Language
+language: Parser = _match_set_ci(_LANGUAGES, Language)
+
+# Subtitle info
+subtitle_info: Parser = _match_set_ci(_SUBTITLE_KEYWORDS, SubtitleInfo)
+
+# HDR
+hdr_info: Parser = _match_set_ci(_HDR_KEYWORDS, HDRInfo)
+
+# Repack
+repack: Parser = regex(r"REPACK\d?", re.IGNORECASE).map(lambda _: Repack())
+
+# Site prefix (www.example.com)
+site_prefix: Parser = regex(r"www\.\w+\.\w+", re.IGNORECASE).map(
+    lambda s: SitePrefix(s)
+)
+
+# Bit depth: 10bit, 10-Bit, Hi10, 8bit
+_RE_BIT_DEPTH = re.compile(r"(?:Hi)?(\d+)[- ]?[Bb]it|Hi(\d+)", re.IGNORECASE)
+
+
+def _bit_depth_parser(stream: str, index: int):
+    m = _RE_BIT_DEPTH.match(stream[index:])
+    if not m:
+        return Result.failure(index, frozenset({"bit_depth"}))
+    bits = int(m.group(1) or m.group(2))
+    return Result.success(index + m.end(), BitDepth(bits))
+
+
+bit_depth: Parser = Parser(_bit_depth_parser)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+# Dual Audio / Dual-Audio / Dual.Audio / DUAL (scene shorthand)
+_RE_DUAL_AUDIO = re.compile(r"Dual[- .]?Audio|\bDUAL\b", re.IGNORECASE)
+
+
+def _dual_audio_parser(stream: str, index: int):
+    m = _RE_DUAL_AUDIO.match(stream, index)
+    if not m:
+        return Result.failure(index, frozenset({"dual_audio"}))
+    return Result.success(m.end(), DualAudio())
+
+
+dual_audio: Parser = Parser(_dual_audio_parser)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+# Edition markers: Criterion, Director's Cut, etc.
+_EDITIONS = frozenset({"criterion", "remastered", "uncut", "theatrical", "extended"})
+edition: Parser = _match_set_ci(_EDITIONS, Edition)
+
+# Uncensored marker
+uncensored: Parser = regex(r"Uncensored", re.IGNORECASE).map(lambda _: Uncensored())
+
+# Bonus keywords (English)
+_RE_BONUS_EN_P = re.compile(
+    r"NC\s*(?:OP|ED)\d*|NCOP\d*|NCED\d*|Creditless\s+(?:OP|ED)\d*",
+    re.IGNORECASE,
+)
+
+
+def _bonus_parser(stream: str, index: int):
+    m = _RE_BONUS_EN_P.match(stream, index)
+    if m:
+        matched = m.group(0)
+        if _RE_BONUS_OP.search(matched):
+            return Result.success(m.end(), BonusKeyword("NCOP", matched))
+        if _RE_BONUS_ED.search(matched):
+            return Result.success(m.end(), BonusKeyword("NCED", matched))
+    return Result.failure(index, frozenset({"bonus_keyword"}))
+
+
+bonus_en: Parser = Parser(_bonus_parser)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+# Japanese bonus keywords — matched as substring within text since
+# Japanese bonus content often includes titles: 「ノンテロップED「Title」」
+_BONUS_JP_MAP: dict[str, str] = {
+    "ノンテロップOP": "NCOP",
+    "ノンテロップED": "NCED",
+    "ノンテロップ": "NCOP",  # fallback when OP/ED not specified
+    "PV": "PV",
+    "予告": "Preview",
+    "告知CM": "CM",
+    "メニュー画面集": "Menu",
+    "メニュー画面": "Menu",
+    "映像特典": "Bonus",
+    "特典": "Bonus",
+}
+# Sort by length descending so longer matches take priority
+_BONUS_JP_KEYS: list[str] = sorted(_BONUS_JP_MAP, key=len, reverse=True)  # ty: ignore[invalid-assignment]
+
+
+def _bonus_jp_parser(stream: str, index: int):
+    for keyword in _BONUS_JP_KEYS:
+        if stream[index:].startswith(keyword):
+            bonus_type = _BONUS_JP_MAP[keyword]
+            # Distinguish NCOP vs NCED when ノンテロップ alone matches
+            if keyword == "ノンテロップ":
+                rest = stream[index + len(keyword) :]
+                if rest.startswith("ED") or rest.startswith("ed"):
+                    bonus_type = "NCED"
+            return Result.success(
+                index + len(keyword), BonusKeyword(bonus_type, keyword)
+            )
+    return Result.failure(index, frozenset({"bonus_jp"}))
+
+
+bonus_jp: Parser = Parser(_bonus_jp_parser)  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
+
+
+# ---------------------------------------------------------------------------
+# Result type → TokenKind mapping
+# ---------------------------------------------------------------------------
+
+_TYPE_TO_KIND: dict[type, TokenKind] = {
+    Resolution: TokenKind.RESOLUTION,
+    VideoCodec: TokenKind.VIDEO_CODEC,
+    AudioCodec: TokenKind.AUDIO_CODEC,
+    Source: TokenKind.SOURCE,
+    Remux: TokenKind.REMUX,
+    EpisodeSE: TokenKind.EPISODE,
+    EpisodeMultiSE: TokenKind.EPISODE,
+    EpisodeBare: TokenKind.EPISODE,
+    EpisodeJP: TokenKind.EPISODE,
+    SeasonJP: TokenKind.SEASON,
+    SeasonWord: TokenKind.SEASON,
+    SeasonOnly: TokenKind.SEASON,
+    Special: TokenKind.SPECIAL,
+    SeasonSpecial: TokenKind.SPECIAL,
+    BatchRange: TokenKind.BATCH_RANGE,
+    Version: TokenKind.VERSION,
+    Year: TokenKind.YEAR,
+    CRC32: TokenKind.CRC32,
+    Language: TokenKind.LANGUAGE,
+    BonusKeyword: TokenKind.BONUS,
+    SubtitleInfo: TokenKind.SUBTITLE_INFO,
+    HDRInfo: TokenKind.UNKNOWN,  # HDR stored as UNKNOWN (no dedicated kind yet)
+    Repack: TokenKind.UNKNOWN,
+    SitePrefix: TokenKind.SITE_PREFIX,
+    BitDepth: TokenKind.UNKNOWN,  # Metadata, not title — no dedicated kind
+    DualAudio: TokenKind.DUAL_AUDIO,
+    Edition: TokenKind.EDITION,
+    Uncensored: TokenKind.UNCENSORED,
+}
+
+# Known redistributor site brackets — not release groups
+_REDISTRIBUTORS = frozenset({"tgx", "eztv", "eztvx.to", "rartv", "ettv", "ion10"})
+
+
+def _result_to_token(result: object, text: str) -> Token:
+    """Convert a parsy primitive result to a Token for the existing pipeline."""
+    kind = _TYPE_TO_KIND.get(type(result), TokenKind.UNKNOWN)
+    token = Token(kind=kind, text=text)
+
+    # Populate numeric fields
+    if isinstance(result, EpisodeMultiSE):
+        token.season = result.season
+        token.episode = result.episodes[0]
+        token.batch_start = result.episodes[0]
+        token.batch_end = result.episodes[-1]
+    elif isinstance(result, EpisodeSE):
+        token.season = result.season
+        token.episode = result.episode
+        token.version = result.version
+    elif isinstance(result, EpisodeBare):
+        token.episode = result.episode
+        token.version = result.version
+        token.is_decimal_special = result.is_decimal_special
+    elif isinstance(result, EpisodeJP):
+        token.episode = result.episode
+    elif isinstance(result, SeasonJP):
+        token.season = result.season
+    elif isinstance(result, SeasonWord):
+        token.season = result.season
+    elif isinstance(result, SeasonOnly):
+        token.season = result.season
+    elif isinstance(result, SeasonSpecial):
+        token.season = result.season
+        token.episode = result.number
+    elif isinstance(result, Special):
+        token.episode = result.number
+    elif isinstance(result, Version):
+        token.version = result.number
+    elif isinstance(result, Year):
+        token.year = result.value
+    elif isinstance(result, BatchRange):
+        token.batch_start = result.start
+        token.batch_end = result.end
+
+    return token
+
+
+# ---------------------------------------------------------------------------
+# Recognizer list — ordered by specificity (most specific first)
+# ---------------------------------------------------------------------------
+
+# Each recognizer is tried at the current position. The first (longest) match
+# wins. This ordering ensures compound tokens like AAC2.0 are matched before
+# AAC, and SxxExx before S-only season markers.
+
+_RECOGNIZERS: list[Parser] = [
+    # Episode markers (most distinctive)
+    episode_multi_se,  # S01E01-E06, S01E01-06, S01E01E02E03
+    episode_se,  # S01E05, s1e1, S03E13v2
+    episode_jp,  # 第01話
+    batch_range,  # 01~26
+    season_special,  # S01OVA, S02SP1
+    special,  # SP1, OVA, OAD, ONA
+    season_jp,  # 第1期
+    season_word,  # 4th Season
+    season_only,  # S01 (after episode_se to avoid S01E05 → S01)
+    episode_final,  # 05 END, 05v2 END (before bare to match END suffix)
+    episode_ep,  # EP05, E5
+    episode_bare,  # 08, 12v2 (after season_only to avoid S01 → ep 1)
+    # Bonus keywords
+    bonus_en,  # NCOP, NC OP1, Creditless ED
+    bonus_jp,  # 映像特典, ノンテロップOP, PV, 予告
+    # Technical metadata (ordered: compound before simple)
+    audio_codec,  # AAC2.0, DTS-HD MA, FLAC — compound first
+    resolution,  # 1080p, 1920x1080
+    video_codec,  # HEVC, x265, H.264
+    source,  # BluRay, WEB-DL, BD
+    remux,  # REMUX
+    # Identifiers
+    crc32,  # ABCD1234
+    year,  # 2019 (after episode to avoid episode false positives)
+    version,  # v2, v3
+    # Context (dual_audio before language — "DUAL" must match as dual-audio, not language)
+    dual_audio,  # Dual Audio, Dual-Audio, DUAL
+    language,  # jpn, eng, dual
+    subtitle_info,  # multisub, msubs
+    hdr_info,  # HDR, HDR10, DoVi
+    bit_depth,  # 10bit, 10-Bit, Hi10
+    uncensored,  # Uncensored
+    edition,  # Criterion, Remastered
+    repack,  # REPACK, REPACK2
+    site_prefix,  # www.example.com
+]
+
+
+# ---------------------------------------------------------------------------
+# Position-based scanner
+# ---------------------------------------------------------------------------
+
+
+def scan_words(text: str) -> list[Token]:
+    """Scan a space/comma-separated text for known tokens.
+
+    Tries each recognizer at each word boundary, longest match first.
+    Unrecognized words become TEXT tokens.  This replaces regex-based
+    classification for content within brackets, parens, and bare text
+    segments.
+
+    Returns tokens compatible with the existing classify/assembly pipeline.
+    """
+    tokens: list[Token] = []
+
+    # First pass: try multi-word recognizers on the full text before splitting.
+    # This handles patterns like "NC ED1", "Creditless OP", "4th Season",
+    # "DTS-HD MA" that span whitespace.
+    remaining = text
+    pre_tokens: list[tuple[int, int, Token]] = []  # (start, end, token)
+    for recognizer in _RECOGNIZERS:
+        pos = 0
+        while pos < len(remaining):
+            result = recognizer(remaining, pos)
+            if result.status and result.index > pos:
+                # Check it's on a word boundary
+                at_start = pos == 0 or remaining[pos - 1] in " ,\t-"
+                at_end = (
+                    result.index == len(remaining) or remaining[result.index] in " ,\t-"
+                )
+                if at_start and at_end:
+                    pre_tokens.append(
+                        (
+                            pos,
+                            result.index,
+                            _result_to_token(
+                                result.value, remaining[pos : result.index]
+                            ),
+                        )
+                    )
+                    pos = result.index
+                    continue
+            pos += 1
+
+    # Sort by position, longest match first at each position
+    pre_tokens.sort(key=lambda x: (x[0], -(x[1] - x[0])))
+    used: list[tuple[int, int, Token]] = []
+    last_end = 0
+    for start, end, token in pre_tokens:
+        if start >= last_end:
+            used.append((start, end, token))
+            last_end = end
+
+    # Build token list: recognized spans + unrecognized gaps
+    def _emit_gap(gap_text: str) -> None:
+        """Classify gap words, with dash-compound splitting."""
+        # If gap starts with a dash (immediately after a recognized token),
+        # the trailing word is likely a release group (e.g., FLAC-TTGA → TTGA)
+        starts_with_dash = gap_text.lstrip(" ,").startswith("-")
+        gap_text = gap_text.strip(" ,-")
+        if not gap_text:
+            return
+        for w in _RE_WORD_SPLIT.split(gap_text):
+            w = w.strip()
+            if not w:
+                continue
+            dec_token = _try_decimal_episode(w)
+            if dec_token is not None:
+                tokens.append(dec_token)
+                continue
+            token = _try_recognize(w)
+            if token is not None:
+                tokens.append(token)
+            elif starts_with_dash and tokens:
+                # Word after a dash that followed a recognized token — release group
+                tokens.append(Token(kind=TokenKind.RELEASE_GROUP, text=w))
+                starts_with_dash = False
+            elif "-" in w and not w.startswith("-"):
+                sub_parts = w.split("-")
+                sub_tokens: list[Token] = []
+                for sp in sub_parts:
+                    sp = sp.strip()
+                    if not sp:
+                        continue
+                    st = _try_recognize(sp)
+                    if st is not None:
+                        sub_tokens.append(st)
+                    else:
+                        sub_tokens.append(Token(kind=TokenKind.UNKNOWN, text=sp))
+                # Scene convention: last unclassified part after metadata
+                # is the release group (e.g., "REMUX-FraMeSToR")
+                has_meta = any(t.kind != TokenKind.UNKNOWN for t in sub_tokens)
+                if has_meta and sub_tokens and sub_tokens[-1].kind == TokenKind.UNKNOWN:
+                    sub_tokens[-1] = Token(
+                        kind=TokenKind.RELEASE_GROUP,
+                        text=sub_tokens[-1].text,
+                    )
+                tokens.extend(sub_tokens)
+            else:
+                tokens.append(Token(kind=TokenKind.UNKNOWN, text=w))
+
+    pos = 0
+    for start, end, token in used:
+        _emit_gap(text[pos:start])
+        tokens.append(token)
+        pos = end
+    _emit_gap(text[pos:])
+
+    return tokens
+
+
+def scan_dot_segments(text: str) -> list[Token]:
+    """Scan dot-separated scene-style text.
+
+    Instead of the placeholder approach for compound tokens, this scanner
+    tries recognizers at each position in the dot-split stream.  When a
+    recognizer matches across a dot boundary (e.g. 'H' + '264' → H.264),
+    the segments are rejoined.
+
+    Returns DOT_TEXT tokens for unrecognized segments and typed tokens for
+    recognized metadata.
+    """
+    raw_parts = text.split(".")
+    tokens: list[Token] = []
+    i = 0
+
+    while i < len(raw_parts):
+        part = raw_parts[i]
+
+        if not part:
+            i += 1
+            continue
+
+        # Try multi-segment compounds first (longest match)
+        # Check 3-segment: "MA.5.1", "FLAC.2.0"
+        if i + 2 < len(raw_parts):
+            compound3 = f"{part}.{raw_parts[i + 1]}.{raw_parts[i + 2]}"
+            token = _try_recognize(compound3)
+            if token is not None:
+                tokens.append(token)
+                i += 3
+                continue
+
+        # Check 2-segment: "H.264", "AAC2.0"
+        if i + 1 < len(raw_parts):
+            # Also try with trailing "-suffix" stripped for "H.264-VARYG"
+            next_part = raw_parts[i + 1]
+            compound2 = f"{part}.{next_part}"
+            token = _try_recognize(compound2)
+            if token is not None:
+                tokens.append(token)
+                i += 2
+                continue
+
+            # Strip trailing -suffix and try: "H" + "264-VARYG" → "H.264"
+            next_base = _RE_DASH_SUFFIX.sub("", next_part)
+            if next_base != next_part:
+                compound2_stripped = f"{part}.{next_base}"
+                token = _try_recognize(compound2_stripped)
+                if token is not None:
+                    tokens.append(token)
+                    # The suffix after the dash is the release group
+                    # (scene convention: codec-GROUP)
+                    suffix = next_part[len(next_base) + 1 :]
+                    if suffix:
+                        suffix_token = _try_recognize(suffix)
+                        if suffix_token is not None:
+                            tokens.append(suffix_token)
+                        else:
+                            tokens.append(
+                                Token(kind=TokenKind.RELEASE_GROUP, text=suffix)
+                            )
+                    i += 2
+                    continue
+
+        # Single segment
+        token = _try_recognize(part)
+        if token is not None:
+            tokens.append(token)
+        else:
+            # Check if it has a trailing "-GROUP" (scene convention)
+            dash_m = _RE_DASH_GROUP.match(part)
+            if dash_m:
+                prefix = dash_m.group(1)
+                suffix = dash_m.group(2)
+                prefix_token = _try_recognize(prefix)
+                if prefix_token is not None:
+                    tokens.append(prefix_token)
+                    tokens.append(Token(kind=TokenKind.RELEASE_GROUP, text=suffix))
+                else:
+                    tokens.append(Token(kind=TokenKind.DOT_TEXT, text=part))
+            else:
+                tokens.append(Token(kind=TokenKind.DOT_TEXT, text=part))
+
+        i += 1
+
+    return tokens
+
+
+def _find_recognizer_in_text(
+    text: str, recognizers: tuple[Parser, ...]
+) -> tuple[int, int, Token] | None:
+    """Search for the first recognizer match at any position in text.
+
+    Tries each recognizer at each position, returning the first match.
+    Returns ``(start, end, token)`` or None.
+    """
+    for pos in range(len(text)):
+        for recognizer in recognizers:
+            result = recognizer(text, pos)
+            if result.status:
+                return (
+                    pos,
+                    result.index,
+                    _result_to_token(result.value, text[pos : result.index]),
+                )
+    return None
+
+
+# Recognizers safe for finding markers embedded *within* text.
+# Only recognizers with distinctive prefixes (S##E##, 第N話, etc.) — bare
+# numbers and patterns that match too broadly (episode_bare, season_word)
+# are excluded to avoid false positives on title content.
+_EMBEDDED_RECOGNIZERS = (
+    episode_multi_se,  # S01E01-E06
+    episode_se,  # S01E05
+    season_special,  # S01OVA, S03OP
+    episode_jp,  # 第01話
+    season_jp,  # 第1期
+    season_word,  # 4th Season, Season 01
+    episode_ep,  # EP05, E5
+)
+
+
+def find_episode_in_text(text: str) -> tuple[int, int, Token] | None:
+    """Search for an episode/season+special marker at any position in text.
+
+    Returns (start, end, token) or None.
+    """
+    return _find_recognizer_in_text(text, _EMBEDDED_RECOGNIZERS)
+
+
+def _try_recognize(text: str) -> Token | None:
+    """Try all recognizers against a complete text. Returns Token or None."""
+    for recognizer in _RECOGNIZERS:
+        result = recognizer(text, 0)
+        if result.status and result.index == len(text):
+            return _result_to_token(result.value, text)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Public API — replacements for media_parser classification functions
+# ---------------------------------------------------------------------------
+
+
+def classify_text(text: str) -> TokenKind | None:
+    """Classify a bare text string as a known metadata type.
+
+    Drop-in replacement for media_parser._classify_text_content, using
+    parsy recognizers instead of manual regex/set checks.
+    """
+    token = _try_recognize(text.strip())
+    return token.kind if token is not None else None
+
+
+def is_metadata_word(word: str) -> bool:
+    """Check if a word (or any of its dash-separated parts) is metadata.
+
+    Drop-in replacement for media_parser._is_metadata_word.
+    """
+    if classify_text(word) is not None:
+        return True
+    if "-" in word:
+        return any(classify_text(sp) is not None for sp in word.split("-") if sp)
+    return False
+
+
+def count_metadata_words(text: str) -> int:
+    """Count how many whitespace/comma-separated words classify as metadata.
+
+    Drop-in replacement for media_parser._count_metadata_words.
+    """
+    count = 0
+    for w in _RE_WORD_SPLIT.split(text):
+        w = w.strip()
+        if w and is_metadata_word(w):
+            count += 1
+    return count
+
 
 # ---------------------------------------------------------------------------
 # Structural tokenizer
@@ -142,35 +1042,6 @@ def _strip_extension(text: str) -> tuple[str, Token | None]:
 def _is_scene_style(text: str) -> bool:
     """Detect if text uses dot-separated scene naming (2+ dots, no spaces)."""
     return text.count(".") >= 2 and " " not in text
-
-
-def _split_scene_dots(text: str) -> list[Token]:
-    """Split dot-separated scene text into DOT_TEXT tokens.
-
-    Preserves compound tokens like H.264, AAC2.0, WEB-DL, DTS-HD.
-    """
-    # Replace compound tokens with placeholders
-    compounds_found: list[str] = []
-
-    def _replace(m: re.Match[str]) -> str:
-        compounds_found.append(m.group(0))
-        return _COMPOUND_PLACEHOLDER
-
-    processed = _COMPOUND_RE.sub(_replace, text)
-
-    # Split on dots
-    parts = processed.split(".")
-    tokens: list[Token] = []
-    compound_idx = 0
-    for part in parts:
-        if not part:
-            continue
-        # Restore any placeholders
-        while _COMPOUND_PLACEHOLDER in part:
-            part = part.replace(_COMPOUND_PLACEHOLDER, compounds_found[compound_idx], 1)
-            compound_idx += 1
-        tokens.append(Token(kind=TokenKind.DOT_TEXT, text=part))
-    return tokens
 
 
 def _split_separators(text: str) -> list[Token]:
@@ -196,10 +1067,6 @@ def tokenize_component(text: str) -> list[Token]:
     Handles brackets [], parens () with nesting, lenticular quotes 「」,
     and detects scene-style dot-separated names.
     """
-    # Strip NUL bytes — they can't appear in filenames and would collide
-    # with the compound-token placeholder used in scene-style splitting.
-    text = text.replace("\x00", "")
-
     # Strip extension first if this looks like a filename
     ext_token: Token | None = None
     text, ext_token = _strip_extension(text)
@@ -217,7 +1084,7 @@ def tokenize_component(text: str) -> list[Token]:
         if not raw:
             return
         if _is_scene_style(raw):
-            tokens.extend(_split_scene_dots(raw))
+            tokens.extend(scan_dot_segments(raw))
         else:
             tokens.extend(_split_separators(raw))
 
@@ -305,597 +1172,101 @@ def tokenize(path: str) -> list[Token]:
 # Phase 2: Semantic classifier
 # ---------------------------------------------------------------------------
 
-# Vocabulary sets (all lowercase for case-insensitive matching)
-
-_VIDEO_CODECS = frozenset(
-    {
-        "hevc",
-        "avc",
-        "x265",
-        "x264",
-        "h.264",
-        "h.265",
-        "h264",
-        "h265",
-        "av1",
-        "xvid",
-        "divx",
-        "mpeg2",
-    }
-)
-
-_AUDIO_CODECS = frozenset(
-    {
-        "aac",
-        "flac",
-        "opus",
-        "dd",
-        "ddp",
-        "dts",
-        "dts-hd",
-        "e-ac-3",
-        "eac3",
-        "ac3",
-        "truehd",
-        "pcm",
-        "lpcm",
-    }
-)
-
-# Audio codecs that appear as compound tokens with channel info (e.g. AAC2.0)
-_RE_AUDIO_COMPOUND = re.compile(
-    r"^(AAC|DD|DDP|DTS-HD\s*MA|FLAC|AC3|EAC3|E-AC-3|TrueHD)"
-    r"[.\s]?(\d\.\d)$",
-    re.IGNORECASE,
-)
-
-_SOURCES = frozenset(
-    {
-        "bd",
-        "blu-ray",
-        "bluray",
-        "bdrip",
-        "bdremux",
-        "web",
-        "web-dl",
-        "webdl",
-        "webrip",
-        "cr",
-        "amzn",
-        "dsnp",
-        "nf",
-        "hidive",
-        "hidi",
-        "hulu",
-        "adn",
-        "unext",
-        "atvp",
-        "funi",
-        "hdtv",
-        "dvd",
-        "dvd-r",
-        "dvdr",
-        "dvdrip",
-        "vcd",
-        "cd-r",
-        "cdr",
-        "sdtv",
-        "raw",
-    }
-)
-
-# Map lowercase source keywords to canonical source_type values.
-# Keywords not in this map (e.g. "raw") are recognized as SOURCE tokens
-# but don't set a source_type.
-_SOURCE_TYPE_MAP: dict[str, str] = {
-    # Blu-ray
-    "bd": "BD",
-    "blu-ray": "BD",
-    "bluray": "BD",
-    "bdrip": "BD",
-    "bdremux": "BD",
-    # Web / streaming
-    "web": "Web",
-    "web-dl": "Web",
-    "webdl": "Web",
-    "webrip": "Web",
-    "cr": "Web",
-    "amzn": "Web",
-    "dsnp": "Web",
-    "nf": "Web",
-    "hidive": "Web",
-    "hidi": "Web",
-    "hulu": "Web",
-    "adn": "Web",
-    "unext": "Web",
-    "atvp": "Web",
-    "funi": "Web",
-    # DVD
-    "dvd": "DVD",
-    "dvdrip": "DVD",
-    "dvd-r": "DVD-R",
-    "dvdr": "DVD-R",
-    # TV capture
-    "hdtv": "HDTV",
-    "sdtv": "SDTV",
-    # Optical
-    "vcd": "VCD",
-    "cd-r": "CD-R",
-    "cdr": "CD-R",
-}
-
-_RESOLUTIONS = frozenset(
-    {
-        "480p",
-        "540p",
-        "576p",
-        "720p",
-        "1080p",
-        "1080i",
-        "2160p",
-        "4k",
-    }
-)
-
-_RE_RESOLUTION_DIMS = re.compile(r"^\d{3,4}x\d{3,4}$")
-
-_LANGUAGES = frozenset(
-    {
-        "dual",
-        "multi",
-        "jpn",
-        "eng",
-        "ger",
-        "fre",
-        "spa",
-        "ita",
-        "chi",
-        "kor",
-        "rus",
-        "ara",
-        "por",
-        "tha",
-    }
-)
-
-_SUBTITLE_KEYWORDS = frozenset(
-    {
-        "multisub",
-        "msubs",
-        "subtitle",
-        "multiple subtitle",
-    }
-)
-
 _RE_SUBTITLE_SOFT = re.compile(r"softsub", re.IGNORECASE)
 
 _RE_CRC32 = re.compile(r"^[0-9A-Fa-f]{8}$")
 
-_RE_YEAR = re.compile(r"^(1[89]\d{2}|20[0-9]{2})$")
-
-# Episode patterns
-_RE_EP_SE = re.compile(r"^[Ss](\d{1,2})[Ee](\d{1,4})(?:v(\d+))?$")
-_RE_EP_NUM = re.compile(r"^(\d{1,4})(?:v(\d+))?$")
-_RE_EP_EP = re.compile(r"^[Ee][Pp]?(\d{1,4})(?:v(\d+))?$")
-_RE_EP_JP = re.compile(r"^第(\d{1,4})話")  # 第01話
-_RE_SEASON_JP = re.compile(r"^第(\d{1,2})期")  # 第1期
-_RE_EP_FINAL = re.compile(r"^(\d{1,4})(?:v(\d+))?\s*END$", re.IGNORECASE)
-_RE_SEASON_ONLY = re.compile(r"^[Ss](\d{1,2})$")
-_RE_SEASON_WORD = re.compile(r"^(\d+)(?:st|nd|rd|th)\s+Season$", re.IGNORECASE)
-_RE_SPECIAL = re.compile(r"^(SP|OVA|OAD|ONA)(\d*)$", re.IGNORECASE)
-_RE_BATCH_RANGE = re.compile(r"^(\d{1,4})\s*[~～]\s*(\d{1,4})$")
-_RE_VERSION = re.compile(r"^v(\d+)$", re.IGNORECASE)
-_RE_REPACK = re.compile(r"^REPACK\d?$", re.IGNORECASE)
+_RE_YEAR = re.compile(r"^(19[4-9]\d|20[0-9]{2})$")  # 1940-2099 structural match
 
 # Release group detection
 _RE_SCENE_TRAILING_GROUP = re.compile(r"^(.*)-([A-Za-z][A-Za-z0-9]{1,})$")
 
-# Site prefix
-_RE_SITE_PREFIX = re.compile(r"^www\.\w+\.\w+$", re.IGNORECASE)
-
-# Remux
-_RE_REMUX = re.compile(r"remux$", re.IGNORECASE)
-
-# Japanese bonus content markers
-_BONUS_KEYWORDS = frozenset(
-    {
-        "映像特典",
-        "ノンテロップ",
-        "メニュー画面集",
-        "メニュー画面",
-        "予告",
-        "特典",
-        "告知cm",
-    }
-)
-
-_RE_BONUS_KEYWORD = re.compile(
-    "|".join(re.escape(k) for k in _BONUS_KEYWORDS),
-    re.IGNORECASE,
-)
-
-# Japanese bonus type → English abbreviation for HamaTV naming
-_BONUS_TYPE_MAP: dict[str, str] = {
-    "ノンテロップOP": "NCOP",
-    "ノンテロップED": "NCED",
-    "ノンテロップ": "NCOP",  # fallback when OP/ED not specified
-    "PV": "PV",
-    "予告": "Preview",
-    "告知CM": "CM",
-    "メニュー画面集": "Menu",
-    "メニュー画面": "Menu",
-    "映像特典": "Bonus",  # generic bonus marker
-    "特典": "Bonus",
-}
-
 
 def classify_bonus_type(text: str) -> str:
-    """Extract a bonus type abbreviation from Japanese bonus content text.
+    """Extract a bonus type abbreviation from bonus content text.
 
-    Checks for known Japanese bonus keywords and returns the English
-    abbreviation. Handles compound content like ``ノンテロップED「Title」``.
+    Uses the bonus_jp and bonus_en recognizers to classify Japanese
+    keywords (映像特典, ノンテロップOP) and English keywords (NCOP, NCED).
     """
-    for jp, en in _BONUS_TYPE_MAP.items():
-        if jp in text:
-            # Distinguish NCOP vs NCED when ノンテロップ is present
-            if jp == "ノンテロップ":
-                if "OP" in text or "op" in text:
-                    return "NCOP"
-                if "ED" in text or "ed" in text:
-                    return "NCED"
-            return en
+    for pos in range(len(text)):
+        for recognizer in (bonus_jp, bonus_en):
+            r = recognizer(text, pos)
+            if r.status and isinstance(r.value, BonusKeyword):
+                return r.value.bonus_type
     return ""
-
-
-# HDR
-_HDR_KEYWORDS = frozenset(
-    {
-        "hdr",
-        "hdr10",
-        "hdr10+",
-        "dovi",
-        "dolby vision",
-    }
-)
-
-
-def _classify_text_content(text: str) -> TokenKind | None:
-    """Try to classify a bare text string as a known metadata type.
-
-    Returns the TokenKind if recognized, None otherwise.
-    """
-    lower = text.lower().strip()
-
-    # Resolution
-    if lower in _RESOLUTIONS or _RE_RESOLUTION_DIMS.match(text):
-        return TokenKind.RESOLUTION
-
-    # Video codec
-    if lower in _VIDEO_CODECS:
-        return TokenKind.VIDEO_CODEC
-
-    # Audio codec (simple)
-    if lower in _AUDIO_CODECS:
-        return TokenKind.AUDIO_CODEC
-
-    # Audio codec (compound like AAC2.0)
-    if _RE_AUDIO_COMPOUND.match(text):
-        return TokenKind.AUDIO_CODEC
-
-    # Source
-    if lower in _SOURCES:
-        return TokenKind.SOURCE
-
-    # Language
-    if lower in _LANGUAGES:
-        return TokenKind.LANGUAGE
-
-    # Subtitle
-    if lower in _SUBTITLE_KEYWORDS:
-        return TokenKind.SUBTITLE_INFO
-
-    # Remux
-    if _RE_REMUX.match(text):
-        return TokenKind.REMUX
-
-    # Repack (treat as metadata, not title)
-    if _RE_REPACK.match(text):
-        return TokenKind.UNKNOWN
-
-    # HDR
-    if lower in _HDR_KEYWORDS:
-        return TokenKind.UNKNOWN  # Could add HDR token kind later
-
-    # Version alone (v2, v3)
-    if _RE_VERSION.match(text):
-        return TokenKind.VERSION
-
-    # Site prefix
-    if _RE_SITE_PREFIX.match(text):
-        return TokenKind.SITE_PREFIX
-
-    return None
 
 
 def _classify_episode_text(text: str) -> Token | None:
     """Try to parse text as an episode/season identifier.
 
-    Matches the *entire* text. Returns a new Token with extracted numbers,
-    or None.
+    Delegates to the scanner's parsy-based recognizers.
     """
-    stripped = text.strip()
+    text = text.strip()
 
-    # S01E05 or S01E05v2
-    m = _RE_EP_SE.match(stripped)
-    if m:
-        t = Token(
-            kind=TokenKind.EPISODE,
-            text=stripped,
-            season=int(m.group(1)),
-            episode=int(m.group(2)),
-        )
-        if m.group(3):
-            t.version = int(m.group(3))
-        return t
+    dec_token = _try_decimal_episode(text)
+    if dec_token is not None:
+        return dec_token
 
-    # 第01話 (Japanese episode) — full match only
-    m = _RE_EP_JP.match(stripped)
-    if m:
-        return Token(
-            kind=TokenKind.EPISODE,
-            text=stripped,
-            episode=int(m.group(1)),
-        )
-
-    # 第1期 (Japanese season) — full match only
-    m = _RE_SEASON_JP.match(stripped)
-    if m:
-        return Token(
-            kind=TokenKind.SEASON,
-            text=stripped,
-            season=int(m.group(1)),
-        )
-
-    # Special: SP1, OVA, OAD, ONA
-    m = _RE_SPECIAL.match(stripped)
-    if m:
-        ep = int(m.group(2)) if m.group(2) else None
-        return Token(
-            kind=TokenKind.EPISODE,
-            text=stripped,
-            episode=ep,
-        )
-
-    # Season only: S01
-    m = _RE_SEASON_ONLY.match(stripped)
-    if m:
-        return Token(
-            kind=TokenKind.SEASON,
-            text=stripped,
-            season=int(m.group(1)),
-        )
-
-    # "4th Season", "2nd Season"
-    m = _RE_SEASON_WORD.match(stripped)
-    if m:
-        return Token(
-            kind=TokenKind.SEASON,
-            text=stripped,
-            season=int(m.group(1)),
-        )
-
-    # EP05, E5
-    m = _RE_EP_EP.match(stripped)
-    if m:
-        t = Token(
-            kind=TokenKind.EPISODE,
-            text=stripped,
-            episode=int(m.group(1)),
-        )
-        if m.group(2):
-            t.version = int(m.group(2))
-        return t
-
-    # Batch range: 01 ~ 13, 01~26
-    m = _RE_BATCH_RANGE.match(stripped)
-    if m:
-        return Token(
-            kind=TokenKind.BATCH_RANGE,
-            text=stripped,
-            batch_start=int(m.group(1)),
-            batch_end=int(m.group(2)),
-        )
-
-    # "05 END" or "05v2 END"
-    m = _RE_EP_FINAL.match(stripped)
-    if m:
-        t = Token(
-            kind=TokenKind.EPISODE,
-            text=stripped,
-            episode=int(m.group(1)),
-        )
-        if m.group(2):
-            t.version = int(m.group(2))
-        return t
-
-    # Bare number with optional version: "08", "04v2"
-    # But NOT 4-digit numbers that look like years (1900-2099)
-    m = _RE_EP_NUM.match(stripped)
-    if m and not _RE_YEAR.match(m.group(1)):
-        t = Token(
-            kind=TokenKind.EPISODE,
-            text=stripped,
-            episode=int(m.group(1)),
-        )
-        if m.group(2):
-            t.version = int(m.group(2))
-        return t
-
+    token = _try_recognize(text)
+    if token is not None and token.kind in (
+        TokenKind.EPISODE,
+        TokenKind.SPECIAL,
+        TokenKind.SEASON,
+        TokenKind.BATCH_RANGE,
+    ):
+        return token
     return None
-
-
-# Patterns for searching *within* a TEXT token for embedded episodes/seasons
-_RE_EP_JP_SEARCH = re.compile(r"第(\d{1,4})話")
-_RE_SEASON_JP_SEARCH = re.compile(r"第(\d{1,2})期")
-_RE_EP_SE_SEARCH = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,4})(?:v(\d+))?")
-_RE_SEASON_WORD_SEARCH = re.compile(r"(\d+)(?:st|nd|rd|th)\s+Season", re.IGNORECASE)
 
 
 def _split_text_with_embedded(token: Token) -> list[Token]:
     """Split a TEXT token that contains embedded episode/season markers.
 
-    E.g. "探偵オペラ 第01話" → [TEXT("探偵オペラ"), EPISODE("第01話")]
-    E.g. "Golden Kamuy 4th Season" → [TEXT("Golden Kamuy"), SEASON("4th Season")]
+    Uses the same recognizers as ``find_episode_in_text`` to find the first
+    embedded marker, then splits into before/match/after tokens.
 
-    Returns a list of 1+ tokens.
+    E.g. ``"探偵オペラ 第01話"`` → ``[TEXT("探偵オペラ"), EPISODE("第01話")]``
+    E.g. ``"Golden Kamuy 4th Season"`` → ``[TEXT("Golden Kamuy"), SEASON("4th Season")]``
     """
     text = token.text
+    match = _find_recognizer_in_text(text, _EMBEDDED_RECOGNIZERS)
 
-    # Try Japanese episode: 第XX話
-    m = _RE_EP_JP_SEARCH.search(text)
-    if m:
-        before = text[: m.start()].strip()
-        matched = text[m.start() : m.end()]
-        after = text[m.end() :].strip()
-        result: list[Token] = []
-        if before:
-            result.append(Token(kind=TokenKind.TEXT, text=before))
-        # Check for 終 (final episode marker) after 話
-        ep_text = matched
-        if after.startswith("(終)") or after.startswith("（終）"):
-            ep_text = matched
-            after = after[3:].strip()
-        result.append(
-            Token(
-                kind=TokenKind.EPISODE,
-                text=ep_text,
-                episode=int(m.group(1)),
-            )
-        )
-        if after:
-            result.append(Token(kind=TokenKind.TEXT, text=after))
-        return result
-
-    # Try SxxExx embedded in text with spaces
-    m = _RE_EP_SE_SEARCH.search(text)
-    if m:
-        before = text[: m.start()].strip()
-        after = text[m.end() :].strip()
-        result = []
-        if before:
-            result.append(Token(kind=TokenKind.TEXT, text=before))
-        t = Token(
-            kind=TokenKind.EPISODE,
-            text=m.group(0),
-            season=int(m.group(1)),
-            episode=int(m.group(2)),
-        )
-        if m.group(3):
-            t.version = int(m.group(3))
-        result.append(t)
-        if after:
-            result.append(Token(kind=TokenKind.TEXT, text=after))
-        return result
-
-    # Try "Nth Season"
-    m = _RE_SEASON_WORD_SEARCH.search(text)
-    if m:
-        before = text[: m.start()].strip()
-        after = text[m.end() :].strip()
-        result = []
-        if before:
-            result.append(Token(kind=TokenKind.TEXT, text=before))
-        result.append(
-            Token(
-                kind=TokenKind.SEASON,
-                text=m.group(0),
-                season=int(m.group(1)),
-            )
-        )
-        if after:
-            result.append(Token(kind=TokenKind.TEXT, text=after))
-        return result
-
-    # Try leading bare number: "01 Shiroi Koibito-tachi" → EPISODE + TEXT
-    m = re.match(r"^(\d{1,4})(?:v(\d+))?\s", text)
-    if m and not _RE_YEAR.match(m.group(1)):
-        ep_text = m.group(0).strip()
-        after = text[m.end() :].strip()
-        if after:
-            result = [
-                Token(
-                    kind=TokenKind.EPISODE,
-                    text=ep_text,
-                    episode=int(m.group(1)),
-                    version=int(m.group(2)) if m.group(2) else None,
+    # Fallback: leading bare number ("01 Title" → EPISODE + TEXT).
+    # episode_bare is too greedy for general embedded search, but a
+    # leading number followed by a space is a strong signal.
+    if match is None:
+        bare_result = _bare_episode_parser(text, 0)
+        if (
+            bare_result.status
+            and bare_result.index < len(text)
+            and text[bare_result.index] == " "
+        ):
+            ep_val = bare_result.value
+            # Reject if the number looks like a year
+            if not (1940 <= (ep_val.episode or 0) <= 2099):
+                match = (
+                    0,
+                    bare_result.index,
+                    _result_to_token(ep_val, text[: bare_result.index]),
                 )
-            ]
-            result.append(Token(kind=TokenKind.TEXT, text=after))
-            return result
 
-    return [token]
+    if match is None:
+        return [token]
 
+    start, end, matched_token = match
+    before = text[:start].strip()
+    after = text[end:].lstrip(" -")
 
-def _expand_metadata_words(text: str) -> list[Token]:
-    """Split text on whitespace/commas and classify each word.
+    # Strip Japanese final-episode marker 「(終)」/「（終）」 after 第XX話
+    if after.startswith("(終)") or after.startswith("（終）"):
+        after = after[3:].strip()
 
-    Dash-separated compounds like ``Bluray-1080p`` are sub-split so each
-    part can be classified individually.
-    """
-    tokens: list[Token] = []
-    for w in re.split(r"[\s,]+", text):
-        w = w.strip()
-        if not w:
-            continue
-        kind = _classify_text_content(w)
-        if kind:
-            tokens.append(Token(kind=kind, text=w))
-        else:
-            sub_parts = w.split("-")
-            if len(sub_parts) > 1:
-                sub_tokens: list[Token] = []
-                for sp in sub_parts:
-                    sp = sp.strip()
-                    if not sp:
-                        continue
-                    sk = _classify_text_content(sp)
-                    if sk:
-                        sub_tokens.append(Token(kind=sk, text=sp))
-                    else:
-                        sub_tokens.append(Token(kind=TokenKind.UNKNOWN, text=sp))
-                # Scene convention: last unclassified part after metadata
-                # is the release group (e.g., "REMUX-FraMeSToR")
-                has_meta = any(t.kind != TokenKind.UNKNOWN for t in sub_tokens)
-                if has_meta and sub_tokens and sub_tokens[-1].kind == TokenKind.UNKNOWN:
-                    sub_tokens[-1] = Token(
-                        kind=TokenKind.RELEASE_GROUP,
-                        text=sub_tokens[-1].text,
-                    )
-                tokens.extend(sub_tokens)
-            else:
-                tokens.append(Token(kind=TokenKind.UNKNOWN, text=w))
-    return tokens
-
-
-def _is_metadata_word(word: str) -> bool:
-    """Check if a word (or any of its dash-separated parts) is metadata."""
-    if _classify_text_content(word) is not None:
-        return True
-    if "-" in word:
-        return any(
-            _classify_text_content(sp) is not None for sp in word.split("-") if sp
-        )
-    return False
-
-
-def _count_metadata_words(text: str) -> int:
-    """Count how many whitespace/comma-separated words classify as metadata."""
-    count = 0
-    for w in re.split(r"[\s,]+", text):
-        w = w.strip()
-        if w and _classify_text_content(w) is not None:
-            count += 1
-    return count
+    result: list[Token] = []
+    if before:
+        result.append(Token(kind=TokenKind.TEXT, text=before))
+    result.append(matched_token)
+    if after:
+        result.append(Token(kind=TokenKind.TEXT, text=after))
+    return result
 
 
 def _classify_paren(token: Token) -> Token | list[Token]:
@@ -906,28 +1277,26 @@ def _classify_paren(token: Token) -> Token | list[Token]:
     """
     text = token.text.strip()
 
-    # Year: (1964), (2024)
-    if _RE_YEAR.match(text):
-        return Token(kind=TokenKind.YEAR, text=text, year=int(text))
-
-    # Japanese season: (第1期)
-    m = _RE_SEASON_JP.match(text)
-    if m:
-        return Token(kind=TokenKind.SEASON, text=text, season=int(m.group(1)))
-
-    # OVA in parens
-    m = _RE_SPECIAL.match(text)
-    if m:
-        ep = int(m.group(2)) if m.group(2) else None
-        return Token(kind=TokenKind.EPISODE, text=text, episode=ep)
+    # Try scanner recognizers for year, season, special, etc.
+    recognized = _try_recognize(text)
+    if recognized is not None and recognized.kind in (
+        TokenKind.YEAR,
+        TokenKind.SEASON,
+        TokenKind.EPISODE,
+        TokenKind.SPECIAL,
+        TokenKind.DUAL_AUDIO,
+        TokenKind.UNCENSORED,
+        TokenKind.EDITION,
+    ):
+        return recognized
 
     # Subtitle info: softSub(chi+eng)
     if _RE_SUBTITLE_SOFT.search(text):
         return Token(kind=TokenKind.SUBTITLE_INFO, text=text)
 
     # Technical metadata paren: contains resolution/codec/source keywords
-    if _count_metadata_words(text) >= 2:
-        return _expand_metadata_words(text)
+    if count_metadata_words(text) >= 2:
+        return scan_words(text)
 
     # Region/variant: (US), (JP)
     if len(text) == 2 and text.isalpha():
@@ -946,7 +1315,7 @@ def classify(tokens: list[Token]) -> list[Token]:
     seen_episode = False
 
     for i, token in enumerate(tokens):
-        if token.kind == TokenKind.EPISODE:
+        if token.kind in (TokenKind.EPISODE, TokenKind.SPECIAL):
             seen_episode = True
 
         if token.kind == TokenKind.EXTENSION:
@@ -975,14 +1344,29 @@ def classify(tokens: list[Token]) -> list[Token]:
                 result.append(Token(kind=TokenKind.SUBTITLE_INFO, text=token.text))
                 continue
 
-            words = re.split(r"[\s,]+", token.text)
-            meta_count = _count_metadata_words(token.text)
+            # Check for dot-separated metadata in brackets: [x264.AAC]
+            if "." in token.text and " " not in token.text.strip():
+                dot_tokens = scan_dot_segments(token.text.strip())
+                dot_meta = sum(
+                    1
+                    for t in dot_tokens
+                    if t.kind not in (TokenKind.DOT_TEXT, TokenKind.TEXT)
+                )
+                if dot_meta > 0:
+                    result.extend(dot_tokens)
+                    first_bracket_seen = True
+                    continue
+
+            words = _RE_WORD_SPLIT.split(token.text)
+            meta_count = count_metadata_words(token.text)
             is_metadata_bracket = meta_count > 0 and meta_count >= len(words) // 2
 
-            # First bracket: release group unless it's metadata
+            # First bracket: release group unless it's metadata or a
+            # known redistributor site (TGx, EZTV, etc.)
             if not first_bracket_seen:
                 first_bracket_seen = True
-                if not is_metadata_bracket:
+                is_redistributor = token.text.strip().lower() in _REDISTRIBUTORS
+                if not is_metadata_bracket and not is_redistributor:
                     result.append(
                         Token(
                             kind=TokenKind.RELEASE_GROUP,
@@ -996,10 +1380,10 @@ def classify(tokens: list[Token]) -> list[Token]:
             # a release group (Sonarr-style: [GROUP QUALITY-res,...])
             if is_metadata_bracket:
                 first_word = words[0].strip() if words else ""
-                first_is_meta = bool(first_word and _classify_text_content(first_word))
+                first_is_meta = bool(first_word and classify_text(first_word))
                 if not first_is_meta and first_word:
                     first_sub_meta = any(
-                        _classify_text_content(sp.strip())
+                        classify_text(sp.strip())
                         for sp in first_word.split("-")
                         if sp.strip()
                     )
@@ -1012,15 +1396,20 @@ def classify(tokens: list[Token]) -> list[Token]:
                         )
                         # Expand remaining words only
                         rest = token.text[len(first_word) :].strip(" ,")
-                        result.extend(_expand_metadata_words(rest))
+                        result.extend(scan_words(rest))
                         continue
 
-                result.extend(_expand_metadata_words(token.text))
+                result.extend(scan_words(token.text))
                 continue
 
             # Short alpha-only bracket (2-6 chars): likely a release group
+            # (unless it's a known redistributor)
             stripped = token.text.strip()
-            if 2 <= len(stripped) <= 6 and stripped.isalpha():
+            if (
+                2 <= len(stripped) <= 6
+                and stripped.isalpha()
+                and stripped.lower() not in _REDISTRIBUTORS
+            ):
                 result.append(
                     Token(
                         kind=TokenKind.RELEASE_GROUP,
@@ -1042,7 +1431,10 @@ def classify(tokens: list[Token]) -> list[Token]:
 
         if token.kind == TokenKind.LENTICULAR:
             # 「content」 is episode title, or bonus content
-            if _RE_BONUS_KEYWORD.search(token.text):
+            bonus_match = _find_recognizer_in_text(token.text, (bonus_jp, bonus_en))
+            if bonus_match is not None:
+                _, _, bonus_token = bonus_match
+                # Use the BonusKeyword's bonus_type but keep the full text
                 result.append(Token(kind=TokenKind.BONUS, text=token.text))
             else:
                 result.append(Token(kind=TokenKind.EPISODE_TITLE, text=token.text))
@@ -1060,11 +1452,13 @@ def classify(tokens: list[Token]) -> list[Token]:
 
             # Year?
             if _RE_YEAR.match(text):
-                result.append(Token(kind=TokenKind.YEAR, text=text, year=int(text)))
-                continue
+                y = int(text)
+                if 1940 <= y <= _CURRENT_YEAR + 1:
+                    result.append(Token(kind=TokenKind.YEAR, text=text, year=y))
+                    continue
 
             # Known metadata keyword?
-            kind = _classify_text_content(text)
+            kind = classify_text(text)
             if kind is not None:
                 result.append(Token(kind=kind, text=text))
                 continue
@@ -1085,7 +1479,7 @@ def classify(tokens: list[Token]) -> list[Token]:
                 words = text.split()
                 meta_start = None
                 for i, w in enumerate(words):
-                    if _is_metadata_word(w):
+                    if is_metadata_word(w):
                         meta_start = i
                         break
                 if meta_start is not None:
@@ -1093,41 +1487,35 @@ def classify(tokens: list[Token]) -> list[Token]:
                     meta_part = " ".join(words[meta_start:])
                     if title_part:
                         result.append(Token(kind=TokenKind.TEXT, text=title_part))
-                    result.extend(_expand_metadata_words(meta_part))
+                    result.extend(scan_words(meta_part))
                     continue
 
             # DOT_TEXT with embedded SxxExx (e.g., "S01E05----Is")
             if token.kind == TokenKind.DOT_TEXT:
-                m = _RE_EP_SE_SEARCH.search(text)
-                if m:
-                    t = Token(
-                        kind=TokenKind.EPISODE,
-                        text=m.group(0),
-                        season=int(m.group(1)),
-                        episode=int(m.group(2)),
-                    )
-                    if m.group(3):
-                        t.version = int(m.group(3))
-                    result.append(t)
+                ep_match = find_episode_in_text(text)
+                if ep_match:
+                    _, _, ep_token = ep_match
+                    result.append(ep_token)
+                    if ep_token.kind in (TokenKind.EPISODE, TokenKind.SPECIAL):
+                        seen_episode = True
                     continue
 
             # Scene trailing group: "H.264-VARYG" -> split into codec + group
+            # Only split when the prefix is a recognized metadata keyword,
+            # otherwise keep as-is (e.g. "Cherry-Pick" is a hyphenated title)
             if token.kind == TokenKind.DOT_TEXT:
                 m = _RE_SCENE_TRAILING_GROUP.match(text)
                 if m:
                     prefix = m.group(1)
                     group = m.group(2)
-                    # Classify the prefix part
-                    prefix_kind = _classify_text_content(prefix)
+                    prefix_kind = classify_text(prefix)
                     if prefix_kind:
                         result.append(Token(kind=prefix_kind, text=prefix))
-                    else:
-                        result.append(Token(kind=token.kind, text=prefix))
-                    result.append(Token(kind=TokenKind.RELEASE_GROUP, text=group))
-                    continue
+                        result.append(Token(kind=TokenKind.RELEASE_GROUP, text=group))
+                        continue
 
             # Bonus content in text
-            if _RE_BONUS_KEYWORD.search(text):
+            if _find_recognizer_in_text(text, (bonus_jp, bonus_en)):
                 result.append(Token(kind=TokenKind.BONUS, text=text))
                 continue
 
@@ -1150,9 +1538,11 @@ class ParsedMedia:
     """Result of parsing a media file path."""
 
     series_name: str = ""
+    series_name_alt: str = ""  # Alternate-language title (CJK/Latin split on / or |)
     episode_title: str = ""
     season: int | None = None
     episode: int | None = None
+    episodes: list[int] = field(default_factory=list)
     version: int | None = None
     is_special: bool = False
     special_tag: str = ""
@@ -1160,7 +1550,11 @@ class ParsedMedia:
     batch_range: tuple[int, int] | None = None
     release_group: str = ""
     source_type: str = ""  # "BD", "Web", "DVD", "HDTV", "SDTV", "VCD", "CD-R"
+    streaming_service: str = ""  # "AMZN", "CR", "NF", "DSNP", etc.
     is_remux: bool = False
+    is_dual_audio: bool = False
+    is_criterion: bool = False
+    is_uncensored: bool = False
     hash_code: str = ""
     resolution: str = ""
     video_codec: str = ""
@@ -1172,40 +1566,25 @@ class ParsedMedia:
     path_is_batch: bool = False
 
 
-# Token kinds that are metadata (not title)
-_METADATA_KINDS = frozenset(
-    {
-        TokenKind.RELEASE_GROUP,
-        TokenKind.CRC32,
-        TokenKind.EPISODE,
-        TokenKind.SEASON,
-        TokenKind.VERSION,
-        TokenKind.RESOLUTION,
-        TokenKind.VIDEO_CODEC,
-        TokenKind.AUDIO_CODEC,
-        TokenKind.SOURCE,
-        TokenKind.REMUX,
-        TokenKind.YEAR,
-        TokenKind.BATCH_RANGE,
-        TokenKind.SUBTITLE_INFO,
-        TokenKind.LANGUAGE,
-        TokenKind.SITE_PREFIX,
-        TokenKind.BONUS,
-        TokenKind.UNKNOWN,
-        TokenKind.EXTENSION,
-        TokenKind.PATH_SEP,
-    }
-)
+_RE_TITLE_SPLIT = re.compile(r"\s*[/|]\s*")
+_RE_CJK_CHAR = re.compile(r"[\u3000-\u9fff\uff00-\uffef]")
 
 
-def _extract_title_from_tokens(tokens: list[Token]) -> tuple[str, str]:
-    """Extract series name and episode title from classified tokens.
+def _has_cjk(text: str) -> bool:
+    return bool(_RE_CJK_CHAR.search(text))
 
-    Returns (series_name, episode_title).
+
+def _extract_title_from_tokens(tokens: list[Token]) -> tuple[str, str, str]:
+    """Extract series name, alt title, and episode title from classified tokens.
+
+    Returns (series_name, series_name_alt, episode_title).
 
     Strategy: collect TEXT/DOT_TEXT tokens that appear in the "title zone"
     (before the first episode marker or metadata-only region).
     After the episode marker, TEXT tokens become episode title (for scene style).
+
+    If the series name contains a ``/`` or ``|`` separator (common in
+    CJK/Latin bilingual releases), splits into primary and alt titles.
     """
     series_parts: list[str] = []
     ep_title_parts: list[str] = []
@@ -1220,7 +1599,7 @@ def _extract_title_from_tokens(tokens: list[Token]) -> tuple[str, str]:
             ep_title_parts.append(token.text)
             continue
 
-        if token.kind == TokenKind.EPISODE:
+        if token.kind in (TokenKind.EPISODE, TokenKind.SPECIAL):
             seen_episode = True
             continue
 
@@ -1261,10 +1640,36 @@ def _extract_title_from_tokens(tokens: list[Token]) -> tuple[str, str]:
     series_name = re.sub(r"\s*-\s*$", "", series_name)
     series_name = re.sub(r"\s+", " ", series_name)
 
+    # Split bilingual titles on / or | (common in CJK/Latin fansub releases).
+    # Only split on / when one side contains CJK characters (avoids breaking
+    # titles like "Fate/stay night"). Pipe with surrounding spaces is always
+    # treated as a bilingual separator.
+    series_name_alt = ""
+    m = _RE_TITLE_SPLIT.search(series_name)
+    if m:
+        left = series_name[: m.start()].strip()
+        right = series_name[m.end() :].strip()
+        sep = m.group(0).strip()
+        if sep == "|" or (_has_cjk(left) != _has_cjk(right)):
+            series_name = left
+            series_name_alt = right
+
     episode_title = " ".join(ep_title_parts).strip()
     episode_title = re.sub(r"\s+", " ", episode_title)
 
-    return series_name, episode_title
+    return series_name, series_name_alt, episode_title
+
+
+def _check_special(token: Token, pm: ParsedMedia) -> None:
+    """Check if an EPISODE token represents a special episode and update pm.
+
+    Only handles season-0 and decimal specials — typed Special/SeasonSpecial
+    results are now routed through TokenKind.SPECIAL instead.
+    """
+    if token.season == 0:
+        pm.is_special = True
+    if token.is_decimal_special:
+        pm.is_special = True
 
 
 def _build_parsed_media(tokens: list[Token]) -> ParsedMedia:
@@ -1292,19 +1697,40 @@ def _build_parsed_media(tokens: list[Token]) -> ParsedMedia:
                     pm.season = token.season
                 if token.version is not None:
                     pm.version = token.version
-                # Check for special episodes
-                stripped = token.text.strip().upper()
-                if _RE_SPECIAL.match(stripped):
-                    pm.is_special = True
-                    pm.special_tag = token.text.strip()
+                # Multi-episode: expand batch_start..batch_end into episodes list
+                if (
+                    token.batch_start is not None
+                    and token.batch_end is not None
+                    and token.batch_end >= token.batch_start
+                ):
+                    pm.episodes = list(range(token.batch_start, token.batch_end + 1))
+                # Check for special episodes (including season 0)
+                _check_special(token, pm)
+            elif pm.season is None and token.season is not None:
+                # A later EPISODE token has season info the first one lacked
+                # (e.g., bare "001" then "(S01E01)" in LoliHouse-style names).
+                # Upgrade with the season; keep original episode number.
+                pm.season = token.season
+                _check_special(token, pm)
+        elif token.kind == TokenKind.SPECIAL:
+            pm.is_special = True
+            pm.special_tag = token.text.strip()
+            if token.episode is not None:
+                pm.episode = token.episode
+            if token.season is not None:
+                pm.season = token.season
+            # S03OP/S03ED → set bonus_type for credit specials
+            tag_upper = pm.special_tag.upper()
+            if "OP" in tag_upper and "OP" == tag_upper[-2:]:
+                pm.bonus_type = "NCOP"
+            elif "ED" in tag_upper and "ED" == tag_upper[-2:]:
+                pm.bonus_type = "NCED"
         elif token.kind == TokenKind.SEASON:
             if pm.season is None:
                 pm.season = token.season
         elif token.kind == TokenKind.VERSION:
-            if pm.version is None:
-                m = _RE_VERSION.match(token.text)
-                if m:
-                    pm.version = int(m.group(1))
+            if pm.version is None and token.version is not None:
+                pm.version = token.version
         elif token.kind == TokenKind.RESOLUTION and not pm.resolution:
             pm.resolution = token.text
         elif token.kind == TokenKind.VIDEO_CODEC and not pm.video_codec:
@@ -1312,13 +1738,15 @@ def _build_parsed_media(tokens: list[Token]) -> ParsedMedia:
         elif token.kind == TokenKind.AUDIO_CODEC:
             pm.audio_codecs.append(token.text)
         elif token.kind == TokenKind.SOURCE:
+            lower = token.text.lower()
             if not pm.source_type:
-                lower = token.text.lower()
                 mapped = _SOURCE_TYPE_MAP.get(lower)
                 if mapped:
                     pm.source_type = mapped
                     if "remux" in lower:
                         pm.is_remux = True
+            if not pm.streaming_service and lower in _STREAMING_SERVICES:
+                pm.streaming_service = token.text
         elif token.kind == TokenKind.REMUX:
             pm.is_remux = True
             if not pm.source_type:
@@ -1349,12 +1777,21 @@ def _build_parsed_media(tokens: list[Token]) -> ParsedMedia:
             bt = classify_bonus_type(token.text)
             if bt and (not pm.bonus_type or pm.bonus_type == "Bonus"):
                 pm.bonus_type = bt
+        elif token.kind == TokenKind.DUAL_AUDIO:
+            pm.is_dual_audio = True
+        elif token.kind == TokenKind.UNCENSORED:
+            pm.is_uncensored = True
+        elif token.kind == TokenKind.EDITION:
+            if token.text.lower() == "criterion":
+                pm.is_criterion = True
         elif token.kind == TokenKind.EXTENSION:
             pm.extension = token.text
 
     # Extract title (preserve bonus-extracted episode_title if already set)
     saved_ep_title = pm.episode_title
-    pm.series_name, pm.episode_title = _extract_title_from_tokens(tokens)
+    pm.series_name, pm.series_name_alt, pm.episode_title = _extract_title_from_tokens(
+        tokens
+    )
     if saved_ep_title and not pm.episode_title:
         pm.episode_title = saved_ep_title
 
@@ -1365,6 +1802,40 @@ def parse_component(text: str) -> ParsedMedia:
     """Parse a single path component (directory or filename) into ParsedMedia."""
     tokens = classify(tokenize_component(text))
     return _build_parsed_media(tokens)
+
+
+def _merge_scanned_metadata(tokens: list[Token], pm: ParsedMedia) -> None:
+    """Merge metadata tokens from scan_words into a ParsedMedia, filling gaps."""
+    for t in tokens:
+        if t.kind == TokenKind.SOURCE:
+            lower = t.text.lower()
+            if not pm.source_type:
+                mapped = _SOURCE_TYPE_MAP.get(lower, "")
+                if mapped:
+                    pm.source_type = mapped
+                if "remux" in lower:
+                    pm.is_remux = True
+            if not pm.streaming_service and lower in _STREAMING_SERVICES:
+                pm.streaming_service = t.text
+        elif t.kind == TokenKind.REMUX and not pm.is_remux:
+            pm.is_remux = True
+            if not pm.source_type:
+                pm.source_type = "BD"
+        elif t.kind == TokenKind.RESOLUTION and not pm.resolution:
+            pm.resolution = t.text
+        elif t.kind == TokenKind.VIDEO_CODEC and not pm.video_codec:
+            pm.video_codec = t.text
+        elif t.kind == TokenKind.AUDIO_CODEC:
+            pm.audio_codecs.append(t.text)
+        elif t.kind == TokenKind.RELEASE_GROUP and not pm.release_group:
+            pm.release_group = t.text
+        elif t.kind == TokenKind.DUAL_AUDIO:
+            pm.is_dual_audio = True
+        elif t.kind == TokenKind.UNCENSORED:
+            pm.is_uncensored = True
+        elif t.kind == TokenKind.EDITION:
+            if t.text.lower() == "criterion":
+                pm.is_criterion = True
 
 
 def parse_media_path(rel_path: str) -> ParsedMedia:
@@ -1385,14 +1856,20 @@ def parse_media_path(rel_path: str) -> ParsedMedia:
     # Parse the filename (primary source of episode/metadata)
     file_pm = parse_component(filename)
 
-    # Parse the most relevant directory component (usually the immediate parent)
-    # Use the first non-trivial directory for series name
+    # Parse directory components — first for series name, all for metadata.
+    # Scan all directory texts for metadata to fill gaps (resolution, codec,
+    # release group often appear in subdirectory names).
     dir_pm: ParsedMedia | None = None
     for dp in dir_parts:
         dp = dp.strip()
-        if dp:
+        if not dp:
+            continue
+        if dir_pm is None:
             dir_pm = parse_component(dp)
-            break
+        else:
+            # Scan additional directories for metadata that dir_pm missed
+            extra_tokens = scan_words(dp)
+            _merge_scanned_metadata(extra_tokens, dir_pm)
 
     if dir_pm is None:
         return file_pm
@@ -1400,9 +1877,16 @@ def parse_media_path(rel_path: str) -> ParsedMedia:
     # Merge: directory provides path_series_name, filename is primary
     result = file_pm
 
-    # Directory series name
+    # Directory series name — clean metadata from directory name
     if dir_pm.series_name:
-        result.path_series_name = dir_pm.series_name
+        cleaned = clean_series_title(dir_pm.series_name)
+        result.path_series_name = cleaned if cleaned else dir_pm.series_name
+
+        # If the directory had metadata words that parse_component didn't
+        # extract (common for bare directory names without brackets/dots),
+        # scan the full directory text for metadata to fill gaps.
+        if not dir_pm.source_type and not dir_pm.resolution:
+            _merge_scanned_metadata(scan_words(dir_pm.series_name), dir_pm)
 
     # Batch info from directory
     if dir_pm.path_is_batch:
@@ -1411,13 +1895,33 @@ def parse_media_path(rel_path: str) -> ParsedMedia:
         result.batch_range = dir_pm.batch_range
         result.path_is_batch = True
 
-    # Release group fallback
-    if not result.release_group and dir_pm.release_group:
+    # Release group — directory group is more reliable than filename brackets
+    # (brackets in filenames may contain artist credits, not release groups)
+    if dir_pm.release_group:
         result.release_group = dir_pm.release_group
+    # Keep file group only if directory didn't provide one
 
     # Source type fallback
     if not result.source_type and dir_pm.source_type:
         result.source_type = dir_pm.source_type
+    if dir_pm.is_remux and not result.is_remux:
+        result.is_remux = True
+
+    # Resolution fallback
+    if not result.resolution and dir_pm.resolution:
+        result.resolution = dir_pm.resolution
+
+    # Video codec fallback
+    if not result.video_codec and dir_pm.video_codec:
+        result.video_codec = dir_pm.video_codec
+
+    # Audio codec fallback
+    if not result.audio_codecs and dir_pm.audio_codecs:
+        result.audio_codecs = dir_pm.audio_codecs
+
+    # Streaming service fallback
+    if not result.streaming_service and dir_pm.streaming_service:
+        result.streaming_service = dir_pm.streaming_service
 
     # Year fallback
     if result.year is None and dir_pm.year is not None:
@@ -1426,6 +1930,22 @@ def parse_media_path(rel_path: str) -> ParsedMedia:
     # Season fallback from directory
     if result.season is None and dir_pm.season is not None:
         result.season = dir_pm.season
+
+    # Boolean flags — propagate from directory if set
+    if dir_pm.is_dual_audio:
+        result.is_dual_audio = True
+    if dir_pm.is_criterion:
+        result.is_criterion = True
+    if dir_pm.is_uncensored:
+        result.is_uncensored = True
+
+    # Strip release group prefix from series name (dot-prefix convention:
+    # "GroupName.Series.Title.EpNN" → series "GroupName Series Title" but
+    # the group is "GroupName")
+    if result.release_group and result.series_name:
+        prefix = result.release_group + " "
+        if result.series_name.startswith(prefix):
+            result.series_name = result.series_name[len(prefix) :].strip()
 
     return result
 
@@ -1580,11 +2100,14 @@ class TitleAliasIndex:
 _RE_META_BOUNDARY = re.compile(
     r"[\s.]+(?:S\d+(?:[+-]S?\d+)?(?:\+OVA)?|"
     r"BD|BDRip|BluRay|Blu-Ray|WEB|WEB-DL|WEBRip|REMUX|DVD|DVDRip|DVD-R|HDTV|SDTV|VCD|CD-R|"
-    r"Dual[\s.]Audio|x26[45]|HEVC|AVC|H\.26[45]|"
+    r"Dual[\s.]Audio|DUAL|Uncensored|x26[45]|HEVC|AVC|H\.26[45]|"
     r"1080p|720p|2160p|4K|"
     r"FLAC|AAC|DTS|AC3|DD|EAC3)\b",
     re.IGNORECASE,
 )
+
+
+_RE_TRAILING_BRACKET = re.compile(r"\s*\[.*?\]\s*$")
 
 
 def clean_series_title(name: str) -> str:
@@ -1593,10 +2116,14 @@ def clean_series_title(name: str) -> str:
     Handles both space-separated and dot-separated names, e.g.
     ``"Show S01-S02 Dual Audio BDRip x265-GROUP"`` → ``"Show"``
     ``"Show.S02.1080p.BluRay.x265-GROUP"`` → ``"Show"``.
+
+    Also strips trailing ``[bracket]`` content (release groups / metadata
+    that the parser didn't classify).
     """
     m = _RE_META_BOUNDARY.search(name)
     if m:
-        return name[: m.start()].strip(" .-")
+        name = name[: m.start()].strip(" .-")
+    name = _RE_TRAILING_BRACKET.sub("", name).strip()
     return name
 
 
@@ -1604,11 +2131,12 @@ def name_variants(name: str) -> set[str]:
     """Return all normalized key variants for a series name.
 
     Produces keys from the raw name, the parser-extracted name (without
-    year/quality), and the metadata-truncated name.  Any of these may
-    match download index keys.
+    year/quality), the metadata-truncated name, and the alternate-language
+    title (if present).  Any of these may match download index keys.
     """
     keys: set[str] = set()
-    for variant in (name, parse_component(name).series_name, clean_series_title(name)):
+    pm = parse_component(name)
+    for variant in (name, pm.series_name, pm.series_name_alt, clean_series_title(name)):
         k = normalize_for_matching(variant)
         if k:
             keys.add(k)

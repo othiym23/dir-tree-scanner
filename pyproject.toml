@@ -24,6 +24,8 @@ dev = [
     "pyright>=1.1",
     "ty>=0.0.25",
     "hypothesis>=6.151.9",
+    "parsy>=2.2",
+    "pytest-cov>=7.1.0",
 ]
 
 [tool.ruff]

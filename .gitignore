@@ -6,3 +6,6 @@ __pycache__/
 .ruff_cache/
 .venv/
 *.db
+.coverage
+parser-problems.jsonl
+parser-problems.state
