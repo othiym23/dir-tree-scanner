@@ -1374,7 +1374,7 @@ class TestQARegression:
             "Confess.Fletch.2022.2160p.WEB-DL.DD5.1.HDR.H.265-EVO.mkv"
         )
         assert pm.hdr == "HDR"
-        assert pm.resolution == "2160p"
+        assert pm.resolution == "4K"
         assert pm.release_group == "EVO"
 
     def test_hdr10_detected(self):
@@ -1454,11 +1454,31 @@ class TestQARegression:
         assert pm.release_group == "Hinna"
 
     def test_resolution_with_p_suffix(self):
-        """1440x1080p should be recognized as resolution."""
+        """1440x1080p should normalize to 1080p."""
         pm = mp.parse_component(
             "Show - 01 (BDRip 1440x1080p x265 HEVC FLAC 2.0)[sxales].mkv"
         )
-        assert pm.resolution == "1440x1080p"
+        assert pm.resolution == "1080p"
+
+    def test_resolution_dimension_normalized(self):
+        """1920x1080 should normalize to 1080p in parser output."""
+        pm = mp.parse_component("Movie.2022.1920x1080.BluRay.x265-GROUP.mkv")
+        assert pm.resolution == "1080p"
+
+    def test_resolution_480_from_dimensions(self):
+        """720x480 should normalize to 480p."""
+        pm = mp.parse_component("Show - 01 (BDRip 720x480 x265 AC3 2.0)[Group].mkv")
+        assert pm.resolution == "480p"
+
+    def test_resolution_interlaced_preserved(self):
+        """1080i in filename should stay 1080i."""
+        pm = mp.parse_component("Show.S01E01.1080i.HDTV.x264-GROUP.mkv")
+        assert pm.resolution == "1080i"
+
+    def test_resolution_4k_stays_4k(self):
+        """4K should normalize to 4K, not 2160p."""
+        pm = mp.parse_component("Movie.2022.4K.UHD.BluRay.x265-GROUP.mkv")
+        assert pm.resolution == "4K"
 
     def test_ova_space_episode(self):
         """OVA 01 with space should detect special + episode."""

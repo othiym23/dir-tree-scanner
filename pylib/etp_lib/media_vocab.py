@@ -288,6 +288,75 @@ _HDR_KEYWORDS = frozenset(
     }
 )
 
+# ---------------------------------------------------------------------------
+# Resolution normalization
+# ---------------------------------------------------------------------------
+
+# Height → standard resolution tag (progressive assumed; caller supplies scan type)
+_RESOLUTION_BY_HEIGHT: list[tuple[int, str]] = [
+    (2160, "4K"),
+    (1080, "1080"),
+    (720, "720"),
+    (576, "576"),
+    (540, "540"),
+    (480, "480"),
+    (360, "360"),
+]
+
+
+def normalize_resolution(height: int, width: int = 0, scan_type: str = "p") -> str:
+    """Normalize pixel dimensions to a standard resolution tag.
+
+    Uses height as the primary indicator. ``scan_type`` should be ``"p"``
+    (progressive, default) or ``"i"`` (interlaced). 4K always returns
+    ``"4K"`` regardless of scan type.
+
+    Examples::
+
+        normalize_resolution(1080)          → "1080p"
+        normalize_resolution(1080, scan_type="i") → "1080i"
+        normalize_resolution(2160)          → "4K"
+        normalize_resolution(480)           → "480p"
+        normalize_resolution(1080, width=1440) → "1080p"  # anamorphic BD
+    """
+    for threshold, tag in _RESOLUTION_BY_HEIGHT:
+        if height >= threshold:
+            if tag == "4K":
+                return "4K"
+            return f"{tag}{scan_type}"
+    # Fallback for very small resolutions
+    return f"{height}{scan_type}"
+
+
+def parse_resolution_text(text: str) -> str:
+    """Normalize a resolution string from a filename to a standard tag.
+
+    Handles formats like ``"1080p"``, ``"1080i"``, ``"1920x1080"``,
+    ``"1440x1080p"``, ``"4K"``, ``"720x480"``.
+    """
+    text = text.strip()
+
+    # Already a standard tag like "1080p", "720i", "4K"
+    if text.upper() == "4K":
+        return "4K"
+    import re
+
+    # NNNp or NNNi format
+    m = re.match(r"^(\d{3,4})([pi])$", text, re.IGNORECASE)
+    if m:
+        return normalize_resolution(int(m.group(1)), scan_type=m.group(2).lower())
+
+    # WxH or WxHp/WxHi format
+    m = re.match(r"^(\d{3,4})x(\d{3,4})([pi])?$", text, re.IGNORECASE)
+    if m:
+        width = int(m.group(1))
+        height = int(m.group(2))
+        scan = m.group(3).lower() if m.group(3) else "p"
+        return normalize_resolution(height, width=width, scan_type=scan)
+
+    return text
+
+
 # Token kinds that are metadata (not title)
 _METADATA_KINDS = frozenset(
     {

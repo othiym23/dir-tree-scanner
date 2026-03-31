@@ -35,6 +35,7 @@ from etp_lib.media_vocab import (  # noqa: F401 (re-exports)
     _STREAMING_SERVICES,
     _SUBTITLE_KEYWORDS,
     _VIDEO_CODECS,
+    parse_resolution_text,
 )
 # ---------------------------------------------------------------------------
 # Result types — typed wrappers for each recognizer's output
@@ -225,12 +226,12 @@ def _re_group(pattern: str, s: str, group: int = 1, flags: int = 0) -> str:
     return m.group(group)
 
 
-# Resolution
+# Resolution — normalize all formats to standard tags via parse_resolution_text
 resolution: Parser = regex(
     r"(?:480|540|576|720|1080)[pi]|2160p|4[kK]", re.IGNORECASE
-).map(lambda s: Resolution(s)) | regex(r"\d{3,4}x\d{3,4}p?").map(
-    lambda s: Resolution(s)
-)
+).map(lambda s: Resolution(parse_resolution_text(s))) | regex(
+    r"\d{3,4}x\d{3,4}[pi]?"
+).map(lambda s: Resolution(parse_resolution_text(s)))
 
 # Video codec
 video_codec: Parser = _match_set_ci(_VIDEO_CODECS, VideoCodec)
@@ -650,8 +651,8 @@ _REDISTRIBUTORS = frozenset({"tgx", "eztv", "eztvx.to", "rartv", "ettv", "ion10"
 def _result_to_token(result: object, text: str) -> Token:
     """Convert a parsy primitive result to a Token for the existing pipeline."""
     kind = _TYPE_TO_KIND.get(type(result), TokenKind.UNKNOWN)
-    # Use normalized value from result when available (e.g., AAC.2.0 → AAC 2.0)
-    if isinstance(result, AudioCodec):
+    # Use normalized value from result types that carry it
+    if isinstance(result, (AudioCodec, Resolution)):
         text = result.value
     token = Token(kind=kind, text=text)
 

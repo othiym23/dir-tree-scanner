@@ -282,7 +282,10 @@ class TestStructuredProperties:
     def test_resolution_detected(self, group, title, ep, res):
         filename = f"[{group}] {title} - {ep:02d} [{res}].mkv"
         pm = mp.parse_component(filename)
-        assert pm.resolution == res or pm.resolution == res.upper()
+        from etp_lib.media_vocab import parse_resolution_text
+
+        expected = parse_resolution_text(res)
+        assert pm.resolution == expected
 
     @given(
         title=_SERIES_EN,
