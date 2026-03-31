@@ -68,10 +68,13 @@ Python shared library lives in `pylib/etp_lib/`:
   shared between the parser and its recognizers
 - `media_parser.py` — three-phase media filename parser (see below)
 - `anidb.py`, `tvdb.py` — API clients with local caching
-- `types.py` — shared data types (AnimeInfo, Episode, SourceFile, MediaInfo)
-- `manifest.py` — KDL manifest generation, parsing, and execution
+- `types.py` — shared data types (AnimeInfo, Episode, SourceFile,
+  ParsedMetadata, MatchedFile, MediaInfo) and StrEnum types (EpisodeType,
+  BonusType, MetadataProvider)
+- `manifest.py` — KDL manifest generation, parsing, execution, and the
+  ManifestWorkflow orchestrator
 - `naming.py` — episode filename formatting and series directory naming
-- `conflicts.py` — destination conflict resolution
+- `conflicts.py` — destination conflict resolution with readline support
 - `mediainfo.py` — mediainfo subprocess wrapper for audio/video metadata
 
 `conf/` contains KDL configuration files.
@@ -99,21 +102,90 @@ Three-phase pipeline:
    and metadata fields from classified tokens into a `ParsedMedia` dataclass.
 
 Token recognition uses parsy `Parser` objects as typed recognizers — each
-returns a frozen dataclass (Resolution, VideoCodec, AudioCodec, Source, etc.) on
-success or a failure. The recognizers are ordered by specificity in the
-`_RECOGNIZERS` list (compound audio codecs before simple, SxxExx before S-only
-seasons). See
+returns a frozen dataclass (Resolution, VideoCodec, AudioCodec, Source,
+EpisodeMultiSE, SeasonSpecial, DualAudio, Uncensored, Edition, etc.) on success
+or a failure. The recognizers are ordered by specificity in the `_RECOGNIZERS`
+list (compound audio codecs before simple, SxxExx before S-only seasons,
+dual_audio before language). See
 `docs/adrs/2026-03-30-01-parsy-primitives-for-token-recognition.md`.
+
+Sonarr-inspired enhancements (using `~/projects/sonarr` as reference):
+
+- Multi-episode range expansion: `S01E01-E06` → `episodes: [1..6]`
+- Year validation: reject < 1940 and > current year + 1
+- Decimal episode specials: `01.5` → `is_special` (fansub-style only)
+- GM-Team format: `(Season 01)` alongside ordinal `4th Season`
+- LoliHouse dual numbering: bare `001` + `(S01E01)` → season from parens
+- Bilingual title splitting: CJK-aware `/` and `|` → `series_name_alt`
+
+`DualAudio`, `Uncensored`, and `Edition` have dedicated `TokenKind` values
+consumed in `_build_parsed_media` — no post-pass regex searches needed.
 
 `parse_media_path` handles full relative paths by parsing directory and filename
 components separately, then merging: the filename is primary for
 episode/metadata, directories provide series name, release group, and fill
-metadata gaps (resolution, codec, source type, audio codecs) via `scan_words` on
-directory text.
+metadata gaps (resolution, codec, source type, audio codecs, dual-audio,
+uncensored) via `_merge_scanned_metadata` on directory text.
 
 Vocabulary sets (`_SOURCES`, `_VIDEO_CODECS`, `_AUDIO_CODECS`, etc.) live in
 `media_vocab.py` to avoid circular imports between the parser and its
 recognizers. The parser re-exports them for backward compatibility.
+
+## Anime Collection Manager
+
+Interactive CLI for managing an anime collection on the NAS: fetches metadata
+from AniDB or TheTVDB, analyzes source files with mediainfo, constructs properly
+named episode files, and copies them using Btrfs COW reflinks.
+
+Three subcommands share a common pipeline:
+
+- `etp anime triage` — bulk import from downloads directory (auto-groups by
+  series name, including CJK/Latin alt-title merging)
+- `etp anime series` — sync from Sonarr-managed anime directory (uses ID files
+  - config mappings, download index for metadata enrichment)
+- `etp anime episode` — single-file import
+
+Both `triage` and `series` delegate to a shared `_process_pool()` function that
+handles the interactive ID-prompt → metadata-fetch → season-match → manifest
+workflow loop.
+
+### Data flow
+
+1. **Parse** source filenames via `parse_source_filename()` into `SourceFile`
+   (wrapping `ParsedMetadata` for parser-detected fields)
+2. **Enrich** from download index (`_match_to_downloads`) — fills release group,
+   hash, source type from matching download files
+3. **Match** files to metadata IDs — AniDB per-season (`_match_files_to_season`,
+   returns `MatchedFile` wrappers with renumbered episodes) or TVDB all-at-once
+4. **Manifest workflow** (`ManifestWorkflow`): build entries (mediainfo + CRC32
+   verification + special matching) → write KDL → open `$EDITOR` → parse →
+   execute copies
+
+### Non-mutating episode matching
+
+`_match_files_to_season` returns `list[MatchedFile]` — wrappers around the
+original `SourceFile` with overridden episode/season/special_tag. The original
+pool data is never mutated, so multi-cour processing (where the same pool serves
+multiple AniDB IDs in sequence) works correctly: each pass sees the original
+episode numbers.
+
+`_process_group_batch` snapshots `MatchedFile` overrides into `SourceFile`
+copies (`to_source_snapshot()`) before passing them to the manifest workflow.
+
+### Special episode handling
+
+Special detection sources: parser (`is_special`, `special_tag`, `bonus_type`),
+season 0, and decimal episodes (01.5). `build_manifest_entries` matches bonus
+files (NCOP, NCED, PV, CM) against AniDB special episodes. Unmatched bonus files
+get HamaTV-compatible episode numbers (`_HAMATV_RANGES`). When using TVDB,
+HamaTV ranges start after the highest existing TVDB special number to avoid
+collisions in the single `Specials/` directory.
+
+### Type safety
+
+StrEnum types (`EpisodeType`, `BonusType`, `MetadataProvider`) replace raw
+string comparisons throughout. These are backwards-compatible with string
+equality checks but provide IDE autocompletion and pyright validation.
 
 ## Database
 

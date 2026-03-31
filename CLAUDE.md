@@ -79,6 +79,13 @@ enforces.
   code must delete child rows before parent rows. Never use `ON DELETE CASCADE`.
 - **Python dependencies welcome**: `uv` is available on the NAS. Prefer stdlib
   when sufficient, but don't reimplement what a well-maintained package does.
+- **StrEnum types**: `EpisodeType`, `BonusType`, `MetadataProvider` in
+  `types.py`. Use enum constants (not raw strings) for comparisons.
+- **Non-mutating matching**: `_match_files_to_season` returns `MatchedFile`
+  wrappers; never mutate `SourceFile.parsed` after initial creation/enrichment.
+- **Anime management architecture**: see the "Anime Collection Manager" section
+  in `docs/DESIGN_NOTES.md` for data flow, manifest workflow, and special
+  episode handling.
 
 ## Git workflow
 
