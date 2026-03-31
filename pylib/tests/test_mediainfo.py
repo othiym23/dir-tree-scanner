@@ -225,15 +225,11 @@ class TestMediaInfoParsing:
         assert normalize_resolution(2160, scan_type="i") == "4K"  # 4K always 4K
 
     def test_mediainfo_resolution_with_scan_type(self):
-        assert _resolution_from_mediainfo(1920, 1080, "Progressive") == "1080p"
-        assert _resolution_from_mediainfo(1920, 1080, "Interlaced") == "1080i"
-        assert _resolution_from_mediainfo(720, 480, "Interlaced") == "480i"
-        assert _resolution_from_mediainfo(3840, 2160, "Progressive") == "4K"
-
-    def test_anamorphic_resolution(self):
-        """1440x1080 anamorphic BD should normalize to 1080p."""
-        assert _resolution_from_mediainfo(1440, 1080, "Progressive") == "1080p"
-        assert _resolution_from_mediainfo(960, 720, "Progressive") == "720p"
+        assert _resolution_from_mediainfo(1080, "Progressive") == "1080p"
+        assert _resolution_from_mediainfo(1080, "Interlaced") == "1080i"
+        assert _resolution_from_mediainfo(720, "Progressive") == "720p"
+        assert _resolution_from_mediainfo(480, "Interlaced") == "480i"
+        assert _resolution_from_mediainfo(2160, "Progressive") == "4K"
 
     def test_multi_audio(self):
         mi = parse_mediainfo_json(MEDIAINFO_MULTI_AUDIO)

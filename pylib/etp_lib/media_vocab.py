@@ -305,20 +305,20 @@ _RESOLUTION_BY_HEIGHT: list[tuple[int, str]] = [
 ]
 
 
-def normalize_resolution(height: int, width: int = 0, scan_type: str = "p") -> str:
-    """Normalize pixel dimensions to a standard resolution tag.
+def normalize_resolution(height: int, scan_type: str = "p") -> str:
+    """Normalize a vertical resolution to a standard tag.
 
-    Uses height as the primary indicator. ``scan_type`` should be ``"p"``
-    (progressive, default) or ``"i"`` (interlaced). 4K always returns
-    ``"4K"`` regardless of scan type.
+    Uses height as the sole indicator (width is irrelevant — anamorphic
+    encodes have non-standard widths but standard heights). ``scan_type``
+    should be ``"p"`` (progressive, default) or ``"i"`` (interlaced).
+    4K always returns ``"4K"`` regardless of scan type.
 
     Examples::
 
-        normalize_resolution(1080)          → "1080p"
+        normalize_resolution(1080)                → "1080p"
         normalize_resolution(1080, scan_type="i") → "1080i"
-        normalize_resolution(2160)          → "4K"
-        normalize_resolution(480)           → "480p"
-        normalize_resolution(1080, width=1440) → "1080p"  # anamorphic BD
+        normalize_resolution(2160)                → "4K"
+        normalize_resolution(480)                 → "480p"
     """
     for threshold, tag in _RESOLUTION_BY_HEIGHT:
         if height >= threshold:

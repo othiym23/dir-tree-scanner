@@ -44,14 +44,14 @@ _AUDIO_CODEC_MAP: dict[str, str] = {
 }
 
 
-def _resolution_from_mediainfo(width: int, height: int, scan_type: str) -> str:
-    """Convert mediainfo dimensions + scan type to a standard resolution tag.
+def _resolution_from_mediainfo(height: int, scan_type: str) -> str:
+    """Convert mediainfo height + scan type to a standard resolution tag.
 
     Uses the shared ``normalize_resolution`` table. ``scan_type`` comes from
     mediainfo's ``ScanType`` field: ``"Progressive"`` or ``"Interlaced"``.
     """
     st = "i" if scan_type.lower().startswith("interlace") else "p"
-    return normalize_resolution(height, width=width, scan_type=st)
+    return normalize_resolution(height, scan_type=st)
 
 
 def _detect_hdr(video_track: dict) -> str:
@@ -131,7 +131,7 @@ def parse_mediainfo_json(data: dict) -> MediaInfo:
             height = int(track.get("Height", 0))
             bit_depth = int(track.get("BitDepth", 8))
             scan_type = track.get("ScanType", "Progressive")
-            resolution = _resolution_from_mediainfo(width, height, scan_type)
+            resolution = _resolution_from_mediainfo(height, scan_type)
             hdr_type = _detect_hdr(track)
             encoding_lib = _detect_encoding_lib(track)
 
