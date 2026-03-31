@@ -1498,6 +1498,15 @@ class TestQARegression:
         assert pm.episode is None
         assert pm.year == 1977
 
+    def test_ova2e03_episode_from_e_prefix(self):
+        """OVA2E03 — episode should be 3 (from E03), not 2 (from OVA2)."""
+        pm = mp.parse_component("Golden Kamuy - OVA2E03 Shiton Animal Chronicles.mkv")
+        assert pm.series_name == "Golden Kamuy"
+        assert pm.episode == 3
+        assert pm.is_special is True
+        assert pm.special_tag == "OVA2"
+        assert pm.episode_title == "Shiton Animal Chronicles"
+
     def test_oad_in_road_not_special(self):
         """OAD inside 'Road' should not be matched as a special tag."""
         pm = mp.parse_component(

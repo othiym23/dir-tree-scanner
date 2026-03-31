@@ -238,7 +238,7 @@ video_codec: Parser = _match_set_ci(_VIDEO_CODECS, VideoCodec)
 
 # Pre-compiled patterns for parsy recognizer functions (avoid per-call compilation)
 _RE_BARE_EP = re.compile(r"(\d{1,4})(?:v(\d+))?(?=\s|$|\.)")
-_RE_EP_PREFIX = re.compile(r"[Ee][Pp]?(\d{1,4})(?:v(\d+))?$")
+_RE_EP_PREFIX = re.compile(r"[Ee][Pp]?(\d{1,4})(?:v(\d+))?(?=\s|$|\.)")
 _RE_EP_FINAL = re.compile(r"(\d{1,4})(?:v(\d+))?\s*END$", re.IGNORECASE)
 _RE_TRAILING_DIGITS = re.compile(r"(\d+)$")
 _RE_BONUS_OP = re.compile(r"OP\d*$", re.IGNORECASE)
@@ -1529,7 +1529,7 @@ def classify(tokens: list[Token]) -> list[Token]:
                     if is_metadata_word(w):
                         meta_start = i
                         break
-                if meta_start is not None:
+                if meta_start is not None and meta_start > 0:
                     title_part = " ".join(words[:meta_start]).strip()
                     meta_part = " ".join(words[meta_start:])
                     if title_part:
@@ -1764,8 +1764,9 @@ def _build_parsed_media(tokens: list[Token]) -> ParsedMedia:
         elif token.kind == TokenKind.SPECIAL:
             pm.is_special = True
             pm.special_tag = token.text.strip()
-            if token.episode is not None:
-                pm.episode = token.episode
+            # Don't set pm.episode from the special's number — it may be
+            # a series/group indicator (OVA2 = "OVA series 2"), not the
+            # episode number. A subsequent EPISODE token takes priority.
             if token.season is not None:
                 pm.season = token.season
             # S03OP/S03ED → set bonus_type for credit specials
@@ -1843,6 +1844,14 @@ def _build_parsed_media(tokens: list[Token]) -> ParsedMedia:
                 pm.is_criterion = True
         elif token.kind == TokenKind.EXTENSION:
             pm.extension = token.text
+
+    # Fallback: if a SPECIAL had a number but no EPISODE token followed,
+    # use the special's number as the episode (e.g., SP1 → episode 1)
+    if pm.episode is None and pm.is_special:
+        for token in tokens:
+            if token.kind == TokenKind.SPECIAL and token.episode is not None:
+                pm.episode = token.episode
+                break
 
     # Extract title (preserve bonus-extracted episode_title if already set)
     saved_ep_title = pm.episode_title
