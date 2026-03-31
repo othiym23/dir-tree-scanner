@@ -973,6 +973,9 @@ def _find_recognizer_in_text(
     Returns ``(start, end, token)`` or None.
     """
     for pos in range(len(text)):
+        # Only match at word boundaries (start of string or after space/separator)
+        if pos > 0 and text[pos - 1] not in " \t-_":
+            continue
         for recognizer in recognizers:
             result = recognizer(text, pos)
             if result.status:

@@ -1478,6 +1478,16 @@ class TestQARegression:
         assert pm.episode is None
         assert pm.year == 1977
 
+    def test_oad_in_road_not_special(self):
+        """OAD inside 'Road' should not be matched as a special tag."""
+        pm = mp.parse_component(
+            "Kimagure Orange Road - OVA 02 Notice "
+            "(BDRip 720x480p x265 HEVC AC3 2.0)[sxales].mkv"
+        )
+        assert pm.series_name == "Kimagure Orange Road"
+        assert pm.is_special is True
+        assert pm.episode == 2
+
     def test_dual_standalone_scene(self):
         """Scene-style DUAL (without Audio) should set is_dual_audio."""
         pm = mp.parse_component(
