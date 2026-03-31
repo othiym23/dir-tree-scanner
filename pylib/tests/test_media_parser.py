@@ -1422,6 +1422,20 @@ class TestQARegression:
         """Bit depth should not appear in series name."""
         pm = mp.parse_component("Movie.2022.1080p.10bit.BluRay.x265-GROUP.mkv")
         assert "10bit" not in pm.series_name
+
+    def test_underscore_separated_old_fansub(self):
+        """Old fansub convention: _-_ separator, underscored paren metadata."""
+        pm = mp.parse_media_path(
+            "Gintama The Semi-Final/"
+            "[DB]Gintama The Semi-Final_-_01_(10bit_BD1080p_x265).mkv"
+        )
+        assert pm.series_name == "Gintama The Semi-Final"
+        assert pm.episode == 1
+        assert pm.bit_depth == 10
+        assert pm.source_type == "BD"
+        assert pm.resolution == "1080p"
+        assert pm.video_codec == "x265"
+        assert pm.release_group == "DB"
         assert pm.bit_depth == 10
 
     def test_dual_standalone_scene(self):

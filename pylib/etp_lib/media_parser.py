@@ -1045,17 +1045,17 @@ def _is_scene_style(text: str) -> bool:
 
 
 def _split_separators(text: str) -> list[Token]:
-    """Split text on ' - ' separators, producing TEXT and SEPARATOR tokens.
+    """Split text on ' - ' or '_-_' separators, producing TEXT and SEPARATOR tokens.
 
-    Only splits on ' - ' (space-dash-space), not bare dashes in words.
+    Handles both space-dash-space and underscore-dash-underscore (old fansub
+    convention). Does not split on bare dashes in words.
     """
-    # Pattern: " - " (exactly one dash surrounded by spaces)
-    parts = re.split(r" - ", text)
+    parts = re.split(r" - |_-_", text)
     tokens: list[Token] = []
     for i, part in enumerate(parts):
         if i > 0:
             tokens.append(Token(kind=TokenKind.SEPARATOR, text=" - "))
-        stripped = part.strip()
+        stripped = part.strip().strip("_")
         if stripped:
             tokens.append(Token(kind=TokenKind.TEXT, text=stripped))
     return tokens
@@ -1294,9 +1294,15 @@ def _classify_paren(token: Token) -> Token | list[Token]:
     if _RE_SUBTITLE_SOFT.search(text):
         return Token(kind=TokenKind.SUBTITLE_INFO, text=text)
 
-    # Technical metadata paren: contains resolution/codec/source keywords
-    if count_metadata_words(text) >= 2:
-        return scan_words(text)
+    # Technical metadata paren: contains resolution/codec/source keywords.
+    # Normalize underscores to spaces for old fansub convention (10bit_BD1080p_x265)
+    # Also split at letter/digit boundaries for compounds like BD1080p
+    normalized = text.replace("_", " ") if "_" in text else text
+    if "_" in text:
+        # Split letter→digit only before resolution-like patterns (NNNp)
+        normalized = re.sub(r"([a-zA-Z])(\d+p\b)", r"\1 \2", normalized)
+    if count_metadata_words(normalized) >= 2:
+        return scan_words(normalized)
 
     # Region/variant: (US), (JP)
     if len(text) == 2 and text.isalpha():
