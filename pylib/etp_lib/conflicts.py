@@ -31,8 +31,10 @@ else:
 def prompt_value(label: str, default: str = "") -> str:
     """Prompt for a value with an optional editable default.
 
-    When a default is provided, it is pre-filled in the input buffer so
-    the user can edit it in place (rather than retyping from scratch).
+    Shows ``[default]`` in the prompt and pre-fills the input buffer via
+    readline so the user can edit in place. The bracket hint ensures the
+    default is visible even when readline pre-fill doesn't work (e.g.,
+    some Linux terminal configurations).
     """
     if default:
 
@@ -42,7 +44,7 @@ def prompt_value(label: str, default: str = "") -> str:
 
         _rl.set_startup_hook(_prefill)
         try:
-            raw = input(f"{label}: ").strip()
+            raw = input(f"{label} [{default}]: ").strip()
         finally:
             _rl.set_startup_hook()
         return raw if raw else default
