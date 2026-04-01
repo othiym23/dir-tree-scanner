@@ -237,7 +237,9 @@ resolution: Parser = regex(
 video_codec: Parser = _match_set_ci(_VIDEO_CODECS, VideoCodec)
 
 # Pre-compiled patterns for parsy recognizer functions (avoid per-call compilation)
-_RE_BARE_EP = re.compile(r"(\d{1,4})(?:v(\d+))?(?=\s|$|\.)")
+# NOTE: decimal version (v2.1) is consumed but only the major int is captured.
+# If quality ranking needs the full version, change version to str or float.
+_RE_BARE_EP = re.compile(r"(\d{1,4})(?:v(\d+)(?:\.\d+)?)?(?=\s|$|\.)")
 _RE_EP_PREFIX = re.compile(r"[Ee][Pp]?(\d{1,4})(?:v(\d+))?(?=\s|$|\.)")
 _RE_EP_FINAL = re.compile(r"(\d{1,4})(?:v(\d+))?\s*END$", re.IGNORECASE)
 _RE_TRAILING_DIGITS = re.compile(r"(\d+)$")
@@ -477,8 +479,8 @@ def _parse_batch_range(s: str) -> BatchRange:
 
 batch_range: Parser = regex(r"(\d{1,4})\s*[~～]\s*(\d{1,4})").map(_parse_batch_range)
 
-# Version: "v2"
-version: Parser = regex(r"v(\d+)", re.IGNORECASE).map(
+# Version: "v2", "v2.1" (decimal minor version consumed but only major kept)
+version: Parser = regex(r"v(\d+)(?:\.\d+)?", re.IGNORECASE).map(
     lambda s: Version(int(_re_group(r"v(\d+)", s, flags=re.IGNORECASE)))
 )
 
@@ -1287,24 +1289,35 @@ def _split_text_with_embedded(token: Token) -> list[Token]:
     text = token.text
     match = _find_recognizer_in_text(text, _EMBEDDED_RECOGNIZERS)
 
-    # Fallback: leading bare number ("01 Title" → EPISODE + TEXT).
+    # Fallback: bare number at a word boundary ("01 Title" or "Title 09v2.1").
     # episode_bare is too greedy for general embedded search, but a
-    # leading number followed by a space is a strong signal.
+    # number at a word boundary followed by a space or end is a strong signal.
     if match is None:
-        bare_result = _bare_episode_parser(text, 0)
-        if (
-            bare_result.status
-            and bare_result.index < len(text)
-            and text[bare_result.index] == " "
-        ):
-            ep_val = bare_result.value
-            # Reject if the number looks like a year
-            if not (1940 <= (ep_val.episode or 0) <= 2099):
-                match = (
-                    0,
-                    bare_result.index,
-                    _result_to_token(ep_val, text[: bare_result.index]),
+        for pos in range(len(text)):
+            if pos > 0 and text[pos - 1] != " ":
+                continue
+            if not text[pos].isdigit():
+                continue
+            # Skip bare numbers after title-context words (Part 1, Vol 2)
+            if pos > 0:
+                preceding = text[:pos].rstrip().rsplit(None, 1)
+                if preceding and preceding[-1].lower() in _TITLE_NUMBER_PREFIXES:
+                    continue
+            bare_result = _bare_episode_parser(text, pos)
+            if bare_result.status:
+                at_end = bare_result.index >= len(text)
+                at_space = (
+                    bare_result.index < len(text) and text[bare_result.index] == " "
                 )
+                if at_end or at_space:
+                    ep_val = bare_result.value
+                    if not (1940 <= (ep_val.episode or 0) <= 2099):
+                        match = (
+                            pos,
+                            bare_result.index,
+                            _result_to_token(ep_val, text[pos : bare_result.index]),
+                        )
+                        break
 
     if match is None:
         return [token]

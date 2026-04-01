@@ -225,6 +225,11 @@ heights. The `normalize_resolution` function maps by height alone. Interlaced
 scan type comes from the filename (`1080i`) or from mediainfo's `ScanType`
 field; the default is progressive.
 
+**Decimal versions are truncated.** Version tags like `v2.1` are consumed by the
+parser but only the major integer is stored (`version=2`). The decimal portion
+is intentionally discarded — if quality ranking needs it, the `version` field
+type should change from `int` to `str` or `float`.
+
 ## Database
 
 SQLite with sqlx, WAL mode, single-threaded tokio (`current_thread`). The

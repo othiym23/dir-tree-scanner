@@ -482,9 +482,10 @@ as a fallback (e.g., `SP1` alone → episode 1).
 `_EMBEDDED_RECOGNIZERS` (used by `_find_recognizer_in_text` and
 `_split_text_with_embedded`) does NOT include `episode_bare`. Bare numbers match
 too broadly within text — `101 Dalmatians` would match `101` as episode.
-Instead, `_split_text_with_embedded` has a specific leading-bare-number fallback
-that only fires when a bare number at position 0 is followed by a space (strong
-structural signal).
+Instead, `_split_text_with_embedded` has a bare-number fallback that scans for
+numbers at word boundaries (start of string or after space). This handles both
+leading numbers (`01 Title`) and mid-text numbers (`Mushishi 09v2.1`). Numbers
+preceded by title-context words (`Part`, `Vol`, `Chapter`, `Movie`) are skipped.
 
 ### `special` IS in embedded recognizers, with word boundary check
 
@@ -541,6 +542,14 @@ stripped to try `TrueHD.5.1` as a compound. The `_try_compound_dash_strip`
 helper handles this for both 2-segment and 3-segment compounds, and tries to
 recognize the suffix (e.g., as a known codec) before falling back to
 RELEASE_GROUP.
+
+### Decimal versions are consumed but truncated
+
+Version tags like `v2.1` are matched by the bare episode and standalone version
+recognizers, but only the major integer is captured (`version=2`). The decimal
+minor version is consumed by the regex (`(?:\.\d+)?`) so it doesn't confuse
+later patterns, but it's discarded. If quality ranking needs the full version,
+change the `version` field from `int` to `str` or `float`.
 
 ### `_RE_EP_PREFIX` uses lookahead, not end anchor
 
