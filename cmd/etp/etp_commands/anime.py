@@ -1124,10 +1124,15 @@ def _match_files_to_season(
     # Parser-detected specials (S01OVA, S03OP, NCOP) and files without
     # episode numbers are treated as bonus — they stay with the matched
     # set but don't count against the AniDB regular episode limit.
+    # Season 0 files (specials) are always included as bonus regardless
+    # of which season was chosen — AniDB specials belong to the entry.
+    chosen_files = by_season[chosen]
+    season0_files = by_season.get(0, []) if chosen != 0 else []
+
     episode_files = sorted(
         [
             sf
-            for sf in by_season[chosen]
+            for sf in chosen_files
             if sf.parsed.episode is not None
             and not sf.parsed.is_special
             and not sf.parsed.bonus_type
@@ -1136,9 +1141,9 @@ def _match_files_to_season(
     )
     bonus_files = [
         sf
-        for sf in by_season[chosen]
+        for sf in chosen_files
         if sf.parsed.episode is None or sf.parsed.is_special or sf.parsed.bonus_type
-    ]
+    ] + season0_files
 
     if len(episode_files) > regular_count > 0:
         matched_eps = episode_files[:regular_count]
