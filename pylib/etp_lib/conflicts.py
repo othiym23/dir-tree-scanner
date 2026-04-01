@@ -192,9 +192,10 @@ def _format_media_summary(media: MediaInfo | None) -> str:
 
 
 def resolve_conflict(conflict: ConflictInfo) -> str:
-    """Handle a destination conflict. Returns 'replace', 'keep', or 'skip'.
+    """Handle a destination conflict. Returns 'replace', 'keep', 'both', or 'skip'.
 
     For matching metadata with matching CRC32, auto-replaces silently.
+    'both' keeps the existing file and copies the new one alongside it.
     """
     if conflict.metadata_matches:
         # Short-circuit: if file sizes differ, CRC32 can't match
@@ -229,14 +230,16 @@ def resolve_conflict(conflict: ConflictInfo) -> str:
 
     print()
     while True:
-        choice = input("  [k]eep existing  [r]eplace  [s]kip: ").strip().lower()
+        choice = input("  [k]eep existing  [r]eplace  [b]oth  [s]kip: ").strip().lower()
         if choice in ("k", "keep"):
             return "keep"
         if choice in ("r", "replace"):
             return "replace"
+        if choice in ("b", "both"):
+            return "both"
         if choice in ("s", "skip"):
             return "skip"
-        print("  Please enter k, r, or s.")
+        print("  Please enter k, r, b, or s.")
 
 
 # Matches episode tags like "s1e01", "s01e01", "s1e1" in filenames
@@ -287,8 +290,9 @@ def handle_conflict(
     an existing file with the same episode tag (handles different
     zero-padding conventions like s1e01 vs s01e01).
 
-    Returns ``None`` if no conflict, or 'replace'/'keep'/'skip'.
+    Returns ``None`` if no conflict, or 'replace'/'keep'/'both'/'skip'.
     When 'replace' is returned, the existing file has already been removed.
+    When 'both' is returned, the existing file is left in place.
     """
     # Exact path match
     conflict = check_destination_conflict(

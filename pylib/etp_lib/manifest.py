@@ -531,6 +531,8 @@ def execute_manifest(
                 else:
                     success += 1
                 continue
+            if action == "both":
+                pass  # keep existing, proceed with copy to dest_path as-is
 
         try:
             if copy_reflink(sf.path, dest_path, dry_run=dry_run):
