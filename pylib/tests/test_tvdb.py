@@ -88,3 +88,36 @@ class TestTvdbParsing:
         )
         assert info.title_ja == "公式日本語名"
         assert info.title_en == "Test Anime"  # from eng alias
+
+    def test_null_episode_name(self):
+        """TVDB returns null for episode name (TBA) — should not crash."""
+        episodes = [
+            {"seasonNumber": 0, "number": 6, "name": None},
+            {"seasonNumber": 1, "number": 1, "name": "Pilot"},
+        ]
+        info = _parse_tvdb_json(TVDB_SERIES_DATA, episodes, 12345)
+        special = [e for e in info.episodes if e.season == 0][0]
+        assert special.title_en == ""
+        assert special.number == 6
+
+    def test_null_season_and_number(self):
+        """TVDB returns null for seasonNumber/number — should default safely."""
+        episodes = [
+            {"seasonNumber": None, "number": None, "name": "Mystery"},
+        ]
+        info = _parse_tvdb_json(TVDB_SERIES_DATA, episodes, 12345)
+        assert info.episodes[0].season == 1
+        assert info.episodes[0].number == 0
+        assert info.episodes[0].title_en == "Mystery"
+
+    def test_null_year_and_aliases(self):
+        """TVDB returns null for year and alias name — should not crash."""
+        data = {
+            "name": "Test",
+            "year": None,
+            "firstAired": None,
+            "aliases": [{"language": "eng", "name": None}],
+        }
+        info = _parse_tvdb_json(data, [], 12345)
+        assert info.year == 0
+        assert info.title_en == ""
