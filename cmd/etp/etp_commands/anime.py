@@ -1039,7 +1039,7 @@ def _match_files_to_season(
     # mixed in (e.g. 探偵オペラ vs ふたりは vs 探偵歌劇TD).
     # Try English first, then Japanese, then romaji — files may use any.
     known_titles: list[str] = []
-    for t in (info.title_en, info.title_ja):
+    for t in (info.title_en, info.title_ja, info.title_romaji):
         norm = media_parser.normalize_for_matching(t)
         if norm and norm not in known_titles:
             known_titles.append(norm)
@@ -1392,6 +1392,7 @@ def _process_pool(
                 if not dry_run:
                     for sf in pool:
                         already_copied.add(_resolve(sf.path))
+                    _save_triage_manifest(already_copied)
                 print(f"  Marked {len(pool)} file(s) as done.")
                 pool.clear()
                 break
@@ -1417,6 +1418,7 @@ def _process_pool(
                 if not dry_run:
                     for sf in pool:
                         already_copied.add(_resolve(sf.path))
+                    _save_triage_manifest(already_copied)
                 print(f"  Marked {len(pool)} file(s) as done.")
                 pool.clear()
                 break
@@ -1508,6 +1510,7 @@ def _process_pool(
         if triaged and not dry_run:
             for p in triaged:
                 already_copied.add(_resolve(p))
+            _save_triage_manifest(already_copied)
 
     return total_success, total_failed, False
 
@@ -1568,7 +1571,6 @@ def run_series(args: argparse.Namespace, config: AnimeConfig) -> int:
 
     # Load triage manifest for tracking
     already_copied = _load_triage_manifest()
-    manifest_size_at_start = len(already_copied)
     force = args.force
     id_map = scan_dest_ids(args.dest)
 
@@ -1664,9 +1666,6 @@ def run_series(args: argparse.Namespace, config: AnimeConfig) -> int:
 
         if quit_all:
             break
-
-    if not args.dry_run and len(already_copied) > manifest_size_at_start:
-        _save_triage_manifest(already_copied)
 
     print(
         f"\nSeries sync complete: {total_success} copied, {total_failed} skipped/failed"
