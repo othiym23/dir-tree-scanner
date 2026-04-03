@@ -140,6 +140,7 @@ Each recognizer returns a frozen dataclass on success:
 | `EpisodeSE`      | `season`, `episode`, `version?`             | EPISODE       |
 | `EpisodeMultiSE` | `season`, `episodes: list[int]`             | EPISODE       |
 | `EpisodeBare`    | `episode`, `version?`, `is_decimal_special` | EPISODE       |
+| `EpisodeFinal`   | reuses `EpisodeBare` with END suffix        | EPISODE       |
 | `EpisodeJP`      | `episode`                                   | EPISODE       |
 | `SeasonJP`       | `season`                                    | SEASON        |
 | `SeasonWord`     | `season`                                    | SEASON        |
@@ -156,14 +157,14 @@ Each recognizer returns a frozen dataclass on success:
 | `DualAudio`      | (none)                                      | DUAL_AUDIO    |
 | `Edition`        | `value`                                     | EDITION       |
 | `Uncensored`     | (none)                                      | UNCENSORED    |
-| `BitDepth`       | `value`                                     | UNKNOWN       |
-| `HDRInfo`        | `value`                                     | UNKNOWN       |
+| `BitDepth`       | `value: int`                                | BIT_DEPTH     |
+| `HDRInfo`        | `value: str`                                | HDR           |
 | `Repack`         | (none)                                      | UNKNOWN       |
 
-The `_TYPE_TO_KIND` mapping converts result types to `TokenKind` values. Types
-mapped to `UNKNOWN` are still recognized as metadata (they appear in
-`_METADATA_KINDS`) but have no dedicated kind — they prevent metadata from
-leaking into series titles.
+The `_TYPE_TO_KIND` mapping converts result types to `TokenKind` values.
+`Repack` is mapped to `UNKNOWN` — it is still recognized as metadata (it appears
+in `_METADATA_KINDS`) but has no dedicated kind, preventing it from leaking into
+series titles.
 
 #### Classification strategies by token type
 
@@ -449,8 +450,13 @@ Before copying, checks for existing files at the destination (exact path and
 fuzzy episode match via `sXeYY` parsing):
 
 - **Same metadata + same CRC32**: auto-replace (fixing naming)
-- **Same metadata + different CRC32**: prompt user
-- **Different metadata**: show comparison, prompt `[k]eep / [r]eplace / [s]kip`
+- **Same metadata + different CRC32/size**: prompt user
+- **Different metadata**: show comparison, prompt
+  `[k]eep / [r]eplace / [b]oth / [s]kip`
+
+The `[b]oth` option keeps both files, disambiguating with a numeric suffix or
+CRC32 in the filename when hashes differ. See
+[ADR 2026-04-02-01](../adrs/2026-04-02-01-keep-both-conflict-resolution.md).
 
 ## Type safety
 
