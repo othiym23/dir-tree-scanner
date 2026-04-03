@@ -65,16 +65,19 @@ def _bonus_source_sort_key(sf: SourceFile) -> tuple[int, int, int]:
     return (1, pair_num, kind_order)
 
 
-def _next_hamatv_episode(bonus_type: str, counters: dict[str, int]) -> int:
-    """Allocate the next HamaTV episode number for a bonus type.
+def _hamatv_counter_key(bonus_type: str) -> str:
+    """Return the counter key for a bonus type.
 
-    NCOP and NCED share a counter so their episode numbers interleave.
+    NCOP and NCED share a key so their episode numbers interleave.
     """
-    counter_key = (
-        _CREDIT_COUNTER_KEY
-        if bonus_type in (BonusType.NCOP, BonusType.NCED)
-        else bonus_type
-    )
+    if bonus_type in (BonusType.NCOP, BonusType.NCED):
+        return _CREDIT_COUNTER_KEY
+    return bonus_type
+
+
+def _next_hamatv_episode(bonus_type: str, counters: dict[str, int]) -> int:
+    """Allocate the next HamaTV episode number for a bonus type."""
+    counter_key = _hamatv_counter_key(bonus_type)
     range_start = _HAMATV_RANGES.get(bonus_type, 521)
     ep_num = counters.get(counter_key, range_start)
     counters[counter_key] = ep_num + 1
@@ -152,8 +155,10 @@ def build_manifest_entries(
     max_special_num = max((ep.number for ep in specials_by_num.values()), default=0)
     hamatv_counters: dict[str, int] = {}
     if info.tvdb_id is not None and max_special_num > 0:
-        for key, default_start in _HAMATV_RANGES.items():
-            hamatv_counters[key] = max(default_start, max_special_num + 20)
+        for bonus_type, default_start in _HAMATV_RANGES.items():
+            key = _hamatv_counter_key(bonus_type)
+            if key not in hamatv_counters:
+                hamatv_counters[key] = max(default_start, max_special_num + 20)
 
     parsed = sorted(parsed, key=_bonus_source_sort_key)
 
