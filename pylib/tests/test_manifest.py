@@ -831,6 +831,82 @@ class TestNcopNcedWithEpisodeNumber:
         assert "Specials" in dest
         assert "Season 01" not in dest
 
+    def test_multiple_ncop_nced_unique_episode_numbers_and_sorted(
+        self, tmp_path, monkeypatch
+    ):
+        """Multiple NCOP+NCED must get unique s0e numbers, sorted OP-ED pairs."""
+        files = [
+            SourceFile(
+                path=tmp_path / "[sam] Show - NCOP 01v2 [BD 1080p FLAC] [AAAA1111].mkv",
+                parsed=ParsedMetadata(
+                    episode=1,
+                    bonus_type="NCOP",
+                    is_special=True,
+                    version=2,
+                    hash_code="AAAA1111",
+                ),
+            ),
+            SourceFile(
+                path=tmp_path / "[sam] Show - NCED 01v2 [BD 1080p FLAC] [BBBB2222].mkv",
+                parsed=ParsedMetadata(
+                    episode=1,
+                    bonus_type="NCED",
+                    is_special=True,
+                    version=2,
+                    hash_code="BBBB2222",
+                ),
+            ),
+            SourceFile(
+                path=tmp_path / "[sam] Show - NCOP 02 [BD 1080p FLAC] [CCCC3333].mkv",
+                parsed=ParsedMetadata(
+                    episode=2, bonus_type="NCOP", is_special=True, hash_code="CCCC3333"
+                ),
+            ),
+            SourceFile(
+                path=tmp_path / "[sam] Show - NCED 02 [BD 1080p FLAC] [DDDD4444].mkv",
+                parsed=ParsedMetadata(
+                    episode=2, bonus_type="NCED", is_special=True, hash_code="DDDD4444"
+                ),
+            ),
+        ]
+        monkeypatch.setattr(_manifest_mod, "verify_hash", lambda _: None)
+
+        # TVDB-only: no credit episodes
+        info = AnimeInfo(
+            anidb_id=None,
+            tvdb_id=431162,
+            title_ja="薬屋のひとりごと",
+            title_en="The Apothecary Diaries",
+            year=2023,
+            episodes=[
+                Episode(1, EpisodeType.REGULAR, "Maomao", "", ""),
+            ],
+        )
+        entries = build_manifest_entries(
+            files, info, "The Apothecary Diaries", tmp_path / "dest", verbose=False
+        )
+        assert len(entries) == 4
+
+        # All must be in Specials
+        for e in entries:
+            assert "Specials" in str(e.dest_path)
+
+        # All episode numbers must be unique
+        ep_nums = [e.source.parsed.episode for e in entries]
+        assert len(set(ep_nums)) == 4, f"Duplicate episode numbers: {ep_nums}"
+
+        # Extract tags from dest filenames for sort order check
+        tags = []
+        for e in entries:
+            name = e.dest_path.name
+            for tag in ("NCOP1", "NCED1", "NCOP2", "NCED2"):
+                if tag in name:
+                    tags.append(tag)
+                    break
+
+        # Must be sorted: NCOP1, NCED1, NCOP2, NCED2
+        assert tags == ["NCOP1", "NCED1", "NCOP2", "NCED2"], f"Wrong sort order: {tags}"
+
 
 class TestHamatvNumbering:
     """Tests for HamaTV-compatible special episode numbering."""

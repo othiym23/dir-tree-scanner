@@ -119,6 +119,20 @@ def build_manifest_entries(
     if info.tvdb_id is not None and max_special_num > 0:
         for key, default_start in _HAMATV_RANGES.items():
             hamatv_counters[key] = max(default_start, max_special_num + 20)
+
+    # Sort so NCOP/NCED files are ordered: NCOP1, NCED1, NCOP2, NCED2, ...
+    # Regular files stay in their original order at the front.
+    def _bonus_sort_key(sf: SourceFile) -> tuple[int, int, int]:
+        bt = sf.parsed.bonus_type
+        if not bt:
+            return (0, 0, 0)  # non-bonus first
+        pair_num = sf.parsed.episode or 0
+        # OP before ED within each pair
+        kind_order = 0 if bt == BonusType.NCOP else 1 if bt == BonusType.NCED else 2
+        return (1, pair_num, kind_order)
+
+    parsed = sorted(parsed, key=_bonus_sort_key)
+
     total = len(parsed)
     for i, sf in enumerate(parsed, 1):
         print(f"  Analyzing {i}/{total}: {sf.path.name}")
@@ -181,15 +195,27 @@ def build_manifest_entries(
                 ep_number = matched_ep.number
                 season = 0
             else:
-                # No AniDB match — build tag from bonus_type + episode
-                # number (e.g. NCOP1, NCED2) or use parser special_tag
-                # (e.g. S03OP, S01OVA) if available.
+                # No AniDB match — assign HamaTV number and build tag
+                # from bonus_type + parser episode (e.g. NCOP1, NCED2).
                 if sf.parsed.special_tag:
                     special_tag = sf.parsed.special_tag
-                elif bonus_type and ep_number is not None:
-                    special_tag = f"{bonus_type}{ep_number}"
+                elif bonus_type:
+                    pair_num = ep_number if ep_number is not None else 0
+                    special_tag = f"{bonus_type}{pair_num}" if pair_num else bonus_type
                 episode_name = episode_title or special_tag
+                # Use a shared counter for NCOP+NCED so pairs interleave
+                counter_key = (
+                    "_credit"
+                    if bonus_type in (BonusType.NCOP, BonusType.NCED)
+                    else bonus_type
+                )
+                range_start = _HAMATV_RANGES.get(bonus_type, 521)
+                ep_number = hamatv_counters.get(counter_key, range_start)
+                hamatv_counters[counter_key] = ep_number + 1
+                sf.parsed.episode = ep_number
+                sf.parsed.season = 0
                 season = 0
+                is_unmatched_special = True
         elif bonus_type:
             available = [
                 ep for ep in specials if ep.special_tag not in matched_special_tags
