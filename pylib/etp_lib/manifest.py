@@ -37,13 +37,46 @@ from etp_lib.types import (
 # AniDB-tracked specials that may be added later.
 _HAMATV_RANGES: dict[str, int] = {
     BonusType.NCOP: 171,  # s0e151+ range, +20 buffer
-    BonusType.NCED: 191,  # separate from NCOP to avoid collisions
+    BonusType.NCED: 171,  # shared with NCOP — interleaved by sort order
     BonusType.PV: 321,  # s0e301+ range, +20 buffer
     BonusType.PREVIEW: 321,  # alias for PV — same HamaTV category
     BonusType.CM: 521,  # s0e501+ range, +20 buffer
     BonusType.BONUS: 521,  # alias for CM — same HamaTV category
     BonusType.MENU: 921,  # s0e901+ range, +20 buffer
 }
+
+# Counter key shared by NCOP and NCED so they get interleaved episode
+# numbers (NCOP1=171, NCED1=172, NCOP2=173, ...) instead of separate ranges.
+_CREDIT_COUNTER_KEY = "_credit"
+
+
+def _bonus_source_sort_key(sf: SourceFile) -> tuple[int, int, int]:
+    """Sort key for bonus files: NCOP1, NCED1, NCOP2, NCED2, then others.
+
+    Non-bonus files sort first (preserving original order via stable sort).
+    """
+    bt = sf.parsed.bonus_type
+    if not bt:
+        return (0, 0, 0)
+    pair_num = sf.parsed.episode or 0
+    kind_order = 0 if bt == BonusType.NCOP else 1 if bt == BonusType.NCED else 2
+    return (1, pair_num, kind_order)
+
+
+def _next_hamatv_episode(bonus_type: str, counters: dict[str, int]) -> int:
+    """Allocate the next HamaTV episode number for a bonus type.
+
+    NCOP and NCED share a counter so their episode numbers interleave.
+    """
+    counter_key = (
+        _CREDIT_COUNTER_KEY
+        if bonus_type in (BonusType.NCOP, BonusType.NCED)
+        else bonus_type
+    )
+    range_start = _HAMATV_RANGES.get(bonus_type, 521)
+    ep_num = counters.get(counter_key, range_start)
+    counters[counter_key] = ep_num + 1
+    return ep_num
 
 
 def _match_bonus_to_anidb_special(
@@ -120,18 +153,7 @@ def build_manifest_entries(
         for key, default_start in _HAMATV_RANGES.items():
             hamatv_counters[key] = max(default_start, max_special_num + 20)
 
-    # Sort so NCOP/NCED files are ordered: NCOP1, NCED1, NCOP2, NCED2, ...
-    # Regular files stay in their original order at the front.
-    def _bonus_sort_key(sf: SourceFile) -> tuple[int, int, int]:
-        bt = sf.parsed.bonus_type
-        if not bt:
-            return (0, 0, 0)  # non-bonus first
-        pair_num = sf.parsed.episode or 0
-        # OP before ED within each pair
-        kind_order = 0 if bt == BonusType.NCOP else 1 if bt == BonusType.NCED else 2
-        return (1, pair_num, kind_order)
-
-    parsed = sorted(parsed, key=_bonus_sort_key)
+    parsed = sorted(parsed, key=_bonus_source_sort_key)
 
     total = len(parsed)
     for i, sf in enumerate(parsed, 1):
@@ -203,15 +225,7 @@ def build_manifest_entries(
                     pair_num = ep_number if ep_number is not None else 0
                     special_tag = f"{bonus_type}{pair_num}" if pair_num else bonus_type
                 episode_name = episode_title or special_tag
-                # Use a shared counter for NCOP+NCED so pairs interleave
-                counter_key = (
-                    "_credit"
-                    if bonus_type in (BonusType.NCOP, BonusType.NCED)
-                    else bonus_type
-                )
-                range_start = _HAMATV_RANGES.get(bonus_type, 521)
-                ep_number = hamatv_counters.get(counter_key, range_start)
-                hamatv_counters[counter_key] = ep_number + 1
+                ep_number = _next_hamatv_episode(bonus_type, hamatv_counters)
                 sf.parsed.episode = ep_number
                 sf.parsed.season = 0
                 season = 0
@@ -241,11 +255,8 @@ def build_manifest_entries(
                 sf.parsed.episode = ep_number
                 sf.parsed.season = 0
             else:
-                # Assign HamaTV-compatible s0e number, tagged (todo)
                 is_special = True
-                range_start = _HAMATV_RANGES.get(bonus_type, 521)
-                ep_number = hamatv_counters.get(bonus_type, range_start)
-                hamatv_counters[bonus_type] = ep_number + 1
+                ep_number = _next_hamatv_episode(bonus_type, hamatv_counters)
                 episode_name = bonus_type
                 if episode_title:
                     episode_name = f"{bonus_type} - {episode_title}"
