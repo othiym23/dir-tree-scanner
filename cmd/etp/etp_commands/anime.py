@@ -1039,7 +1039,7 @@ def _match_files_to_season(
     # mixed in (e.g. 探偵オペラ vs ふたりは vs 探偵歌劇TD).
     # Try English first, then Japanese, then romaji — files may use any.
     known_titles: list[str] = []
-    for t in (info.title_en, info.title_ja):
+    for t in (info.title_en, info.title_ja, info.title_romaji):
         norm = media_parser.normalize_for_matching(t)
         if norm and norm not in known_titles:
             known_titles.append(norm)
@@ -1052,7 +1052,10 @@ def _match_files_to_season(
             if not sf_title_norm:
                 # Can't determine series name — include by default
                 title_matched.append(sf)
-            elif sf_title_norm in known_titles:
+            elif sf_title_norm in known_titles or any(
+                sf_title_norm.startswith(t) or t.startswith(sf_title_norm)
+                for t in known_titles
+            ):
                 title_matched.append(sf)
             else:
                 title_unmatched.append(sf)
@@ -1124,10 +1127,15 @@ def _match_files_to_season(
     # Parser-detected specials (S01OVA, S03OP, NCOP) and files without
     # episode numbers are treated as bonus — they stay with the matched
     # set but don't count against the AniDB regular episode limit.
+    # Season 0 files (specials) are always included as bonus regardless
+    # of which season was chosen — AniDB specials belong to the entry.
+    chosen_files = by_season[chosen]
+    season0_files = by_season.get(0, []) if chosen != 0 else []
+
     episode_files = sorted(
         [
             sf
-            for sf in by_season[chosen]
+            for sf in chosen_files
             if sf.parsed.episode is not None
             and not sf.parsed.is_special
             and not sf.parsed.bonus_type
@@ -1136,9 +1144,9 @@ def _match_files_to_season(
     )
     bonus_files = [
         sf
-        for sf in by_season[chosen]
+        for sf in chosen_files
         if sf.parsed.episode is None or sf.parsed.is_special or sf.parsed.bonus_type
-    ]
+    ] + season0_files
 
     if len(episode_files) > regular_count > 0:
         matched_eps = episode_files[:regular_count]
@@ -1261,7 +1269,9 @@ def _process_group_batch(
     if info.tvdb_id is not None:
         id_map[(MetadataProvider.TVDB, info.tvdb_id)] = series_dir
 
-    # Prompt for release group — applied as batch override, not mutation
+    # Prompt for release group — applied only to files that lack one or
+    # that match the auto-detected default. Files with a different group
+    # (e.g., specials from a different release) keep their own.
     detected = next(
         (
             mf.source.parsed.release_group
@@ -1272,7 +1282,9 @@ def _process_group_batch(
     )
     group = prompt_value("Release group", detected)
     for mf in matched:
-        mf.release_group = group
+        existing = mf.source.parsed.release_group
+        if not existing or existing == detected:
+            mf.release_group = group
 
     # Detect batch-level traits (majority vote)
     dual_count = sum(1 for mf in matched if mf.source.parsed.is_dual_audio)
@@ -1380,6 +1392,7 @@ def _process_pool(
                 if not dry_run:
                     for sf in pool:
                         already_copied.add(_resolve(sf.path))
+                    _save_triage_manifest(already_copied)
                 print(f"  Marked {len(pool)} file(s) as done.")
                 pool.clear()
                 break
@@ -1405,6 +1418,7 @@ def _process_pool(
                 if not dry_run:
                     for sf in pool:
                         already_copied.add(_resolve(sf.path))
+                    _save_triage_manifest(already_copied)
                 print(f"  Marked {len(pool)} file(s) as done.")
                 pool.clear()
                 break
@@ -1496,6 +1510,7 @@ def _process_pool(
         if triaged and not dry_run:
             for p in triaged:
                 already_copied.add(_resolve(p))
+            _save_triage_manifest(already_copied)
 
     return total_success, total_failed, False
 
@@ -1556,7 +1571,6 @@ def run_series(args: argparse.Namespace, config: AnimeConfig) -> int:
 
     # Load triage manifest for tracking
     already_copied = _load_triage_manifest()
-    manifest_size_at_start = len(already_copied)
     force = args.force
     id_map = scan_dest_ids(args.dest)
 
@@ -1652,9 +1666,6 @@ def run_series(args: argparse.Namespace, config: AnimeConfig) -> int:
 
         if quit_all:
             break
-
-    if not args.dry_run and len(already_copied) > manifest_size_at_start:
-        _save_triage_manifest(already_copied)
 
     print(
         f"\nSeries sync complete: {total_success} copied, {total_failed} skipped/failed"

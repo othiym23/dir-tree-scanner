@@ -118,6 +118,22 @@ class TestMetadataBlock:
         sf = self._make_source(media=None)
         assert build_metadata_block(sf) == ""
 
+    def test_mediainfo_interlaced_overrides_filename(self):
+        """Mediainfo detecting interlaced should produce 1080i in metadata."""
+        sf = self._make_source()
+        # Filename says 1080p but mediainfo detects interlaced
+        sf.media.resolution = "1080i"  # type: ignore[union-attr]  # ty: ignore[invalid-assignment]
+        block = build_metadata_block(sf)
+        assert "1080i" in block
+        assert "1080p" not in block
+
+    def test_resolution_normalization_in_metadata(self):
+        """Resolution from mediainfo should be normalized (e.g., 480p not 720x480)."""
+        sf = self._make_source()
+        sf.media.resolution = "480p"  # type: ignore[union-attr]  # ty: ignore[invalid-assignment]
+        block = build_metadata_block(sf)
+        assert "480p" in block
+
     def test_web_source_type(self):
         sf = self._make_source(source_type="Web")
         block = build_metadata_block(sf)

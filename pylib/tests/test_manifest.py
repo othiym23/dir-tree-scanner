@@ -5,6 +5,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from etp_lib import manifest as _manifest_mod
 from etp_lib.manifest import (
     build_manifest_entries,
@@ -493,7 +495,15 @@ class TestParseManifest:
 class TestOpenEditor:
     """Tests for editor invocation."""
 
-    def test_visual_preferred(self, monkeypatch):
+    @pytest.mark.parametrize(
+        "env_visual,env_editor,expected_cmd",
+        [
+            ("code", "nano", ["code"]),  # VISUAL preferred
+            (None, "nano", ["nano"]),  # EDITOR fallback
+            (None, None, ["vi"]),  # vi default
+        ],
+    )
+    def test_editor_selection(self, monkeypatch, env_visual, env_editor, expected_cmd):
         called_with: list[list[str]] = []
 
         def fake_run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
@@ -501,39 +511,17 @@ class TestOpenEditor:
             return subprocess.CompletedProcess(cmd, 0)
 
         monkeypatch.setattr(subprocess, "run", fake_run)
-        monkeypatch.setenv("VISUAL", "code")
-        monkeypatch.setenv("EDITOR", "nano")
+        if env_visual is not None:
+            monkeypatch.setenv("VISUAL", env_visual)
+        else:
+            monkeypatch.delenv("VISUAL", raising=False)
+        if env_editor is not None:
+            monkeypatch.setenv("EDITOR", env_editor)
+        else:
+            monkeypatch.delenv("EDITOR", raising=False)
 
         open_editor(Path("/tmp/test.tsv"))
-        assert called_with[0][0] == "code"
-
-    def test_editor_fallback(self, monkeypatch):
-        called_with: list[list[str]] = []
-
-        def fake_run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
-            called_with.append(cmd)
-            return subprocess.CompletedProcess(cmd, 0)
-
-        monkeypatch.setattr(subprocess, "run", fake_run)
-        monkeypatch.delenv("VISUAL", raising=False)
-        monkeypatch.setenv("EDITOR", "nano")
-
-        open_editor(Path("/tmp/test.tsv"))
-        assert called_with[0][0] == "nano"
-
-    def test_vi_default(self, monkeypatch):
-        called_with: list[list[str]] = []
-
-        def fake_run(cmd: list[str], **_kw: object) -> subprocess.CompletedProcess[str]:
-            called_with.append(cmd)
-            return subprocess.CompletedProcess(cmd, 0)
-
-        monkeypatch.setattr(subprocess, "run", fake_run)
-        monkeypatch.delenv("VISUAL", raising=False)
-        monkeypatch.delenv("EDITOR", raising=False)
-
-        open_editor(Path("/tmp/test.tsv"))
-        assert called_with[0][0] == "vi"
+        assert called_with[0][0] == expected_cmd[0]
 
     def test_editor_with_arguments(self, monkeypatch):
         called_with: list[list[str]] = []
@@ -589,43 +577,100 @@ class TestExecuteManifest:
         assert success == 2
         assert failed == 1
 
+    def test_both_action_crc_disambiguation(self, tmp_path, monkeypatch):
+        """'both' action with existing dest appends CRC32 to filename."""
+        src = tmp_path / "src" / "ep01.mkv"
+        src.parent.mkdir()
+        src.write_bytes(b"source content here")
+
+        dest_dir = tmp_path / "dst"
+        dest_dir.mkdir()
+        existing = dest_dir / "Show - s1e01 [Group BD,1080p,HEVC].mkv"
+        existing.write_bytes(b"existing content")
+
+        dest_path = dest_dir / "Show - s1e01 [Group BD,1080p,HEVC].mkv"
+
+        sf = SourceFile(path=src, parsed=ParsedMetadata(episode=1, season=1))
+
+        # Mock handle_conflict to return "both"
+        monkeypatch.setattr(_manifest_mod, "handle_conflict", lambda *a, **kw: "both")
+        monkeypatch.setattr(_manifest_mod, "copy_reflink", lambda *a, **kw: True)
+
+        entries = [(sf, dest_path)]
+        success, failed, copied = execute_manifest(
+            entries, dry_run=False, verbose=False
+        )
+        assert success == 1
+        # CRC32 should have been computed and stashed
+        assert sf.parsed.hash_code != ""
+        assert len(sf.parsed.hash_code) == 8
+
+    def test_both_action_no_conflict_when_dest_missing(self, tmp_path, monkeypatch):
+        """'both' with non-existent dest copies without disambiguation."""
+        src = tmp_path / "src" / "ep01.mkv"
+        src.parent.mkdir()
+        src.write_bytes(b"source content")
+
+        dest_path = tmp_path / "dst" / "Show - s1e01 [Group].mkv"
+        dest_path.parent.mkdir()
+
+        sf = SourceFile(path=src, parsed=ParsedMetadata(episode=1, season=1))
+
+        monkeypatch.setattr(_manifest_mod, "handle_conflict", lambda *a, **kw: "both")
+
+        copied_to: list[Path] = []
+
+        def track_copy(src_p, dst_p, **kw):
+            copied_to.append(dst_p)
+            return True
+
+        monkeypatch.setattr(_manifest_mod, "copy_reflink", track_copy)
+
+        execute_manifest([(sf, dest_path)], dry_run=False, verbose=False)
+        # Should copy to original path (no CRC suffix)
+        assert copied_to[0] == dest_path
+
 
 class TestBonusToAnidbMatching:
     """Tests for matching bonus files against AniDB specials."""
 
-    def test_ncop_matches_opening_credit(self):
+    @pytest.mark.parametrize(
+        "bonus_type,expected_tag",
+        [
+            ("NCOP", "C1"),
+            ("NCED", "C2"),
+        ],
+    )
+    def test_credit_matching(self, bonus_type, expected_tag):
         specials = [
             Episode(1, EpisodeType.CREDIT, "Opening 1", "", "C1"),
             Episode(1, EpisodeType.CREDIT, "Ending 1", "", "C2"),
             Episode(1, EpisodeType.SPECIAL, "Special 1", "", "S1"),
         ]
-        ep = _match_bonus_to_anidb_special("NCOP", "", specials)
+        ep = _match_bonus_to_anidb_special(bonus_type, "", specials)
         assert ep is not None
-        assert ep.special_tag == "C1"
-
-    def test_nced_matches_ending_credit(self):
-        specials = [
-            Episode(1, EpisodeType.CREDIT, "Opening 1", "", "C1"),
-            Episode(1, EpisodeType.CREDIT, "Ending 1", "", "C2"),
-        ]
-        ep = _match_bonus_to_anidb_special("NCED", "", specials)
-        assert ep is not None
-        assert ep.special_tag == "C2"
+        assert ep.special_tag == expected_tag
 
     def test_no_match_returns_none(self):
-        specials = [
-            Episode(1, EpisodeType.SPECIAL, "Special 1", "", "S1"),
-        ]
-        ep = _match_bonus_to_anidb_special("PV", "", specials)
-        assert ep is None
+        specials = [Episode(1, EpisodeType.SPECIAL, "Special 1", "", "S1")]
+        assert _match_bonus_to_anidb_special("PV", "", specials) is None
 
     def test_empty_specials(self):
         assert _match_bonus_to_anidb_special("NCOP", "", []) is None
 
-    def test_title_match(self):
+    def test_romaji_title_match(self):
+        """Bonus matches against romaji episode title when en/ja don't match."""
         specials = [
-            Episode(1, EpisodeType.SPECIAL, "Preview", "", "S1"),
+            Episode(
+                1, EpisodeType.SPECIAL, "", "", "S1", title_romaji="Youjo Senki Special"
+            ),
         ]
+        ep = _match_bonus_to_anidb_special("Bonus", "Youjo Senki Special", specials)
+        assert ep is not None
+        assert ep.special_tag == "S1"
+
+    def test_title_match(self):
+        specials = [Episode(1, EpisodeType.SPECIAL, "Preview", "", "S1")]
         ep = _match_bonus_to_anidb_special("Preview", "Preview", specials)
         assert ep is not None
 
@@ -637,12 +682,21 @@ class TestNcopNcedManifestOutput:
     # creditless OP/ED. These tests cover the [アニメ BD] pattern; add
     # cases here as new conventions are encountered.
 
-    def test_ncop_uses_bonus_tag_and_song_title(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(
+        "bonus_type,song_title,expected_tag,anidb_tag",
+        [
+            ("NCOP", "Song Title", "NCOP1", "C1"),
+            ("NCED", "Song", "NCED1", "C2"),
+        ],
+    )
+    def test_uses_bonus_tag_and_song_title(
+        self, tmp_path, monkeypatch, bonus_type, song_title, expected_tag, anidb_tag
+    ):
         sf = SourceFile(
             path=tmp_path
-            / "[アニメ BD] Show(第1期) 映像特典「ノンテロップOP「Song Title」(specs).mkv",
+            / f"[アニメ BD] Show(第1期) 映像特典「{bonus_type}「{song_title}」(specs).mkv",
             parsed=ParsedMetadata(
-                season=1, episode=None, bonus_type="NCOP", episode_title="Song Title"
+                season=1, episode=None, bonus_type=bonus_type, episode_title=song_title
             ),
         )
         monkeypatch.setattr(_manifest_mod, "verify_hash", lambda _: None)
@@ -664,41 +718,9 @@ class TestNcopNcedManifestOutput:
         )
         assert len(entries) == 1
         dest = str(entries[0].dest_path)
-        # Should use numbered NCOP tag, not C1
-        assert "NCOP1" in dest
-        assert "C1" not in dest
-        # Should use the song title from the file, not "Opening 1"
-        assert "Song Title" in dest
-
-    def test_nced_uses_bonus_tag_and_song_title(self, tmp_path, monkeypatch):
-        sf = SourceFile(
-            path=tmp_path
-            / "[アニメ BD] Show(第1期) 映像特典「ノンテロップED「Song」(specs).mkv",
-            parsed=ParsedMetadata(
-                season=1, episode=None, bonus_type="NCED", episode_title="Song"
-            ),
-        )
-        monkeypatch.setattr(_manifest_mod, "verify_hash", lambda _: None)
-
-        info = AnimeInfo(
-            anidb_id=100,
-            tvdb_id=None,
-            title_ja="Show",
-            title_en="Show",
-            year=2020,
-            episodes=[
-                Episode(1, EpisodeType.CREDIT, "Opening 1", "", "C1"),
-                Episode(1, EpisodeType.CREDIT, "Ending 1", "", "C2"),
-            ],
-        )
-        entries = build_manifest_entries(
-            [sf], info, "Show", tmp_path / "dest", verbose=False
-        )
-        assert len(entries) == 1
-        dest = str(entries[0].dest_path)
-        assert "NCED1" in dest
-        assert "C2" not in dest
-        assert "Song" in dest
+        assert expected_tag in dest
+        assert anidb_tag not in dest
+        assert song_title in dest
 
 
 class TestHamatvNumbering:

@@ -212,6 +212,57 @@ class TestAnidbParsing:
         assert info.title_en == "Detective Opera Milky Holmes"
         assert info.title_ja == "探偵オペラ ミルキィホームズ"
 
+    def test_episode_romaji_from_xjat(self):
+        """x-jat episode titles populate title_romaji on Episode."""
+        xml = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<anime id="200" restricted="false">
+  <type>TV Series</type>
+  <episodecount>1</episodecount>
+  <startdate>2017-01-01</startdate>
+  <titles>
+    <title xml:lang="x-jat" type="main">Youjo Senki</title>
+    <title xml:lang="en" type="official">Saga of Tanya the Evil</title>
+    <title xml:lang="ja" type="official">幼女戦記</title>
+  </titles>
+  <episodes>
+    <episode id="1"><epno type="1">1</epno>
+      <title xml:lang="en">The Devil of the Rhine</title>
+      <title xml:lang="ja">ラインの悪魔</title>
+      <title xml:lang="x-jat">Rhine no Akuma</title>
+    </episode>
+  </episodes>
+</anime>
+"""
+        info = _parse_anidb_xml(xml, 200)
+        assert info.title_romaji == "Youjo Senki"
+        assert info.episodes[0].title_romaji == "Rhine no Akuma"
+        assert info.episodes[0].title_en == "The Devil of the Rhine"
+
+    def test_episode_romaji_empty_when_absent(self):
+        """Episodes without x-jat title get empty title_romaji."""
+        info = _parse_anidb_xml(ANIDB_XML_SERIES, 1234)
+        for ep in info.episodes:
+            assert ep.title_romaji == ""
+
+    def test_find_episode_title_romaji_fallback(self):
+        """find_episode_title falls back to romaji when English is empty."""
+        from etp_lib.types import AnimeInfo, Episode, EpisodeType
+
+        info = AnimeInfo(
+            anidb_id=1,
+            tvdb_id=None,
+            title_ja="テスト",
+            title_en="Test",
+            year=2020,
+            episodes=[
+                Episode(
+                    1, EpisodeType.REGULAR, "", "始まり", "", title_romaji="Hajimari"
+                ),
+            ],
+        )
+        assert info.find_episode_title(1) == "Hajimari"
+
     def test_error_response(self):
         with pytest.raises(ValueError, match="Anime not found"):
             _parse_anidb_xml(ANIDB_XML_ERROR, 99999)

@@ -31,8 +31,10 @@ else:
 def prompt_value(label: str, default: str = "") -> str:
     """Prompt for a value with an optional editable default.
 
-    When a default is provided, it is pre-filled in the input buffer so
-    the user can edit it in place (rather than retyping from scratch).
+    Shows ``[default]`` in the prompt and pre-fills the input buffer via
+    readline so the user can edit in place. The bracket hint ensures the
+    default is visible even when readline pre-fill doesn't work (e.g.,
+    some Linux terminal configurations).
     """
     if default:
 
@@ -42,7 +44,7 @@ def prompt_value(label: str, default: str = "") -> str:
 
         _rl.set_startup_hook(_prefill)
         try:
-            raw = input(f"{label}: ").strip()
+            raw = input(f"{label} [{default}]: ").strip()
         finally:
             _rl.set_startup_hook()
         return raw if raw else default
@@ -190,15 +192,19 @@ def _format_media_summary(media: MediaInfo | None) -> str:
 
 
 def resolve_conflict(conflict: ConflictInfo) -> str:
-    """Handle a destination conflict. Returns 'replace', 'keep', or 'skip'.
+    """Handle a destination conflict. Returns 'replace', 'keep', 'both', or 'skip'.
 
     For matching metadata with matching CRC32, auto-replaces silently.
+    'both' keeps the existing file and copies the new one alongside it.
     """
     if conflict.metadata_matches:
         # Short-circuit: if file sizes differ, CRC32 can't match
         incoming_size = conflict.incoming_source.path.stat().st_size
         if incoming_size == conflict.existing_size:
             src_crc = compute_crc32(conflict.incoming_source.path)
+            # Stash the computed CRC for later use (e.g., "both" disambiguation)
+            if not conflict.incoming_source.parsed.hash_code:
+                conflict.incoming_source.parsed.hash_code = src_crc
             dst_crc = compute_crc32(conflict.existing_path)
             if src_crc == dst_crc:
                 print(
@@ -227,14 +233,16 @@ def resolve_conflict(conflict: ConflictInfo) -> str:
 
     print()
     while True:
-        choice = input("  [k]eep existing  [r]eplace  [s]kip: ").strip().lower()
+        choice = input("  [k]eep existing  [r]eplace  [b]oth  [s]kip: ").strip().lower()
         if choice in ("k", "keep"):
             return "keep"
         if choice in ("r", "replace"):
             return "replace"
+        if choice in ("b", "both"):
+            return "both"
         if choice in ("s", "skip"):
             return "skip"
-        print("  Please enter k, r, or s.")
+        print("  Please enter k, r, b, or s.")
 
 
 # Matches episode tags like "s1e01", "s01e01", "s1e1" in filenames
@@ -285,8 +293,9 @@ def handle_conflict(
     an existing file with the same episode tag (handles different
     zero-padding conventions like s1e01 vs s01e01).
 
-    Returns ``None`` if no conflict, or 'replace'/'keep'/'skip'.
+    Returns ``None`` if no conflict, or 'replace'/'keep'/'both'/'skip'.
     When 'replace' is returned, the existing file has already been removed.
+    When 'both' is returned, the existing file is left in place.
     """
     # Exact path match
     conflict = check_destination_conflict(

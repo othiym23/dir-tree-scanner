@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from etp_lib.mediainfo import _resolution_shorthand, parse_mediainfo_json
+from etp_lib.media_vocab import normalize_resolution
+from etp_lib.mediainfo import _resolution_from_mediainfo, parse_mediainfo_json
 
 # ---------------------------------------------------------------------------
 # Fixtures: sample mediainfo JSON
@@ -210,12 +211,25 @@ class TestMediaInfoParsing:
         mi2 = parse_mediainfo_json(MEDIAINFO_COMMENTARY)
         assert mi2.audio_tracks[0].codec == "AC3"  # uppercase
 
-    def test_resolution_shorthands(self):
-        assert _resolution_shorthand(1920, 1080) == "1080p"
-        assert _resolution_shorthand(1280, 720) == "720p"
-        assert _resolution_shorthand(3840, 2160) == "4K"
-        assert _resolution_shorthand(960, 540) == "540p"
-        assert _resolution_shorthand(720, 480) == "480p"
+    def test_resolution_normalization(self):
+        assert normalize_resolution(1080) == "1080p"
+        assert normalize_resolution(720) == "720p"
+        assert normalize_resolution(2160) == "4K"
+        assert normalize_resolution(540) == "540p"
+        assert normalize_resolution(480) == "480p"
+        assert normalize_resolution(576) == "576p"
+
+    def test_resolution_interlaced(self):
+        assert normalize_resolution(1080, scan_type="i") == "1080i"
+        assert normalize_resolution(480, scan_type="i") == "480i"
+        assert normalize_resolution(2160, scan_type="i") == "4K"  # 4K always 4K
+
+    def test_mediainfo_resolution_with_scan_type(self):
+        assert _resolution_from_mediainfo(1080, "Progressive") == "1080p"
+        assert _resolution_from_mediainfo(1080, "Interlaced") == "1080i"
+        assert _resolution_from_mediainfo(720, "Progressive") == "720p"
+        assert _resolution_from_mediainfo(480, "Interlaced") == "480i"
+        assert _resolution_from_mediainfo(2160, "Progressive") == "4K"
 
     def test_multi_audio(self):
         mi = parse_mediainfo_json(MEDIAINFO_MULTI_AUDIO)

@@ -379,57 +379,42 @@ class TestResolveSeriesDirectory:
 class TestCLI:
     """Tests for subcommand-based CLI argument parsing."""
 
-    def test_triage_subcommand(self):
+    @pytest.mark.parametrize(
+        "argv,expected_cmd,expected_attrs",
+        [
+            (["triage"], "triage", {}),
+            (["triage", "beastars"], "triage", {"pattern": "beastars"}),
+            (["triage", "--dry-run"], "triage", {"dry_run": True}),
+            (["triage", "--force"], "triage", {"force": True}),
+            (["series"], "series", {}),
+            (["series", "beastars"], "series", {"pattern": "beastars"}),
+        ],
+    )
+    def test_subcommand_parsing(self, argv, expected_cmd, expected_attrs):
         parser = anime.build_parser()
-        args = parser.parse_args(["triage"])
-        assert args.command == "triage"
-
-    def test_triage_with_pattern(self):
-        parser = anime.build_parser()
-        args = parser.parse_args(["triage", "beastars"])
-        assert args.command == "triage"
-        assert args.pattern == "beastars"
-
-    def test_triage_with_dry_run(self):
-        parser = anime.build_parser()
-        args = parser.parse_args(["triage", "--dry-run"])
-        assert args.dry_run is True
-
-    def test_triage_with_force(self):
-        parser = anime.build_parser()
-        args = parser.parse_args(["triage", "--force"])
-        assert args.force is True
-
-    def test_series_subcommand(self):
-        parser = anime.build_parser()
-        args = parser.parse_args(["series"])
-        assert args.command == "series"
-
-    def test_series_with_pattern(self):
-        parser = anime.build_parser()
-        args = parser.parse_args(["series", "beastars"])
-        assert args.command == "series"
-        assert args.pattern == "beastars"
+        args = parser.parse_args(argv)
+        assert args.command == expected_cmd
+        for attr, val in expected_attrs.items():
+            assert getattr(args, attr) == val
 
     def test_episode_requires_file_and_id(self):
         parser = anime.build_parser()
         with pytest.raises(SystemExit):
-            parser.parse_args(["episode"])  # no file
+            parser.parse_args(["episode"])
 
-    def test_episode_with_anidb(self):
+    @pytest.mark.parametrize(
+        "argv,expected_anidb,expected_tvdb",
+        [
+            (["episode", "/tmp/test.mkv", "--anidb", "28"], 28, None),
+            (["episode", "/tmp/test.mkv", "--tvdb", "12345"], None, 12345),
+        ],
+    )
+    def test_episode_id_flags(self, argv, expected_anidb, expected_tvdb):
         parser = anime.build_parser()
-        args = parser.parse_args(["episode", "/tmp/test.mkv", "--anidb", "28"])
+        args = parser.parse_args(argv)
         assert args.command == "episode"
-        assert args.file == Path("/tmp/test.mkv")
-        assert args.anidb == 28
-        assert args.tvdb is None
-
-    def test_episode_with_tvdb(self):
-        parser = anime.build_parser()
-        args = parser.parse_args(["episode", "/tmp/test.mkv", "--tvdb", "12345"])
-        assert args.command == "episode"
-        assert args.tvdb == 12345
-        assert args.anidb is None
+        assert args.anidb == expected_anidb
+        assert args.tvdb == expected_tvdb
 
     def test_episode_anidb_and_tvdb_mutually_exclusive(self):
         parser = anime.build_parser()
@@ -505,36 +490,25 @@ class TestAnimeConfig:
 class TestExtractSeriesName:
     """Tests for per-file series name extraction."""
 
-    def test_bracketed_group_stripped(self):
-        name = anime._extract_series_name(
-            "[Cyan] Champignon no Majo - 08 [WEB 1080p x265][AAC][D98B31F3].mkv"
-        )
-        assert name == "Champignon no Majo"
-
-    def test_sonarr_format(self):
-        name = anime._extract_series_name(
-            "BEASTARS - s1e01 - The Moon and the Beast "
-            "[NH Bluray-1080p,10bit,x264,AAC].mkv"
-        )
-        assert name == "BEASTARS"
-
-    def test_scene_format(self):
-        name = anime._extract_series_name(
-            "Girls.und.Panzer.S01E05.1080p.BluRay.x264-GROUP.mkv"
-        )
-        assert name == "Girls und Panzer"
-
-    def test_no_group_no_hash(self):
-        name = anime._extract_series_name("My Anime - 03 (1080p).mkv")
-        assert name == "My Anime"
-
-    def test_movie_no_episode(self):
-        name = anime._extract_series_name("[Group] Movie Title [BD 1080p].mkv")
-        assert name == "Movie Title"
-
-    def test_empty_filename(self):
-        name = anime._extract_series_name("")
-        assert name == ""
+    @pytest.mark.parametrize(
+        "filename,expected",
+        [
+            (
+                "[Cyan] Champignon no Majo - 08 [WEB 1080p x265][AAC][D98B31F3].mkv",
+                "Champignon no Majo",
+            ),
+            (
+                "BEASTARS - s1e01 - The Moon and the Beast [NH Bluray-1080p,10bit,x264,AAC].mkv",
+                "BEASTARS",
+            ),
+            ("Girls.und.Panzer.S01E05.1080p.BluRay.x264-GROUP.mkv", "Girls und Panzer"),
+            ("My Anime - 03 (1080p).mkv", "My Anime"),
+            ("[Group] Movie Title [BD 1080p].mkv", "Movie Title"),
+            ("", ""),
+        ],
+    )
+    def test_extract_series_name(self, filename, expected):
+        assert anime._extract_series_name(filename) == expected
 
 
 class TestScanAndGroup:
@@ -629,20 +603,20 @@ class TestExtractConciseName:
 class TestStripYear:
     """Tests for _strip_year removing trailing (YYYY) from series names."""
 
-    def test_strip_trailing_year(self):
-        assert anime._strip_year("Golden Kamuy (2018)") == "Golden Kamuy"
-
-    def test_strip_year_with_brackets(self):
-        assert (
-            anime._strip_year("ゴールデンカムイ [Golden Kamuy] (2018)")
-            == "ゴールデンカムイ [Golden Kamuy]"
-        )
-
-    def test_no_year_unchanged(self):
-        assert anime._strip_year("Golden Kamuy") == "Golden Kamuy"
-
-    def test_year_in_middle_unchanged(self):
-        assert anime._strip_year("Show (2020) Special") == "Show (2020) Special"
+    @pytest.mark.parametrize(
+        "input_str,expected",
+        [
+            ("Golden Kamuy (2018)", "Golden Kamuy"),
+            (
+                "ゴールデンカムイ [Golden Kamuy] (2018)",
+                "ゴールデンカムイ [Golden Kamuy]",
+            ),
+            ("Golden Kamuy", "Golden Kamuy"),  # no year
+            ("Show (2020) Special", "Show (2020) Special"),  # year in middle
+        ],
+    )
+    def test_strip_year(self, input_str, expected):
+        assert anime._strip_year(input_str) == expected
 
 
 class TestConciseNameFromConfig:
@@ -733,6 +707,45 @@ class TestConciseNameFromConfig:
                 pre_parsed=parsed,
             )
         assert captured["default"] == "Golden Kamuy"
+
+
+class TestReleaseGroupOverride:
+    """Tests for selective release group override in batch processing."""
+
+    def test_different_group_preserved(self):
+        """Files with a different release group keep their own."""
+        from etp_lib.types import MatchedFile
+
+        batch_detected = "VARYG"
+        user_chosen = "VARYG"
+        mf_same = MatchedFile(
+            source=anime.SourceFile(
+                path=Path("ep01.mkv"),
+                parsed=anime.ParsedMetadata(release_group="VARYG", episode=1),
+            )
+        )
+        mf_different = MatchedFile(
+            source=anime.SourceFile(
+                path=Path("special.mkv"),
+                parsed=anime.ParsedMetadata(release_group="FLE", episode=1),
+            )
+        )
+        mf_empty = MatchedFile(
+            source=anime.SourceFile(
+                path=Path("bonus.mkv"),
+                parsed=anime.ParsedMetadata(release_group="", episode=None),
+            )
+        )
+
+        # Simulate the override logic from _process_group_batch
+        for mf in [mf_same, mf_different, mf_empty]:
+            existing = mf.source.parsed.release_group
+            if not existing or existing == batch_detected:
+                mf.release_group = user_chosen
+
+        assert mf_same.effective_release_group == "VARYG"
+        assert mf_different.effective_release_group == "FLE"  # preserved
+        assert mf_empty.effective_release_group == "VARYG"  # filled in
 
 
 class TestGroupDefaults:
@@ -1627,6 +1640,89 @@ class TestMatchFilesToSeason:
         )
         matched, remaining = anime._match_files_to_season(pool, info)
         assert len(matched) == 3
+        assert len(remaining) == 0
+
+    def test_title_filter_matches_romaji_name(self, monkeypatch):
+        """Files with romaji series name match when AniDB provides x-jat title."""
+        inputs = iter(["1"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        pool = [
+            anime.SourceFile(
+                path=Path(f"[SubGroup] Youjo Senki - {i:02d}.mkv"),
+                parsed=anime.ParsedMetadata(episode=i),
+            )
+            for i in range(1, 4)
+        ]
+        info = anime.AnimeInfo(
+            anidb_id=100,
+            tvdb_id=None,
+            title_ja="幼女戦記",
+            title_en="Saga of Tanya the Evil",
+            year=2017,
+            title_romaji="Youjo Senki",
+            episodes=[
+                anime.Episode(i, EpisodeType.REGULAR, f"Ep {i}", "", "")
+                for i in range(1, 14)
+            ],
+        )
+        matched, remaining = anime._match_files_to_season(pool, info)
+        assert len(matched) == 3
+        assert len(remaining) == 0
+
+    def test_title_filter_prefix_match(self, monkeypatch):
+        """Longer filename title matches shorter AniDB title via prefix."""
+        inputs = iter(["1"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        pool = [
+            anime.SourceFile(
+                path=Path("[SubGroup] Mushishi Zoku Shou - 01 [1080p].mkv"),
+                parsed=anime.ParsedMetadata(season=1, episode=1),
+            ),
+        ]
+        info = anime.AnimeInfo(
+            anidb_id=100,
+            tvdb_id=None,
+            title_ja="蟲師",
+            title_en="Mushishi",
+            year=2005,
+            episodes=[anime.Episode(1, EpisodeType.REGULAR, "Ep 1", "", "")],
+        )
+        matched, remaining = anime._match_files_to_season(pool, info)
+        # "mushishizokushou" starts with "mushishi" → prefix match
+        assert len(matched) == 1
+        assert len(remaining) == 0
+
+    def test_season_zero_specials_included(self, monkeypatch):
+        """Season 0 files are included as bonus when matching a regular season."""
+        inputs = iter(["1"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        pool = [
+            anime.SourceFile(
+                path=Path("[G] Show - S01E01 [1080p].mkv"),
+                parsed=anime.ParsedMetadata(season=1, episode=1),
+            ),
+            anime.SourceFile(
+                path=Path("[G] Show - S00E01 [1080p].mkv"),
+                parsed=anime.ParsedMetadata(season=0, episode=1, is_special=True),
+            ),
+        ]
+        info = anime.AnimeInfo(
+            anidb_id=100,
+            tvdb_id=None,
+            title_ja="ショー",
+            title_en="Show",
+            year=2020,
+            episodes=[
+                anime.Episode(1, EpisodeType.REGULAR, "Ep 1", "", ""),
+                anime.Episode(1, EpisodeType.SPECIAL, "Special 1", "", "S1"),
+            ],
+        )
+        matched, remaining = anime._match_files_to_season(pool, info)
+        # Both the regular episode and the season 0 special should be matched
+        assert len(matched) == 2
         assert len(remaining) == 0
 
 

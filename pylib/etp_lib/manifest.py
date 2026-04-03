@@ -14,6 +14,7 @@ from pathlib import Path
 import kdl
 
 from etp_lib.conflicts import (
+    compute_crc32,
     copy_reflink,
     handle_conflict,
     prompt_confirm,
@@ -72,7 +73,12 @@ def _match_bonus_to_anidb_special(
             for ep in specials:
                 en_norm = normalize_for_matching(ep.title_en)
                 ja_norm = normalize_for_matching(ep.title_ja)
-                if (en_norm and ep_norm in en_norm) or (ja_norm and ep_norm in ja_norm):
+                jat_norm = normalize_for_matching(ep.title_romaji)
+                if (
+                    (en_norm and ep_norm in en_norm)
+                    or (ja_norm and ep_norm in ja_norm)
+                    or (jat_norm and ep_norm in jat_norm)
+                ):
                     return ep
     return None
 
@@ -531,6 +537,18 @@ def execute_manifest(
                 else:
                     success += 1
                 continue
+            if action == "both":
+                # Keep existing. If dest already exists (same filename from
+                # matching metadata), disambiguate by appending the source
+                # file's CRC32 to the filename.
+                if dest_path.exists():
+                    crc = sf.parsed.hash_code
+                    if not crc:
+                        crc = compute_crc32(sf.path)
+                        sf.parsed.hash_code = crc
+                    stem = dest_path.stem
+                    ext = dest_path.suffix
+                    dest_path = dest_path.parent / f"{stem} [{crc}]{ext}"
 
         try:
             if copy_reflink(sf.path, dest_path, dry_run=dry_run):

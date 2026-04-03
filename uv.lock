@@ -56,12 +56,12 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "kdl-py" },
+    { name = "parsy" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "hypothesis" },
-    { name = "parsy" },
     { name = "pyright" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -70,12 +70,14 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "kdl-py", specifier = ">=1.2.0" }]
+requires-dist = [
+    { name = "kdl-py", specifier = ">=1.2.0" },
+    { name = "parsy", specifier = ">=2.2" },
+]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "hypothesis", specifier = ">=6.151.9" },
-    { name = "parsy", specifier = ">=2.2" },
     { name = "pyright", specifier = ">=1.1" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-cov", specifier = ">=7.1.0" },

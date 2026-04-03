@@ -61,19 +61,19 @@ def _parse_tvdb_json(
 
     # Canonical translations are preferred; fall back to primary name / aliases.
     title_ja = translations.get("jpn") or name
-    title_en = translations.get("eng", "")
+    title_en = translations.get("eng") or ""
     if not title_en:
         for alias in aliases:
             if alias.get("language") == "eng":
-                title_en = alias.get("name", "")
+                title_en = alias.get("name") or ""
                 break
 
-    year_str = series_data.get("year", "")
+    year_str = series_data.get("year") or ""
     year = int(year_str) if year_str else 0
 
     # First aired date as fallback for year
     if not year:
-        first_aired = series_data.get("firstAired", "")
+        first_aired = series_data.get("firstAired") or ""
         if first_aired and len(first_aired) >= 4:
             try:
                 year = int(first_aired[:4])
@@ -82,9 +82,13 @@ def _parse_tvdb_json(
 
     episodes: list[Episode] = []
     for ep in episodes_data:
-        season_num = ep.get("seasonNumber", 1)
-        ep_num = ep.get("number", 0)
-        ep_name = ep.get("name", "")
+        season_num = ep.get("seasonNumber")
+        if season_num is None:
+            season_num = 1
+        ep_num = ep.get("number")
+        if ep_num is None:
+            ep_num = 0
+        ep_name = ep.get("name") or ""
 
         is_special = season_num == 0
         ep_type = EpisodeType.SPECIAL if is_special else EpisodeType.REGULAR

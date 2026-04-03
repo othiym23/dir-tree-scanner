@@ -7,6 +7,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from etp_lib.media_vocab import normalize_resolution
 from etp_lib.types import AudioTrack, MediaInfo
 
 # Match: "commentary" as a whole word in audio track titles
@@ -43,19 +44,14 @@ _AUDIO_CODEC_MAP: dict[str, str] = {
 }
 
 
-def _resolution_shorthand(width: int, height: int) -> str:
-    """Convert width x height to shorthand like '1080p', '720p', '4K'."""
-    if height >= 2160 or width >= 3840:
-        return "4K"
-    if height >= 1080 or width >= 1920:
-        return "1080p"
-    if height >= 720 or width >= 1280:
-        return "720p"
-    if height >= 540 or width >= 960:
-        return "540p"
-    if height >= 480 or width >= 720:
-        return "480p"
-    return f"{height}p"
+def _resolution_from_mediainfo(height: int, scan_type: str) -> str:
+    """Convert mediainfo height + scan type to a standard resolution tag.
+
+    Uses the shared ``normalize_resolution`` table. ``scan_type`` comes from
+    mediainfo's ``ScanType`` field: ``"Progressive"`` or ``"Interlaced"``.
+    """
+    st = "i" if scan_type.lower().startswith("interlace") else "p"
+    return normalize_resolution(height, scan_type=st)
 
 
 def _detect_hdr(video_track: dict) -> str:
@@ -134,7 +130,8 @@ def parse_mediainfo_json(data: dict) -> MediaInfo:
             width = int(track.get("Width", 0))
             height = int(track.get("Height", 0))
             bit_depth = int(track.get("BitDepth", 8))
-            resolution = _resolution_shorthand(width, height)
+            scan_type = track.get("ScanType", "Progressive")
+            resolution = _resolution_from_mediainfo(height, scan_type)
             hdr_type = _detect_hdr(track)
             encoding_lib = _detect_encoding_lib(track)
 

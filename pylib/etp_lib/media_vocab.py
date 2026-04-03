@@ -6,6 +6,7 @@ primitives.  No parsing logic here — just data definitions.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -46,6 +47,8 @@ class TokenKind(Enum):
     DUAL_AUDIO = auto()
     UNCENSORED = auto()
     EDITION = auto()  # Criterion, Remastered, etc.
+    HDR = auto()  # HDR, HDR10, DoVi, DV, UHD
+    BIT_DEPTH = auto()  # 10bit, 8bit, Hi10, Hi10P
     UNKNOWN = auto()
 
 
@@ -278,10 +281,81 @@ _HDR_KEYWORDS = frozenset(
         "hdr",
         "hdr10",
         "hdr10+",
+        "dv",
         "dovi",
         "dolby vision",
+        "uhd",
+        "ultrahd",
     }
 )
+
+# ---------------------------------------------------------------------------
+# Resolution normalization
+# ---------------------------------------------------------------------------
+
+# Height → standard resolution tag (progressive assumed; caller supplies scan type)
+_RESOLUTION_BY_HEIGHT: list[tuple[int, str]] = [
+    (2160, "4K"),
+    (1080, "1080"),
+    (720, "720"),
+    (576, "576"),
+    (540, "540"),
+    (480, "480"),
+    (360, "360"),
+]
+
+
+def normalize_resolution(height: int, scan_type: str = "p") -> str:
+    """Normalize a vertical resolution to a standard tag.
+
+    Uses height as the sole indicator (width is irrelevant — anamorphic
+    encodes have non-standard widths but standard heights). ``scan_type``
+    should be ``"p"`` (progressive, default) or ``"i"`` (interlaced).
+    4K always returns ``"4K"`` regardless of scan type.
+
+    Examples::
+
+        normalize_resolution(1080)                → "1080p"
+        normalize_resolution(1080, scan_type="i") → "1080i"
+        normalize_resolution(2160)                → "4K"
+        normalize_resolution(480)                 → "480p"
+    """
+    for threshold, tag in _RESOLUTION_BY_HEIGHT:
+        if height >= threshold:
+            if tag == "4K":
+                return "4K"
+            return f"{tag}{scan_type}"
+    # Fallback for very small resolutions
+    return f"{height}{scan_type}"
+
+
+_RE_RES_NP = re.compile(r"^(\d{3,4})([pi])$", re.IGNORECASE)
+_RE_RES_WXH = re.compile(r"^(\d{3,4})x(\d{3,4})([pi])?$", re.IGNORECASE)
+
+
+def parse_resolution_text(text: str) -> str:
+    """Normalize a resolution string from a filename to a standard tag.
+
+    Handles formats like ``"1080p"``, ``"1080i"``, ``"1920x1080"``,
+    ``"1440x1080p"``, ``"4K"``, ``"720x480"``.
+    """
+    text = text.strip()
+
+    if text.upper() == "4K":
+        return "4K"
+
+    m = _RE_RES_NP.match(text)
+    if m:
+        return normalize_resolution(int(m.group(1)), scan_type=m.group(2).lower())
+
+    m = _RE_RES_WXH.match(text)
+    if m:
+        height = int(m.group(2))
+        scan = m.group(3).lower() if m.group(3) else "p"
+        return normalize_resolution(height, scan_type=scan)
+
+    return text
+
 
 # Token kinds that are metadata (not title)
 _METADATA_KINDS = frozenset(
@@ -306,6 +380,8 @@ _METADATA_KINDS = frozenset(
         TokenKind.DUAL_AUDIO,
         TokenKind.UNCENSORED,
         TokenKind.EDITION,
+        TokenKind.HDR,
+        TokenKind.BIT_DEPTH,
         TokenKind.UNKNOWN,
         TokenKind.EXTENSION,
         TokenKind.PATH_SEP,
