@@ -181,9 +181,14 @@ def build_manifest_entries(
                 ep_number = matched_ep.number
                 season = 0
             else:
-                # Use parser special tag directly (e.g. S03OP, S01OVA)
-                special_tag = sf.parsed.special_tag
-                episode_name = episode_title
+                # No AniDB match — build tag from bonus_type + episode
+                # number (e.g. NCOP1, NCED2) or use parser special_tag
+                # (e.g. S03OP, S01OVA) if available.
+                if sf.parsed.special_tag:
+                    special_tag = sf.parsed.special_tag
+                elif bonus_type and ep_number is not None:
+                    special_tag = f"{bonus_type}{ep_number}"
+                episode_name = episode_title or special_tag
                 season = 0
         elif bonus_type:
             available = [

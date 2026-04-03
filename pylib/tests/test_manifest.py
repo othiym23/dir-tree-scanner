@@ -762,6 +762,40 @@ class TestNcopNcedWithEpisodeNumber:
         assert "Specials" in dest
         assert "Season 01" not in dest
 
+    def test_ncop_gets_tag_when_no_credits_available(self, tmp_path, monkeypatch):
+        """NCOP 01v2 with TVDB-only data (no credits) should get NCOP1 tag."""
+        sf = SourceFile(
+            path=tmp_path
+            / "[sam] Kusuriya no Hitorigoto - NCOP 01v2 [BD 1080p FLAC] [93B031B8].mkv",
+            parsed=ParsedMetadata(
+                episode=1,
+                bonus_type="NCOP",
+                is_special=True,
+                version=2,
+                hash_code="93B031B8",
+            ),
+        )
+        monkeypatch.setattr(_manifest_mod, "verify_hash", lambda _: None)
+
+        # TVDB-only: no credit episodes, only regulars and specials
+        info = AnimeInfo(
+            anidb_id=None,
+            tvdb_id=431162,
+            title_ja="薬屋のひとりごと",
+            title_en="The Apothecary Diaries",
+            year=2023,
+            episodes=[
+                Episode(1, EpisodeType.REGULAR, "Maomao", "", ""),
+            ],
+        )
+        entries = build_manifest_entries(
+            [sf], info, "The Apothecary Diaries", tmp_path / "dest", verbose=False
+        )
+        assert len(entries) == 1
+        dest = str(entries[0].dest_path)
+        assert "Specials" in dest
+        assert "NCOP1" in dest
+
     def test_nced_with_episode_number_is_special(self, tmp_path, monkeypatch):
         """NCED 02 should be a special, not regular s1e02."""
         sf = SourceFile(
