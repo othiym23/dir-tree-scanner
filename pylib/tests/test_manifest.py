@@ -577,6 +577,59 @@ class TestExecuteManifest:
         assert success == 2
         assert failed == 1
 
+    def test_both_action_crc_disambiguation(self, tmp_path, monkeypatch):
+        """'both' action with existing dest appends CRC32 to filename."""
+        src = tmp_path / "src" / "ep01.mkv"
+        src.parent.mkdir()
+        src.write_bytes(b"source content here")
+
+        dest_dir = tmp_path / "dst"
+        dest_dir.mkdir()
+        existing = dest_dir / "Show - s1e01 [Group BD,1080p,HEVC].mkv"
+        existing.write_bytes(b"existing content")
+
+        dest_path = dest_dir / "Show - s1e01 [Group BD,1080p,HEVC].mkv"
+
+        sf = SourceFile(path=src, parsed=ParsedMetadata(episode=1, season=1))
+
+        # Mock handle_conflict to return "both"
+        monkeypatch.setattr(_manifest_mod, "handle_conflict", lambda *a, **kw: "both")
+        monkeypatch.setattr(_manifest_mod, "copy_reflink", lambda *a, **kw: True)
+
+        entries = [(sf, dest_path)]
+        success, failed, copied = execute_manifest(
+            entries, dry_run=False, verbose=False
+        )
+        assert success == 1
+        # CRC32 should have been computed and stashed
+        assert sf.parsed.hash_code != ""
+        assert len(sf.parsed.hash_code) == 8
+
+    def test_both_action_no_conflict_when_dest_missing(self, tmp_path, monkeypatch):
+        """'both' with non-existent dest copies without disambiguation."""
+        src = tmp_path / "src" / "ep01.mkv"
+        src.parent.mkdir()
+        src.write_bytes(b"source content")
+
+        dest_path = tmp_path / "dst" / "Show - s1e01 [Group].mkv"
+        dest_path.parent.mkdir()
+
+        sf = SourceFile(path=src, parsed=ParsedMetadata(episode=1, season=1))
+
+        monkeypatch.setattr(_manifest_mod, "handle_conflict", lambda *a, **kw: "both")
+
+        copied_to: list[Path] = []
+
+        def track_copy(src_p, dst_p, **kw):
+            copied_to.append(dst_p)
+            return True
+
+        monkeypatch.setattr(_manifest_mod, "copy_reflink", track_copy)
+
+        execute_manifest([(sf, dest_path)], dry_run=False, verbose=False)
+        # Should copy to original path (no CRC suffix)
+        assert copied_to[0] == dest_path
+
 
 class TestBonusToAnidbMatching:
     """Tests for matching bonus files against AniDB specials."""
@@ -604,6 +657,17 @@ class TestBonusToAnidbMatching:
 
     def test_empty_specials(self):
         assert _match_bonus_to_anidb_special("NCOP", "", []) is None
+
+    def test_romaji_title_match(self):
+        """Bonus matches against romaji episode title when en/ja don't match."""
+        specials = [
+            Episode(
+                1, EpisodeType.SPECIAL, "", "", "S1", title_romaji="Youjo Senki Special"
+            ),
+        ]
+        ep = _match_bonus_to_anidb_special("Bonus", "Youjo Senki Special", specials)
+        assert ep is not None
+        assert ep.special_tag == "S1"
 
     def test_title_match(self):
         specials = [Episode(1, EpisodeType.SPECIAL, "Preview", "", "S1")]

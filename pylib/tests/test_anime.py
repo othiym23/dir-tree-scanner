@@ -709,6 +709,45 @@ class TestConciseNameFromConfig:
         assert captured["default"] == "Golden Kamuy"
 
 
+class TestReleaseGroupOverride:
+    """Tests for selective release group override in batch processing."""
+
+    def test_different_group_preserved(self):
+        """Files with a different release group keep their own."""
+        from etp_lib.types import MatchedFile
+
+        batch_detected = "VARYG"
+        user_chosen = "VARYG"
+        mf_same = MatchedFile(
+            source=anime.SourceFile(
+                path=Path("ep01.mkv"),
+                parsed=anime.ParsedMetadata(release_group="VARYG", episode=1),
+            )
+        )
+        mf_different = MatchedFile(
+            source=anime.SourceFile(
+                path=Path("special.mkv"),
+                parsed=anime.ParsedMetadata(release_group="FLE", episode=1),
+            )
+        )
+        mf_empty = MatchedFile(
+            source=anime.SourceFile(
+                path=Path("bonus.mkv"),
+                parsed=anime.ParsedMetadata(release_group="", episode=None),
+            )
+        )
+
+        # Simulate the override logic from _process_group_batch
+        for mf in [mf_same, mf_different, mf_empty]:
+            existing = mf.source.parsed.release_group
+            if not existing or existing == batch_detected:
+                mf.release_group = user_chosen
+
+        assert mf_same.effective_release_group == "VARYG"
+        assert mf_different.effective_release_group == "FLE"  # preserved
+        assert mf_empty.effective_release_group == "VARYG"  # filled in
+
+
 class TestGroupDefaults:
     """Tests for sticky group defaults across files."""
 
@@ -1601,6 +1640,89 @@ class TestMatchFilesToSeason:
         )
         matched, remaining = anime._match_files_to_season(pool, info)
         assert len(matched) == 3
+        assert len(remaining) == 0
+
+    def test_title_filter_matches_romaji_name(self, monkeypatch):
+        """Files with romaji series name match when AniDB provides x-jat title."""
+        inputs = iter(["1"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        pool = [
+            anime.SourceFile(
+                path=Path(f"[SubGroup] Youjo Senki - {i:02d}.mkv"),
+                parsed=anime.ParsedMetadata(episode=i),
+            )
+            for i in range(1, 4)
+        ]
+        info = anime.AnimeInfo(
+            anidb_id=100,
+            tvdb_id=None,
+            title_ja="幼女戦記",
+            title_en="Saga of Tanya the Evil",
+            year=2017,
+            title_romaji="Youjo Senki",
+            episodes=[
+                anime.Episode(i, EpisodeType.REGULAR, f"Ep {i}", "", "")
+                for i in range(1, 14)
+            ],
+        )
+        matched, remaining = anime._match_files_to_season(pool, info)
+        assert len(matched) == 3
+        assert len(remaining) == 0
+
+    def test_title_filter_prefix_match(self, monkeypatch):
+        """Longer filename title matches shorter AniDB title via prefix."""
+        inputs = iter(["1"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        pool = [
+            anime.SourceFile(
+                path=Path("[SubGroup] Mushishi Zoku Shou - 01 [1080p].mkv"),
+                parsed=anime.ParsedMetadata(season=1, episode=1),
+            ),
+        ]
+        info = anime.AnimeInfo(
+            anidb_id=100,
+            tvdb_id=None,
+            title_ja="蟲師",
+            title_en="Mushishi",
+            year=2005,
+            episodes=[anime.Episode(1, EpisodeType.REGULAR, "Ep 1", "", "")],
+        )
+        matched, remaining = anime._match_files_to_season(pool, info)
+        # "mushishizokushou" starts with "mushishi" → prefix match
+        assert len(matched) == 1
+        assert len(remaining) == 0
+
+    def test_season_zero_specials_included(self, monkeypatch):
+        """Season 0 files are included as bonus when matching a regular season."""
+        inputs = iter(["1"])
+        monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+
+        pool = [
+            anime.SourceFile(
+                path=Path("[G] Show - S01E01 [1080p].mkv"),
+                parsed=anime.ParsedMetadata(season=1, episode=1),
+            ),
+            anime.SourceFile(
+                path=Path("[G] Show - S00E01 [1080p].mkv"),
+                parsed=anime.ParsedMetadata(season=0, episode=1, is_special=True),
+            ),
+        ]
+        info = anime.AnimeInfo(
+            anidb_id=100,
+            tvdb_id=None,
+            title_ja="ショー",
+            title_en="Show",
+            year=2020,
+            episodes=[
+                anime.Episode(1, EpisodeType.REGULAR, "Ep 1", "", ""),
+                anime.Episode(1, EpisodeType.SPECIAL, "Special 1", "", "S1"),
+            ],
+        )
+        matched, remaining = anime._match_files_to_season(pool, info)
+        # Both the regular episode and the season 0 special should be matched
+        assert len(matched) == 2
         assert len(remaining) == 0
 
 
