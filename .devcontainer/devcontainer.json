@@ -29,7 +29,8 @@
         "anthropic.claude-code",
         "kdl-org.kdl",
         "pflannery.vscode-versionlens",
-        "ms-vscode-remote.remote-containers"
+        "ms-vscode-remote.remote-containers",
+        "ms-azuretools.vscode-docker"
       ],
       "settings": {
         "terminal.integrated.defaultProfile.linux": "bash"
