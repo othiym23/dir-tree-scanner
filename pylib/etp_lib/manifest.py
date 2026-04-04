@@ -381,11 +381,11 @@ def write_manifest(
             if entry.hash_failed:
                 lines.append("  // CRC32 MISMATCH — hash stripped from destination")
             lines.append(f"  {tag}episode {ep_num} {{")
-            lines.append(f'    source "{escape_kdl(str(entry.source.path))}"')
             if entry.source.matched_download is not None:
                 lines.append(
                     f'    downloaded "{escape_kdl(str(entry.source.matched_download))}"'
                 )
+            lines.append(f'    source "{escape_kdl(str(entry.source.path))}"')
             dest_name = entry.dest_path.name
             if len(dest_name.encode("utf-8")) > _MAX_FILENAME_BYTES:
                 lines.append(
