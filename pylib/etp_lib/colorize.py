@@ -87,64 +87,77 @@ def set_color_depth(depth: ColorDepth) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Named color palette (256-color numbers)
+# ---------------------------------------------------------------------------
+
+_PALETTE: dict[str, int] = {
+    "bright_yellow": 228,
+    "light_pink": 218,
+    "orange": 214,
+    "mid_gray": 245,
+    "bright_cyan": 51,
+    "sky_blue": 39,
+    "hot_pink": 207,
+    "purple": 141,
+    "pale_green": 114,
+    "aquamarine": 79,
+    "tan": 180,
+    "pink": 176,
+    "rose": 204,
+    "steel_blue": 75,
+    "light_aqua": 87,
+    "gray_green": 102,
+    "olive_gray": 103,
+    "orchid": 213,
+    "light_gold": 222,
+    "red": 196,
+    "light_steel": 147,
+    "yellow": 226,
+    "green": 156,
+    "dark_gray": 240,
+    "gray": 244,
+}
+
+# ---------------------------------------------------------------------------
 # Color code generators
 # ---------------------------------------------------------------------------
 
 
-# 256-color: \033[38;5;Nm
 def _c256(n: int) -> str:
     return f"\033[38;5;{n}m"
 
 
-# 16-color: \033[{30-37;1}m  (bright = bold + base)
 def _c16(code: str) -> str:
     return f"\033[{code}m"
 
 
-# 16-color codes: name -> ANSI SGR parameter
-_BRIGHT_RED = "91"
-_BRIGHT_GREEN = "92"
-_BRIGHT_YELLOW = "93"
-_BRIGHT_BLUE = "94"
-_BRIGHT_MAGENTA = "95"
-_BRIGHT_CYAN = "96"
-_RED = "31"
-_GREEN = "32"
-_YELLOW = "33"
-_BLUE = "34"
-_MAGENTA = "35"
-_CYAN = "36"
-_WHITE = "37"
-_DARK_GRAY = "90"
-_GRAY = "37"
-
-# Map each 256-color code to its closest 16-color equivalent
-_256_TO_16: dict[int, str] = {
-    228: _BRIGHT_YELLOW,  # TEXT/DOT_TEXT — series name
-    218: _BRIGHT_MAGENTA,  # EPISODE_TITLE — light pink → bright magenta
-    214: _YELLOW,  # RELEASE_GROUP — orange → yellow
-    245: _DARK_GRAY,  # CRC32 — mid gray
-    51: _BRIGHT_CYAN,  # EPISODE — bright cyan
-    39: _BRIGHT_BLUE,  # SEASON — deep sky blue → bright blue
-    207: _BRIGHT_MAGENTA,  # SPECIAL — hot pink → bright magenta
-    141: _MAGENTA,  # VERSION — medium purple → magenta
-    114: _BRIGHT_GREEN,  # RESOLUTION — pale green → bright green
-    79: _CYAN,  # VIDEO_CODEC — medium aquamarine → cyan
-    180: _YELLOW,  # AUDIO_CODEC — tan → yellow
-    176: _MAGENTA,  # SOURCE — pink → magenta
-    204: _RED,  # REMUX — hot pink → red
-    75: _BLUE,  # YEAR — steel blue → blue
-    87: _BRIGHT_CYAN,  # BATCH_RANGE — aquamarine → bright cyan
-    102: _DARK_GRAY,  # SUBTITLE_INFO — gray-green → dark gray
-    103: _DARK_GRAY,  # LANGUAGE — olive gray → dark gray
-    213: _BRIGHT_MAGENTA,  # BONUS — orchid → bright magenta
-    222: _BRIGHT_YELLOW,  # DUAL_AUDIO — light gold → bright yellow
-    196: _BRIGHT_RED,  # UNCENSORED — red → bright red
-    147: _BRIGHT_BLUE,  # EDITION — light steel blue → bright blue
-    226: _BRIGHT_YELLOW,  # HDR — yellow → bright yellow
-    156: _GREEN,  # BIT_DEPTH — light green → green
-    240: _DARK_GRAY,  # SEPARATOR/EXTENSION/SITE_PREFIX — dark gray
-    244: _GRAY,  # UNKNOWN — gray
+# 16-color fallbacks: palette name -> ANSI SGR parameter
+_PALETTE_TO_16: dict[str, str] = {
+    "bright_yellow": "93",
+    "light_pink": "95",
+    "orange": "33",
+    "mid_gray": "90",
+    "bright_cyan": "96",
+    "sky_blue": "94",
+    "hot_pink": "95",
+    "purple": "35",
+    "pale_green": "92",
+    "aquamarine": "36",
+    "tan": "33",
+    "pink": "35",
+    "rose": "31",
+    "steel_blue": "34",
+    "light_aqua": "96",
+    "gray_green": "90",
+    "olive_gray": "90",
+    "orchid": "95",
+    "light_gold": "93",
+    "red": "91",
+    "light_steel": "94",
+    "yellow": "93",
+    "green": "32",
+    "dark_gray": "90",
+    "gray": "37",
 }
 
 
@@ -154,8 +167,12 @@ def _make_color(n256: int) -> str:
     if depth == ColorDepth.NONE:
         return ""
     if depth == ColorDepth.BASIC:
-        code = _256_TO_16.get(n256)
-        return _c16(code) if code else ""
+        # Reverse-lookup the palette name for this number
+        for name, num in _PALETTE.items():
+            if num == n256:
+                code = _PALETTE_TO_16.get(name)
+                return _c16(code) if code else ""
+        return ""
     return _c256(n256)
 
 
@@ -169,36 +186,35 @@ def _reset() -> str:
 # Token color mapping
 # ---------------------------------------------------------------------------
 
-# Store the raw 256-color numbers so we can resolve at render time.
-_TOKEN_COLOR_NUMS: dict[TokenKind, int] = {
-    TokenKind.TEXT: 228,
-    TokenKind.DOT_TEXT: 228,
-    TokenKind.EPISODE_TITLE: 218,
-    TokenKind.RELEASE_GROUP: 214,
-    TokenKind.CRC32: 245,
-    TokenKind.EPISODE: 51,
-    TokenKind.SEASON: 39,
-    TokenKind.SPECIAL: 207,
-    TokenKind.VERSION: 141,
-    TokenKind.RESOLUTION: 114,
-    TokenKind.VIDEO_CODEC: 79,
-    TokenKind.AUDIO_CODEC: 180,
-    TokenKind.SOURCE: 176,
-    TokenKind.REMUX: 204,
-    TokenKind.YEAR: 75,
-    TokenKind.BATCH_RANGE: 87,
-    TokenKind.SUBTITLE_INFO: 102,
-    TokenKind.LANGUAGE: 103,
-    TokenKind.BONUS: 213,
-    TokenKind.DUAL_AUDIO: 222,
-    TokenKind.UNCENSORED: 196,
-    TokenKind.EDITION: 147,
-    TokenKind.HDR: 226,
-    TokenKind.BIT_DEPTH: 156,
-    TokenKind.SEPARATOR: 240,
-    TokenKind.EXTENSION: 240,
-    TokenKind.SITE_PREFIX: 240,
-    TokenKind.UNKNOWN: 244,
+_TOKEN_COLORS: dict[TokenKind, int] = {
+    TokenKind.TEXT: _PALETTE["bright_yellow"],
+    TokenKind.DOT_TEXT: _PALETTE["bright_yellow"],
+    TokenKind.EPISODE_TITLE: _PALETTE["light_pink"],
+    TokenKind.RELEASE_GROUP: _PALETTE["orange"],
+    TokenKind.CRC32: _PALETTE["mid_gray"],
+    TokenKind.EPISODE: _PALETTE["bright_cyan"],
+    TokenKind.SEASON: _PALETTE["sky_blue"],
+    TokenKind.SPECIAL: _PALETTE["hot_pink"],
+    TokenKind.VERSION: _PALETTE["purple"],
+    TokenKind.RESOLUTION: _PALETTE["pale_green"],
+    TokenKind.VIDEO_CODEC: _PALETTE["aquamarine"],
+    TokenKind.AUDIO_CODEC: _PALETTE["tan"],
+    TokenKind.SOURCE: _PALETTE["pink"],
+    TokenKind.REMUX: _PALETTE["rose"],
+    TokenKind.YEAR: _PALETTE["steel_blue"],
+    TokenKind.BATCH_RANGE: _PALETTE["light_aqua"],
+    TokenKind.SUBTITLE_INFO: _PALETTE["gray_green"],
+    TokenKind.LANGUAGE: _PALETTE["olive_gray"],
+    TokenKind.BONUS: _PALETTE["orchid"],
+    TokenKind.DUAL_AUDIO: _PALETTE["light_gold"],
+    TokenKind.UNCENSORED: _PALETTE["red"],
+    TokenKind.EDITION: _PALETTE["light_steel"],
+    TokenKind.HDR: _PALETTE["yellow"],
+    TokenKind.BIT_DEPTH: _PALETTE["green"],
+    TokenKind.SEPARATOR: _PALETTE["dark_gray"],
+    TokenKind.EXTENSION: _PALETTE["dark_gray"],
+    TokenKind.SITE_PREFIX: _PALETTE["dark_gray"],
+    TokenKind.UNKNOWN: _PALETTE["gray"],
 }
 
 _FIELD_TO_KIND: dict[str, TokenKind] = {
@@ -240,7 +256,7 @@ _RE_SE_SPLIT = re.compile(r"([Ss]\d{1,2})([Ee]\d{1,4}(?:v\d+)?)", re.IGNORECASE)
 
 def colorize(text: str, kind: TokenKind) -> str:
     """Wrap text in ANSI color for a token kind."""
-    n = _TOKEN_COLOR_NUMS.get(kind)
+    n = _TOKEN_COLORS.get(kind)
     if n is not None:
         color = _make_color(n)
         if color:
@@ -252,7 +268,7 @@ def color_for_field(field: str) -> str:
     """Return the ANSI color code for a parsed field name."""
     kind = _FIELD_TO_KIND.get(field)
     if kind is not None:
-        n = _TOKEN_COLOR_NUMS.get(kind)
+        n = _TOKEN_COLORS.get(kind)
         if n is not None:
             return _make_color(n)
     return ""

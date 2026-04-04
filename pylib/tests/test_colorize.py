@@ -134,26 +134,29 @@ class TestColorize:
     def test_unknown_kind_no_crash(self) -> None:
         # TokenKind values not in the map should return plain text
         set_color_depth(ColorDepth.FULL)
-        # BRACKET/PAREN/LENTICULAR are not in _TOKEN_COLOR_NUMS
+        # BRACKET/PAREN/LENTICULAR are not in _TOKEN_COLORS
         result = colorize("test", TokenKind.BRACKET)
         assert result == "test"
 
     def test_all_token_kinds_have_colors(self) -> None:
         """Every TokenKind in the color map produces output with color codes."""
         set_color_depth(ColorDepth.FULL)
-        from etp_lib.colorize import _TOKEN_COLOR_NUMS
+        from etp_lib.colorize import _TOKEN_COLORS
 
-        for kind in _TOKEN_COLOR_NUMS:
+        for kind in _TOKEN_COLORS:
             result = colorize("x", kind)
             assert "\033[" in result, f"{kind} did not produce color"
 
     def test_16_color_mapping_complete(self) -> None:
-        """Every 256-color number used has a 16-color mapping."""
-        from etp_lib.colorize import _256_TO_16, _TOKEN_COLOR_NUMS
+        """Every palette color used by tokens has a 16-color mapping."""
+        from etp_lib.colorize import _PALETTE, _PALETTE_TO_16, _TOKEN_COLORS
 
-        for kind, num in _TOKEN_COLOR_NUMS.items():
-            assert num in _256_TO_16, (
-                f"256-color {num} ({kind}) has no 16-color mapping"
+        palette_nums = set(_PALETTE.values())
+        for kind, num in _TOKEN_COLORS.items():
+            assert num in palette_nums, f"color {num} ({kind}) not in _PALETTE"
+        for name in _PALETTE:
+            assert name in _PALETTE_TO_16, (
+                f"palette color {name!r} has no 16-color mapping"
             )
 
 
