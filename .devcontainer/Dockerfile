@@ -27,7 +27,7 @@ RUN apk update && apk add --no-cache \
 
 # Create user matching host UID/GID for NAS share access.
 # GID 20 is 'staff' on macOS; create it if it doesn't exist.
-RUN grep -q ":${USER_GID}:" /etc/group || addgroup -g ${USER_GID} staff && \
+RUN { grep -q ":${USER_GID}:" /etc/group || addgroup -g ${USER_GID} staff; } && \
     GROUP_NAME=$(awk -F: -v gid=${USER_GID} '$3 == gid {print $1}' /etc/group) && \
     adduser -D -u ${USER_UID} -G "${GROUP_NAME}" -s /bin/bash ${USERNAME} && \
     echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME}
