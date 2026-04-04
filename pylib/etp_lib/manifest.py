@@ -815,6 +815,14 @@ class ManifestWorkflow:
             except OSError:
                 pass
 
+    def print_source_summary(self) -> None:
+        """Print colorized source paths before opening the editor."""
+        from etp_lib.colorize import colorize_path
+
+        print(f"\n  Source files ({len(self.parsed)}):")
+        for sf in self.parsed:
+            print(f"    {colorize_path(sf.path.name)}")
+
     def run(
         self,
         dry_run: bool = False,
@@ -827,6 +835,7 @@ class ManifestWorkflow:
         Returns ``(success, failed, triaged_paths)``.
         """
         self.build()
+        self.print_source_summary()
         self.write(extras=extras, renames=renames)
         file_count = len(self.parsed)
 
