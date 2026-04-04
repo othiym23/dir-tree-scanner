@@ -131,33 +131,38 @@ def _c16(code: str) -> str:
     return f"\033[{code}m"
 
 
-# 16-color fallbacks: palette name -> ANSI SGR parameter
+# 16-color fallbacks: palette name -> ANSI SGR parameter.
+# 14 usable codes (excluding 30 black and 90 bright-black which vanish on
+# dark backgrounds) for 25 palette entries, so some sharing is inevitable.
+# Tokens that commonly co-occur in a filename (group, series, episode,
+# resolution, video codec, audio codec, CRC, extension) get distinct codes;
+# sharing is limited to tokens that rarely appear together.
 _PALETTE_TO_16: dict[str, str] = {
-    "bright_yellow": "93",
-    "light_pink": "95",
-    "orange": "33",
-    "mid_gray": "90",
-    "bright_cyan": "96",
-    "sky_blue": "94",
-    "hot_pink": "95",
-    "purple": "35",
-    "pale_green": "92",
-    "aquamarine": "36",
-    "tan": "33",
-    "pink": "35",
-    "rose": "31",
-    "steel_blue": "34",
-    "light_aqua": "96",
-    "gray_green": "90",
-    "olive_gray": "90",
-    "orchid": "95",
-    "light_gold": "93",
-    "red": "91",
-    "light_steel": "94",
-    "yellow": "93",
-    "green": "32",
-    "dark_gray": "90",
-    "gray": "37",
+    "bright_yellow": "93",  # TEXT — bright yellow
+    "light_pink": "95",  # EPISODE_TITLE — bright magenta
+    "orange": "33",  # RELEASE_GROUP — yellow
+    "mid_gray": "37",  # CRC32 — white
+    "bright_cyan": "96",  # EPISODE — bright cyan
+    "sky_blue": "94",  # SEASON — bright blue
+    "hot_pink": "31",  # SPECIAL — red
+    "purple": "35",  # VERSION — magenta
+    "pale_green": "92",  # RESOLUTION — bright green
+    "aquamarine": "36",  # VIDEO_CODEC — cyan
+    "tan": "97",  # AUDIO_CODEC — bright white
+    "pink": "34",  # SOURCE — blue
+    "rose": "31",  # REMUX — red (shares with SPECIAL)
+    "steel_blue": "94",  # YEAR — bright blue (shares with SEASON)
+    "light_aqua": "96",  # BATCH_RANGE — bright cyan (shares with EPISODE)
+    "gray_green": "32",  # SUBTITLE_INFO — green
+    "olive_gray": "36",  # LANGUAGE — cyan (shares with VIDEO_CODEC)
+    "orchid": "95",  # BONUS — bright magenta (shares with EPISODE_TITLE)
+    "light_gold": "93",  # DUAL_AUDIO — bright yellow (shares with TEXT)
+    "red": "91",  # UNCENSORED — bright red
+    "light_steel": "35",  # EDITION — magenta (shares with VERSION)
+    "yellow": "92",  # HDR — bright green (shares with RESOLUTION)
+    "green": "32",  # BIT_DEPTH — green (shares with SUBTITLE_INFO)
+    "dark_gray": "37",  # SEPARATOR/EXT/SITE — white (shares with CRC32)
+    "gray": "37",  # UNKNOWN — white (shares with CRC32)
 }
 
 
