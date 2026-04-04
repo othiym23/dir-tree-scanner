@@ -732,6 +732,10 @@ class ManifestWorkflow:
         )
         return self.manifest_path
 
+    @property
+    def _known_sources(self) -> dict[str, SourceFile]:
+        return {str(e.source.path): e.source for e in self.entries}
+
     def edit_loop(
         self,
     ) -> tuple[
@@ -745,16 +749,13 @@ class ManifestWorkflow:
         Raises ValueError if the user cancels or the manifest is empty.
         """
         assert self.manifest_path is not None
-        known_sources: dict[str, SourceFile] = {
-            str(e.source.path): e.source for e in self.entries
-        }
 
         while True:
             if not open_editor(self.manifest_path):
                 raise ValueError("Editor failed")
 
             parsed_entries, errors, extra_entries, rename_entries = parse_manifest(
-                self.manifest_path, known_sources, self.series_dir
+                self.manifest_path, self._known_sources, self.series_dir
             )
 
             if errors:
@@ -856,13 +857,9 @@ class ManifestWorkflow:
             if prompt_confirm("\n  Edit manifest?"):
                 parsed_entries, extra_entries, rename_entries = self.edit_loop()
             else:
-                # Use manifest as-is without editing
-                known_sources: dict[str, SourceFile] = {
-                    str(e.source.path): e.source for e in self.entries
-                }
                 assert self.manifest_path is not None
                 parsed_entries, errors, extra_entries, rename_entries = parse_manifest(
-                    self.manifest_path, known_sources, self.series_dir
+                    self.manifest_path, self._known_sources, self.series_dir
                 )
                 if errors:
                     print(f"\n  Manifest has {len(errors)} error(s):")
