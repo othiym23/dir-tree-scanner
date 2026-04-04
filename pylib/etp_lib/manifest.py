@@ -815,13 +815,24 @@ class ManifestWorkflow:
             except OSError:
                 pass
 
-    def print_source_summary(self) -> None:
-        """Print colorized source paths before opening the editor."""
+    def print_colorized_manifest(self) -> None:
+        """Print the manifest with colorized source/downloaded/dest paths."""
         from etp_lib.colorize import colorize_path
 
-        print(f"\n  Source files ({len(self.parsed)}):")
-        for sf in self.parsed:
-            print(f"    {colorize_path(sf.path.name)}")
+        assert self.manifest_path is not None
+        text = self.manifest_path.read_text(encoding="utf-8")
+        for line in text.splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith(("source ", "downloaded ", "dest ")):
+                # Extract the quoted path value
+                quote_start = line.find('"')
+                quote_end = line.rfind('"')
+                if quote_start != -1 and quote_end > quote_start:
+                    prefix = line[:quote_start]
+                    path_str = line[quote_start + 1 : quote_end]
+                    print(f'{prefix}"{colorize_path(path_str)}"')
+                    continue
+            print(line)
 
     def run(
         self,
@@ -835,12 +846,32 @@ class ManifestWorkflow:
         Returns ``(success, failed, triaged_paths)``.
         """
         self.build()
-        self.print_source_summary()
         self.write(extras=extras, renames=renames)
         file_count = len(self.parsed)
 
+        print()
+        self.print_colorized_manifest()
+
         try:
-            parsed_entries, extra_entries, rename_entries = self.edit_loop()
+            if prompt_confirm("\n  Edit manifest?"):
+                parsed_entries, extra_entries, rename_entries = self.edit_loop()
+            else:
+                # Use manifest as-is without editing
+                known_sources: dict[str, SourceFile] = {
+                    str(e.source.path): e.source for e in self.entries
+                }
+                assert self.manifest_path is not None
+                parsed_entries, errors, extra_entries, rename_entries = parse_manifest(
+                    self.manifest_path, known_sources, self.series_dir
+                )
+                if errors:
+                    print(f"\n  Manifest has {len(errors)} error(s):")
+                    for err in errors:
+                        print(err)
+                    return 0, file_count, []
+                if not parsed_entries:
+                    print("  Manifest is empty. Skipping group.")
+                    return 0, file_count, []
         except ValueError as e:
             print(f"  {e}. Skipping group.")
             return 0, file_count, []
