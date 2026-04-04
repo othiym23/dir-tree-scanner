@@ -4,9 +4,13 @@ ARG USERNAME=ogd
 ARG USER_UID=501
 ARG USER_GID=20
 
-# System packages: Rust toolchain, Node LTS, dev tools
+ENV RUST_VERSION=1.94.1
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+
+# System packages: rustup (not a full toolchain), Node LTS, dev tools
 RUN apk update && apk add --no-cache \
-    rust-1.94 \
+    rustup \
     uv \
     gh \
     just \
@@ -25,22 +29,27 @@ RUN apk update && apk add --no-cache \
     posix-libc-utils \
     && rm -rf /var/cache/apk/*
 
+# Install the Rust toolchain via rustup
+RUN rustup-init -y --no-modify-path --default-toolchain "${RUST_VERSION}"
+ENV PATH="/usr/local/cargo/bin:${PATH}"
+
+# Prime ld.so.cache for VS Code Server's check-requirements.sh
+RUN ldconfig
+
 # Create user matching host UID/GID for NAS share access.
 # GID 20 is 'staff' on macOS; create it if it doesn't exist.
 RUN { grep -q ":${USER_GID}:" /etc/group || addgroup -g ${USER_GID} staff; } && \
     GROUP_NAME=$(awk -F: -v gid=${USER_GID} '$3 == gid {print $1}' /etc/group) && \
     adduser -D -u ${USER_UID} -G "${GROUP_NAME}" -s /bin/bash ${USERNAME} && \
-    echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME}
+    echo "${USERNAME} ALL=(root) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME}
 
 # Install npm-based tools globally
 RUN npm install -g @anthropic-ai/claude-code prettier ccstatusline
 
-# Install cargo-nextest as the user (goes into ~/.cargo/bin)
-USER ${USERNAME}
+# Install cargo-nextest (shared toolchain, user can run it)
 RUN cargo install cargo-nextest --locked
-USER root
 
-ENV PATH="/home/${USERNAME}/.local/bin:/home/${USERNAME}/.cargo/bin:${PATH}"
+ENV PATH="/home/${USERNAME}/.local/bin:${PATH}"
 
 # Pre-create directories that bind mounts will target so they're
 # owned by the user, not root.  Docker creates missing mount targets
