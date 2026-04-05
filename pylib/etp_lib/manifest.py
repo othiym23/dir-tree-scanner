@@ -178,8 +178,20 @@ def match_episodes(
                 season = 0
         elif ep_number is not None and not is_special:
             episode_name = info.find_episode_title(ep_number, season)
-            if not episode_name and episode_title:
-                episode_name = episode_title
+            # Replace generic "Episode N" placeholders with the actual title
+            # from the downloaded or sonarr filename, in that order.
+            _is_generic = not episode_name or re.match(
+                rf"Episode\s+{ep_number}$", episode_name, re.IGNORECASE
+            )
+            if _is_generic:
+                download_title = ""
+                if sf.matched_download is not None:
+                    from etp_lib.media_parser import parse_component
+
+                    download_title = parse_component(
+                        sf.matched_download.name
+                    ).episode_title
+                episode_name = download_title or episode_title or episode_name
         elif ep_number is not None and is_special and bonus_type:
             available = [
                 ep for ep in specials if ep.special_tag not in matched_special_tags
