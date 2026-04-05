@@ -89,10 +89,44 @@ def load_cache() -> DownloadCache | None:
 
 
 def save_cache(cache: DownloadCache) -> None:
-    """Write the download cache to disk."""
+    """Write the download cache to disk, merging with existing data.
+
+    Triage saves groups, series saves download_index — merging prevents
+    one subcommand from clobbering the other's cached data.
+    """
     path = cache_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    existing = load_cache()
+    if existing is not None:
+        if not cache.groups and existing.groups:
+            cache.groups = existing.groups
+        if not cache.download_index.by_series and existing.download_index.by_series:
+            cache.download_index = existing.download_index
     path.write_bytes(_serialize(cache))
+
+
+def check_cache_freshness(
+    source_dirs: list[Path], no_cache: bool = False
+) -> tuple[DownloadCache | None, dict[str, int], bool]:
+    """Check if the download cache is fresh.
+
+    Returns ``(cache, current_mtimes, is_fresh)`` where:
+    - *cache* is the loaded cache (or None if unavailable)
+    - *current_mtimes* is the current directory mtime snapshot
+    - *is_fresh* is True if the cache matches the current state
+    """
+    if no_cache:
+        return None, scan_dir_mtimes(source_dirs), False
+
+    cached = load_cache()
+    current_mtimes = scan_dir_mtimes(source_dirs)
+
+    if cached is not None:
+        changed, removed = find_stale_dirs(cached.dir_mtimes, current_mtimes)
+        if not changed and not removed:
+            return cached, current_mtimes, True
+
+    return cached, current_mtimes, False
 
 
 def scan_dir_mtimes(source_dirs: list[Path]) -> dict[str, int]:

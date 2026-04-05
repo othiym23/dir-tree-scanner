@@ -41,10 +41,8 @@ from etp_lib.conflicts import (
 from etp_lib.colorize import colorize_path
 from etp_lib.download_cache import (
     DownloadCache,
-    find_stale_dirs,
-    load_cache,
+    check_cache_freshness,
     save_cache,
-    scan_dir_mtimes,
 )
 from etp_lib.manifest import ManifestWorkflow, escape_kdl
 from etp_lib.mediainfo import analyze_file
@@ -596,6 +594,17 @@ def scan_dest_directory(series_dir: Path) -> DestScan:
     return DestScan(files_by_subdir, names_by_subdir)
 
 
+def _most_common_concise_name(
+    names_by_subdir: dict[Path, dict[str, list[Path]]],
+) -> str:
+    """Return the most common concise name across all subdirectories."""
+    counts: Counter[str] = Counter()
+    for names_in_dir in names_by_subdir.values():
+        for name, files in names_in_dir.items():
+            counts[name] += len(files)
+    return counts.most_common(1)[0][0] if counts else ""
+
+
 def _resolve_concise_name_from_existing(
     existing_names: dict[Path, dict[str, list[Path]]],
     series_dir: Path,
@@ -609,16 +618,9 @@ def _resolve_concise_name_from_existing(
     Returns ``(default_name, renames)`` where *renames* is a list of
     ``(old_path, new_path)`` for files that need renaming.
     """
-    # Flatten to get global most-common name across all season dirs
-    global_counts: Counter[str] = Counter()
-    for names_in_dir in existing_names.values():
-        for name, files in names_in_dir.items():
-            global_counts[name] += len(files)
-
-    if not global_counts:
+    most_common = _most_common_concise_name(existing_names)
+    if not most_common:
         return "", []
-
-    most_common = global_counts.most_common(1)[0][0]
     renames: list[tuple[Path, Path]] = []
 
     for season_dir, names_in_dir in existing_names.items():
@@ -1435,12 +1437,9 @@ def _auto_resolve_concise_name(
 
     # Existing files in dest override — they reflect the established naming
     if dest_scan.names_by_subdir:
-        global_counts: Counter[str] = Counter()
-        for names_in_dir in dest_scan.names_by_subdir.values():
-            for name, files in names_in_dir.items():
-                global_counts[name] += len(files)
-        if global_counts:
-            default = global_counts.most_common(1)[0][0]
+        from_existing = _most_common_concise_name(dest_scan.names_by_subdir)
+        if from_existing:
+            default = from_existing
 
     return _strip_year(default)
 
@@ -1698,6 +1697,14 @@ def _process_pool(
             return resolved_paths.get(p, str(p.resolve()))
         return str(p.resolve())
 
+    def _mark_pool_done() -> None:
+        if not dry_run:
+            for sf in pool:
+                already_copied.add(_resolve(sf.path))
+            _save_triage_manifest(already_copied)
+        print(f"  Marked {len(pool)} file(s) as done.")
+        pool.clear()
+
     while pool:
         anidb_id: int | None = None
         tvdb_id: int | None = None
@@ -1737,12 +1744,7 @@ def _process_pool(
                 elif raw == "s":
                     break
                 elif raw == "d":
-                    if not dry_run:
-                        for sf in pool:
-                            already_copied.add(_resolve(sf.path))
-                        _save_triage_manifest(already_copied)
-                    print(f"  Marked {len(pool)} file(s) as done.")
-                    pool.clear()
+                    _mark_pool_done()
                     break
                 elif raw == "q":
                     return total_success, total_failed, True
@@ -1763,12 +1765,7 @@ def _process_pool(
             if not raw or raw.lower() == "s":
                 break
             if raw.lower() == "d":
-                if not dry_run:
-                    for sf in pool:
-                        already_copied.add(_resolve(sf.path))
-                    _save_triage_manifest(already_copied)
-                print(f"  Marked {len(pool)} file(s) as done.")
-                pool.clear()
+                _mark_pool_done()
                 break
             if raw.lower() == "q":
                 return total_success, total_failed, True
@@ -1909,37 +1906,20 @@ def run_series(args: argparse.Namespace, config: AnimeConfig) -> int:
 
     # Build download index — use cache if available
     downloads_dir = config.downloads_dir
-    no_cache = args.no_cache
     if downloads_dir.is_dir():
-        cached = load_cache() if not no_cache else None
-        if cached is not None and cached.download_index.file_count > 0:
-            current_mtimes = scan_dir_mtimes([downloads_dir])
-            changed, removed = find_stale_dirs(cached.dir_mtimes, current_mtimes)
-            if not changed and not removed:
-                print(
-                    f"Using cached download index ({cached.download_index.file_count} files)."
-                )
-                download_index = cached.download_index
-            else:
-                print(f"Building download index from {downloads_dir}...")
-                download_index = _build_download_index(downloads_dir)
-                print(f"  Indexed {download_index.file_count} files.")
-                save_cache(
-                    DownloadCache(
-                        download_index=download_index,
-                        dir_mtimes=current_mtimes,
-                    )
-                )
+        cached, mtimes, fresh = check_cache_freshness(
+            [downloads_dir], no_cache=args.no_cache
+        )
+        if fresh and cached is not None and cached.download_index.file_count > 0:
+            print(
+                f"Using cached download index ({cached.download_index.file_count} files)."
+            )
+            download_index = cached.download_index
         else:
             print(f"Building download index from {downloads_dir}...")
             download_index = _build_download_index(downloads_dir)
             print(f"  Indexed {download_index.file_count} files.")
-            save_cache(
-                DownloadCache(
-                    download_index=download_index,
-                    dir_mtimes=scan_dir_mtimes([downloads_dir]),
-                )
-            )
+            save_cache(DownloadCache(download_index=download_index, dir_mtimes=mtimes))
     else:
         download_index = DownloadIndex()
 
@@ -2114,36 +2094,15 @@ def run_triage(args: argparse.Namespace, config: AnimeConfig) -> int:
     out on subsequent runs (use --force to re-process).
     """
     source_dirs = args.source or [config.downloads_dir]
-    no_cache = args.no_cache
 
     # Check cached grouping first — avoids re-walking 5K+ files
-    cached = load_cache() if not no_cache else None
-    if cached is not None:
-        current_mtimes = scan_dir_mtimes(source_dirs)
-        changed, removed = find_stale_dirs(cached.dir_mtimes, current_mtimes)
-        if not changed and not removed:
-            print("Using cached download index.")
-            groups = cached.groups
-        else:
-            if changed:
-                print(
-                    f"Re-scanning {len(changed)} changed director{'y' if len(changed) == 1 else 'ies'}..."
-                )
-            groups = _scan_and_group(source_dirs)
-            save_cache(
-                DownloadCache(
-                    groups=groups,
-                    dir_mtimes=current_mtimes,
-                )
-            )
+    cached, mtimes, fresh = check_cache_freshness(source_dirs, no_cache=args.no_cache)
+    if fresh and cached is not None and cached.groups:
+        print("Using cached download index.")
+        groups = cached.groups
     else:
         groups = _scan_and_group(source_dirs)
-        save_cache(
-            DownloadCache(
-                groups=groups,
-                dir_mtimes=scan_dir_mtimes(source_dirs),
-            )
-        )
+        save_cache(DownloadCache(groups=groups, dir_mtimes=mtimes))
 
     # Filter by pattern if provided
     pattern = args.pattern
