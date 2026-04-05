@@ -288,6 +288,9 @@ class ManifestEntry:
     dest_path: Path
     is_todo: bool = False
     hash_failed: bool = False
+    episode_name: str = ""
+    is_special: bool = False
+    special_tag: str = ""
 
 
 @dataclass

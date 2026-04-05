@@ -129,29 +129,26 @@ def escape_kdl(s: str) -> str:
 _MAX_FILENAME_BYTES = 255  # ext4/Btrfs filename length limit
 
 
-def build_manifest_entries(
+def match_episodes(
     parsed: list[SourceFile],
     info: AnimeInfo,
     concise_name: str,
     series_dir: Path,
-    verbose: bool,
-    analyze_file_fn=None,
 ) -> list[ManifestEntry]:
-    """Build manifest entries for all files without per-file prompts.
+    """Match parsed files to episodes and build manifest entries.
 
-    Runs mediainfo, verifies CRC32 hashes, matches episodes, and constructs
-    destination paths using defaults.
+    Performs episode matching and destination path construction only — no
+    mediainfo analysis, no CRC32 verification. Source files keep
+    ``media=None`` so filenames lack metadata blocks. Use
+    :func:`enrich_manifest_entries` afterward to fill those in.
     """
     entries: list[ManifestEntry] = []
-    # Track AniDB specials already matched so each is used at most once
     matched_special_tags: set[str] = set()
     specials = [ep for ep in info.episodes if ep.ep_type != EpisodeType.REGULAR]
     specials_by_num: dict[int, Episode] = {
         ep.number: ep for ep in specials if ep.season == 0
     }
 
-    # When using TVDB, start HamaTV ranges after the highest existing
-    # TVDB special number to avoid collisions in the single Specials/ dir.
     max_special_num = max((ep.number for ep in specials_by_num.values()), default=0)
     hamatv_counters: dict[str, int] = {}
     if info.tvdb_id is not None and max_special_num > 0:
@@ -162,32 +159,7 @@ def build_manifest_entries(
 
     parsed = sorted(parsed, key=_bonus_source_sort_key)
 
-    total = len(parsed)
-    for i, sf in enumerate(parsed, 1):
-        print(f"  Analyzing {i}/{total}: {sf.path.name}")
-
-        # Analyze with mediainfo
-        try:
-            if analyze_file_fn is not None:
-                sf.media = analyze_file_fn(sf.path)
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            if verbose:
-                print(f"    warning: mediainfo failed: {e}")
-
-        # Verify CRC32 hash -- on mismatch, clear hash so it's stripped from dest
-        hash_failed = False
-        hash_result = verify_hash(sf)
-        if hash_result is not None:
-            ok, actual = hash_result
-            if not ok:
-                print(
-                    f"    CRC32 MISMATCH: expected {sf.parsed.hash_code}, got {actual}"
-                )
-                sf.parsed.hash_code = ""
-                hash_failed = True
-            elif verbose:
-                print(f"    CRC32 verified: {sf.parsed.hash_code}")
-
+    for sf in parsed:
         ep_number = sf.parsed.episode
         season = sf.parsed.season if sf.parsed.season is not None else 1
         is_special = season == 0 or sf.parsed.is_special
@@ -207,8 +179,6 @@ def build_manifest_entries(
         elif ep_number is not None and not is_special:
             episode_name = info.find_episode_title(ep_number, season)
         elif ep_number is not None and is_special and bonus_type:
-            # Parser detected both an episode number and a bonus type
-            # (e.g. S03ED from SeasonSpecial) — try bonus matching first
             available = [
                 ep for ep in specials if ep.special_tag not in matched_special_tags
             ]
@@ -224,8 +194,6 @@ def build_manifest_entries(
                 ep_number = matched_ep.number
                 season = 0
             else:
-                # No AniDB match — assign HamaTV number and build tag
-                # from bonus_type + parser episode (e.g. NCOP1, NCED2).
                 if sf.parsed.special_tag:
                     special_tag = sf.parsed.special_tag
                 elif bonus_type:
@@ -247,8 +215,6 @@ def build_manifest_entries(
             if matched_ep is not None:
                 is_special = True
                 if bonus_type in (BonusType.NCOP, BonusType.NCED):
-                    # Build tag like NCOP1, NCED1a from AniDB title.
-                    # AniDB titles: "Opening", "Opening 1", "Ending 1a"
                     m = re.search(r"(\d+)([a-z]*)\s*$", matched_ep.title_en)
                     suffix = (
                         f"{m.group(1)}{m.group(2)}" if m else str(matched_ep.number)
@@ -272,9 +238,7 @@ def build_manifest_entries(
                 sf.parsed.episode = ep_number
                 sf.parsed.season = 0
 
-        # Build destination path
         if ep_number is None:
-            # Can't auto-match -- mark as TODO
             placeholder = format_episode_filename(
                 concise_name=concise_name,
                 season=season,
@@ -291,7 +255,10 @@ def build_manifest_entries(
                     source=sf,
                     dest_path=dest_dir / placeholder,
                     is_todo=True,
-                    hash_failed=hash_failed,
+                    hash_failed=False,
+                    episode_name=episode_name,
+                    is_special=is_special,
+                    special_tag=special_tag,
                 )
             )
         else:
@@ -313,10 +280,87 @@ def build_manifest_entries(
                     source=sf,
                     dest_path=dest_dir / filename,
                     is_todo=is_unmatched_special,
-                    hash_failed=hash_failed,
+                    hash_failed=False,
+                    episode_name=episode_name,
+                    is_special=is_special,
+                    special_tag=special_tag,
                 )
             )
 
+    return entries
+
+
+def enrich_manifest_entries(
+    entries: list[ManifestEntry],
+    concise_name: str,
+    series_dir: Path,
+    verbose: bool,
+    analyze_file_fn=None,
+) -> None:
+    """Run mediainfo and CRC32 verification, then regenerate dest filenames.
+
+    Mutates *entries* in place — updates ``source.media``, ``hash_failed``,
+    and ``dest_path`` with the full metadata block.
+    """
+    total = len(entries)
+    for i, entry in enumerate(entries, 1):
+        sf = entry.source
+        print(f"  Analyzing {i}/{total}: {sf.path.name}")
+
+        try:
+            if analyze_file_fn is not None:
+                sf.media = analyze_file_fn(sf.path)
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            if verbose:
+                print(f"    warning: mediainfo failed: {e}")
+
+        hash_result = verify_hash(sf)
+        if hash_result is not None:
+            ok, actual = hash_result
+            if not ok:
+                print(
+                    f"    CRC32 MISMATCH: expected {sf.parsed.hash_code}, got {actual}"
+                )
+                sf.parsed.hash_code = ""
+                entry.hash_failed = True
+            elif verbose:
+                print(f"    CRC32 verified: {sf.parsed.hash_code}")
+
+        # Regenerate filename now that media metadata block is populated
+        if not entry.is_todo:
+            ep_number = sf.parsed.episode or 0
+            season = sf.parsed.season if sf.parsed.season is not None else 1
+            filename = format_episode_filename(
+                concise_name=concise_name,
+                season=season,
+                episode=ep_number,
+                episode_name=entry.episode_name,
+                source=sf,
+                is_special=entry.is_special,
+                special_tag=entry.special_tag,
+            )
+            if entry.is_special:
+                dest_dir = series_dir / "Specials"
+            else:
+                dest_dir = series_dir / f"Season {season:02d}"
+            entry.dest_path = dest_dir / filename
+
+
+def build_manifest_entries(
+    parsed: list[SourceFile],
+    info: AnimeInfo,
+    concise_name: str,
+    series_dir: Path,
+    verbose: bool,
+    analyze_file_fn=None,
+) -> list[ManifestEntry]:
+    """Build manifest entries for all files without per-file prompts.
+
+    Runs mediainfo, verifies CRC32 hashes, matches episodes, and constructs
+    destination paths using defaults.
+    """
+    entries = match_episodes(parsed, info, concise_name, series_dir)
+    enrich_manifest_entries(entries, concise_name, series_dir, verbose, analyze_file_fn)
     return entries
 
 
