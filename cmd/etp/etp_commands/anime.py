@@ -37,7 +37,7 @@ from etp_lib.conflicts import (
     prompt_value,
     verify_hash,
 )
-from etp_lib.manifest import ManifestWorkflow, escape_kdl
+from etp_lib.manifest import ManifestWorkflow, escape_kdl, parse_manifest
 from etp_lib.mediainfo import analyze_file
 from etp_lib.naming import (
     build_metadata_block,  # noqa: F401 (re-export for tests)
@@ -1323,6 +1323,96 @@ def _strip_year(name: str) -> str:
     return _RE_TRAILING_YEAR.sub("", name)
 
 
+def _auto_resolve_concise_name(
+    matched: list[MatchedFile],
+    series_dir: Path,
+    seasons_list: list[int],
+    config: AnimeConfig | None,
+    group_key: str,
+) -> tuple[str, list[tuple[Path, Path]]]:
+    """Determine the concise name and any renames without prompting."""
+    default = group_key
+    renames: list[tuple[Path, Path]] = []
+
+    if series_dir.is_dir():
+        existing_names = _scan_existing_concise_names(series_dir, seasons_list)
+        if existing_names:
+            default_from_existing, renames = _resolve_concise_name_from_existing(
+                existing_names, series_dir
+            )
+            if default_from_existing:
+                default = default_from_existing
+
+    saved_concise = (
+        config.concise_names.get(group_key, "")
+        if config is not None and group_key
+        else ""
+    )
+    if saved_concise:
+        default = saved_concise
+    elif not default:
+        sources = [mf.source for mf in matched]
+        default = _extract_concise_name(sources)
+
+    return _strip_year(default), renames
+
+
+def _auto_detect_release_group(matched: list[MatchedFile]) -> str:
+    """Return the most common release group from matched files."""
+    return next(
+        (
+            mf.source.parsed.release_group
+            for mf in matched
+            if mf.source.parsed.release_group
+        ),
+        "",
+    )
+
+
+def _apply_batch_traits(
+    matched: list[MatchedFile], release_group: str, detected_group: str
+) -> None:
+    """Apply release group overrides and majority-vote batch traits."""
+    for mf in matched:
+        existing = mf.source.parsed.release_group
+        if not existing or existing == detected_group:
+            mf.release_group = release_group
+
+    dual_count = sum(1 for mf in matched if mf.source.parsed.is_dual_audio)
+    if dual_count > len(matched) // 2:
+        for mf in matched:
+            mf.is_dual_audio = True
+
+    uncensored_count = sum(1 for mf in matched if mf.source.parsed.is_uncensored)
+    if uncensored_count > len(matched) // 2:
+        for mf in matched:
+            mf.is_uncensored = True
+
+
+def _prompt_batch_confirmation(
+    proposed_dir: Path,
+    dir_exists: bool,
+    concise_name: str,
+    release_group: str,
+) -> str:
+    """Show batch settings and get confirmation.
+
+    Returns ``"y"`` to proceed, ``"e"`` to edit settings, ``"s"`` to skip.
+    """
+    status = "exists" if dir_exists else "new"
+    print(f"\n  Series dir:     {proposed_dir.name}  [{status}]")
+    print(f"  Concise name:   {concise_name}")
+    print(f"  Release group:  {release_group}")
+    while True:
+        raw = input("\n  [Y]es / [e]dit / [s]kip: ").strip().lower()
+        if raw in ("", "y", "yes"):
+            return "y"
+        if raw in ("e", "edit"):
+            return "e"
+        if raw in ("s", "skip"):
+            return "s"
+
+
 def _process_group_batch(
     files: list[Path],
     info: AnimeInfo,
@@ -1339,8 +1429,9 @@ def _process_group_batch(
 ) -> tuple[int, int, list[Path]]:
     """Batch-process a group of files via an editable manifest.
 
-    Uses a vidir-style workflow: build all source->destination mappings,
-    open in $EDITOR, then execute.
+    Uses a two-phase workflow: build a lightweight preview (episode matching
+    only, no mediainfo/CRC), show it for confirmation, then enrich with
+    mediainfo/CRC and execute.
 
     If *pre_matched* is provided (from _match_files_to_season), uses those
     MatchedFile objects directly. If *pre_parsed* is provided, wraps them
@@ -1357,96 +1448,120 @@ def _process_group_batch(
     else:
         matched = [MatchedFile(source=sf) for sf in _parse_files(files)]
 
-    # Apply season override (for AniDB per-season processing)
     if season_override is not None:
         for mf in matched:
             mf.season = season_override
 
-    # Resolve series directory first — needed to scan existing files
     seasons_needed = {mf.effective_season or 1 for mf in matched}
     seasons_list = sorted(seasons_needed)
+    group_key = default_concise_name
 
-    series_dir = resolve_series_directory(
-        dest, info, id_map=id_map, seasons=seasons_list, dry_run=dry_run
+    # Phase 1: Gather settings (no side effects)
+    proposed_dir, dir_exists = propose_series_directory(dest, info, id_map)
+    concise_name, renames = _auto_resolve_concise_name(
+        matched, proposed_dir, seasons_list, config, group_key
     )
-    print(f"\nSeries directory: {series_dir}")
+    detected_group = _auto_detect_release_group(matched)
+    release_group = detected_group
+    _apply_batch_traits(matched, release_group, detected_group)
+    snapshot_parsed = [mf.to_source_snapshot() for mf in matched]
+
+    # Phase 2: Lightweight manifest preview
+    workflow = ManifestWorkflow(
+        snapshot_parsed,
+        info,
+        concise_name,
+        proposed_dir,
+        verbose=verbose,
+        analyze_file_fn=analyze_file,
+    )
+    workflow.build_lightweight()
+    workflow.write(extras=extras, renames=renames)
+    print()
+    workflow.print_colorized_manifest()
+
+    # Phase 3: Confirmation loop
+    while True:
+        choice = _prompt_batch_confirmation(
+            proposed_dir, dir_exists, concise_name, release_group
+        )
+        if choice == "s":
+            workflow.cleanup()
+            return 0, len(matched), []
+        if choice == "e":
+            concise_name = prompt_value(
+                "Concise series name for filenames", concise_name
+            )
+            release_group = prompt_value("Release group", release_group)
+            raw_dir = prompt_value("Series directory name", proposed_dir.name)
+            if raw_dir != proposed_dir.name:
+                new_dir = Path(raw_dir)
+                if not new_dir.is_absolute():
+                    new_dir = dest / new_dir
+                proposed_dir = new_dir
+                dir_exists = proposed_dir.is_dir()
+
+            # Rebuild with new settings
+            _apply_batch_traits(matched, release_group, detected_group)
+            snapshot_parsed = [mf.to_source_snapshot() for mf in matched]
+            workflow = ManifestWorkflow(
+                snapshot_parsed,
+                info,
+                concise_name,
+                proposed_dir,
+                verbose=verbose,
+                analyze_file_fn=analyze_file,
+            )
+            workflow.build_lightweight()
+            workflow.write(extras=extras, renames=renames)
+            print()
+            workflow.print_colorized_manifest()
+            continue
+        break  # "y"
+
+    # Phase 4: Commit side effects — create directory structure
+    create_series_directory_structure(proposed_dir, info, seasons_list, dry_run)
+    series_dir = proposed_dir
 
     if info.anidb_id is not None:
         id_map[(MetadataProvider.ANIDB, info.anidb_id)] = series_dir
     if info.tvdb_id is not None:
         id_map[(MetadataProvider.TVDB, info.tvdb_id)] = series_dir
 
-    # Scan existing files in affected dest season dirs to determine the
-    # default concise name and detect naming inconsistencies.
-    group_key = default_concise_name  # preserve for config lookup
-    renames: list[tuple[Path, Path]] = []
-    existing_names = _scan_existing_concise_names(series_dir, seasons_list)
-    if existing_names:
-        default_from_existing, renames = _resolve_concise_name_from_existing(
-            existing_names, series_dir
-        )
-        if default_from_existing:
-            default_concise_name = default_from_existing
+    # Phase 5: Enrich with mediainfo + CRC32, then edit + execute
+    workflow.enrich(extras=extras, renames=renames)
+    file_count = len(workflow.parsed)
 
-    # Config saved name can override any default (including from existing files)
-    saved_concise = (
-        config.concise_names.get(group_key, "")
-        if config is not None and group_key
-        else ""
-    )
-    if saved_concise:
-        default_concise_name = saved_concise
-    elif not default_concise_name:
-        sources = [mf.source for mf in matched]
-        default_concise_name = _extract_concise_name(sources)
-    default_concise_name = _strip_year(default_concise_name)
-    concise_name = prompt_value(
-        "Concise series name for filenames", default_concise_name
-    )
+    print()
+    workflow.print_colorized_manifest()
 
-    # Prompt for release group — applied only to files that lack one or
-    # that match the auto-detected default. Files with a different group
-    # (e.g., specials from a different release) keep their own.
-    detected = next(
-        (
-            mf.source.parsed.release_group
-            for mf in matched
-            if mf.source.parsed.release_group
-        ),
-        "",
-    )
-    group = prompt_value("Release group", detected)
-    for mf in matched:
-        existing = mf.source.parsed.release_group
-        if not existing or existing == detected:
-            mf.release_group = group
+    try:
+        if prompt_confirm("\n  Edit manifest?"):
+            parsed_entries, extra_entries, rename_entries = workflow.edit_loop()
+        else:
+            assert workflow.manifest_path is not None
+            parsed_entries, errors, extra_entries, rename_entries = parse_manifest(
+                workflow.manifest_path, workflow._known_sources, workflow.series_dir
+            )
+            if errors:
+                print(f"\n  Manifest has {len(errors)} error(s):")
+                for err in errors:
+                    print(err)
+                return 0, file_count, []
+            if not parsed_entries:
+                print("  Manifest is empty. Skipping group.")
+                return 0, file_count, []
+    except ValueError as e:
+        print(f"  {e}. Skipping group.")
+        return 0, file_count, []
+    finally:
+        workflow.cleanup()
 
-    # Detect batch-level traits (majority vote)
-    dual_count = sum(1 for mf in matched if mf.source.parsed.is_dual_audio)
-    if dual_count > len(matched) // 2:
-        for mf in matched:
-            mf.is_dual_audio = True
-
-    uncensored_count = sum(1 for mf in matched if mf.source.parsed.is_uncensored)
-    if uncensored_count > len(matched) // 2:
-        for mf in matched:
-            mf.is_uncensored = True
-
-    # Snapshot MatchedFile overrides into SourceFile copies for the workflow
-    snapshot_parsed = [mf.to_source_snapshot() for mf in matched]
-
-    workflow = ManifestWorkflow(
-        snapshot_parsed,
-        info,
-        concise_name,
-        series_dir,
-        verbose=verbose,
-        analyze_file_fn=analyze_file,
-    )
-    return workflow.run(
-        dry_run=dry_run,
-        extras=extras,
-        renames=renames,
+    return workflow.execute(
+        parsed_entries,
+        extra_entries,
+        rename_entries,
+        dry_run,
         parse_source_filename_fn=parse_source_filename,
     )
 

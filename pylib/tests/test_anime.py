@@ -620,93 +620,48 @@ class TestStripYear:
 
 
 class TestConciseNameFromConfig:
-    """Tests for saved concise name being used as the prompt default."""
+    """Tests for _auto_resolve_concise_name using config and defaults."""
 
-    def test_config_concise_name_used(self, monkeypatch):
-        """Saved concise name from config takes priority over directory name."""
-        captured = {}
-
-        class _Done(Exception):
-            pass
-
-        def fake_prompt(prompt, default=""):
-            if "concise" in prompt.lower():
-                captured["default"] = default
-                raise _Done
-            return default
-
-        monkeypatch.setattr(anime, "prompt_value", fake_prompt)
+    def test_config_concise_name_used(self):
+        """Saved concise name from config takes priority over group key."""
+        from etp_lib.types import MatchedFile
 
         config = anime.AnimeConfig(
             concise_names={"ゴールデンカムイ [Golden Kamuy] (2018)": "Golden Kamuy"},
         )
-        info = anime.AnimeInfo(
-            anidb_id=100,
-            tvdb_id=None,
-            title_ja="ゴールデンカムイ",
-            title_en="Golden Kamuy",
-            year=2018,
-            episodes=[anime.Episode(1, EpisodeType.REGULAR, "Ep 1", "", "")],
-        )
         parsed = [
             anime.SourceFile(
                 path=Path("ep1.mkv"), parsed=anime.ParsedMetadata(season=1, episode=1)
             ),
         ]
-        with pytest.raises(_Done):
-            anime._process_group_batch(
-                [],
-                info,
-                {},
-                Path("/tmp/test"),
-                dry_run=True,
-                verbose=False,
-                default_concise_name="ゴールデンカムイ [Golden Kamuy] (2018)",
-                pre_parsed=parsed,
-                config=config,
-            )
-        assert captured["default"] == "Golden Kamuy"
-
-    def test_year_stripped_without_config(self, monkeypatch):
-        """Directory name has year stripped even without config."""
-        captured = {}
-
-        class _Done(Exception):
-            pass
-
-        def fake_prompt(prompt, default=""):
-            if "concise" in prompt.lower():
-                captured["default"] = default
-                raise _Done
-            return default
-
-        monkeypatch.setattr(anime, "prompt_value", fake_prompt)
-
-        info = anime.AnimeInfo(
-            anidb_id=100,
-            tvdb_id=None,
-            title_ja="ゴールデンカムイ",
-            title_en="Golden Kamuy",
-            year=2018,
-            episodes=[anime.Episode(1, EpisodeType.REGULAR, "Ep 1", "", "")],
+        matched = [MatchedFile(source=sf) for sf in parsed]
+        concise, _renames = anime._auto_resolve_concise_name(
+            matched,
+            Path("/tmp/test/ゴールデンカムイ [Golden Kamuy] (2018)"),
+            [1],
+            config,
+            "ゴールデンカムイ [Golden Kamuy] (2018)",
         )
+        assert concise == "Golden Kamuy"
+
+    def test_year_stripped_without_config(self):
+        """Group key has year stripped even without config."""
+        from etp_lib.types import MatchedFile
+
         parsed = [
             anime.SourceFile(
                 path=Path("ep1.mkv"), parsed=anime.ParsedMetadata(season=1, episode=1)
             ),
         ]
-        with pytest.raises(_Done):
-            anime._process_group_batch(
-                [],
-                info,
-                {},
-                Path("/tmp/test"),
-                dry_run=True,
-                verbose=False,
-                default_concise_name="Golden Kamuy (2018)",
-                pre_parsed=parsed,
-            )
-        assert captured["default"] == "Golden Kamuy"
+        matched = [MatchedFile(source=sf) for sf in parsed]
+        concise, _renames = anime._auto_resolve_concise_name(
+            matched,
+            Path("/tmp/test/Golden Kamuy (2018)"),
+            [1],
+            None,
+            "Golden Kamuy (2018)",
+        )
+        assert concise == "Golden Kamuy"
 
 
 class TestReleaseGroupOverride:
