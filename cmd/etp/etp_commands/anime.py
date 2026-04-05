@@ -38,7 +38,7 @@ from etp_lib.conflicts import (
     verify_hash,
 )
 from etp_lib.colorize import colorize_path
-from etp_lib.manifest import ManifestWorkflow, escape_kdl, parse_manifest
+from etp_lib.manifest import ManifestWorkflow, escape_kdl
 from etp_lib.mediainfo import analyze_file
 from etp_lib.naming import (
     build_metadata_block,  # noqa: F401 (re-export for tests)
@@ -348,10 +348,10 @@ def propose_series_directory(
     dest: Path,
     info: AnimeInfo,
     id_map: dict[tuple[str, int], Path] | None = None,
-) -> tuple[Path, bool]:
+) -> tuple[Path, bool, bool]:
     """Find the best series directory path without creating anything.
 
-    Returns ``(path, already_exists)`` using a 2-step lookup:
+    Returns ``(path, already_exists, found_via_id)`` using a 2-step lookup:
     1. Check *id_map* for a matching AniDB/TheTVDB ID
     2. Check if the conventionally-named directory already exists
     Falls back to the conventional path with ``already_exists=False``.
@@ -360,18 +360,18 @@ def propose_series_directory(
         if info.anidb_id is not None:
             match = id_map.get((MetadataProvider.ANIDB, info.anidb_id))
             if match is not None:
-                return match, True
+                return match, True, True
         if info.tvdb_id is not None:
             match = id_map.get((MetadataProvider.TVDB, info.tvdb_id))
             if match is not None:
-                return match, True
+                return match, True, True
 
     dirname = format_series_dirname(info.title_ja, info.title_en, info.year)
     conventional = dest / dirname
     if conventional.is_dir():
-        return conventional, True
+        return conventional, True, False
 
-    return conventional, False
+    return conventional, False, False
 
 
 def create_series_directory_structure(
@@ -402,25 +402,11 @@ def resolve_series_directory(
     2. Check if the conventionally-named directory already exists
     3. Prompt the user to pick an existing directory or create a new one
     """
-    proposed, exists = propose_series_directory(dest, info, id_map)
+    proposed, exists, found_via_id = propose_series_directory(dest, info, id_map)
 
     if exists:
         print(f"  Found existing directory: {proposed.name}")
         _ensure_subdirs(proposed, seasons, dry_run)
-        # Write ID file only if the directory wasn't found via id_map
-        # (i.e., it was found by conventional name)
-        found_via_id = False
-        if id_map:
-            for pid in [info.anidb_id, info.tvdb_id]:
-                if pid is not None:
-                    provider = (
-                        MetadataProvider.ANIDB
-                        if pid == info.anidb_id
-                        else MetadataProvider.TVDB
-                    )
-                    if id_map.get((provider, pid)) == proposed:
-                        found_via_id = True
-                        break
         if not found_via_id:
             _write_id_file(proposed, info, dry_run)
         return proposed
@@ -1400,7 +1386,7 @@ def _auto_resolve_concise_name(
 
 
 def _auto_detect_release_group(matched: list[MatchedFile]) -> str:
-    """Return the most common release group from matched files."""
+    """Return the first non-empty release group from matched files."""
     return next(
         (
             mf.source.parsed.release_group
@@ -1517,7 +1503,9 @@ def _process_group_batch(
     group_key = default_concise_name
 
     # Phase 1: Gather settings (no side effects)
-    proposed_dir, dir_exists = propose_series_directory(dest, info, id_map)
+    proposed_dir, dir_exists, _found_via_id = propose_series_directory(
+        dest, info, id_map
+    )
     concise_name = _auto_resolve_concise_name(
         matched, proposed_dir, seasons_list, config, group_key
     )
@@ -1590,27 +1578,10 @@ def _process_group_batch(
     print()
     workflow.print_colorized_manifest()
 
-    try:
-        if prompt_confirm("\n  Edit manifest?"):
-            parsed_entries, extra_entries, rename_entries = workflow.edit_loop()
-        else:
-            assert workflow.manifest_path is not None
-            parsed_entries, errors, extra_entries, rename_entries = parse_manifest(
-                workflow.manifest_path, workflow._known_sources, workflow.series_dir
-            )
-            if errors:
-                print(f"\n  Manifest has {len(errors)} error(s):")
-                for err in errors:
-                    print(err)
-                return 0, file_count, []
-            if not parsed_entries:
-                print("  Manifest is empty. Skipping group.")
-                return 0, file_count, []
-    except ValueError as e:
-        print(f"  {e}. Skipping group.")
+    result = workflow.confirm_and_parse()
+    if result is None:
         return 0, file_count, []
-    finally:
-        workflow.cleanup()
+    parsed_entries, extra_entries, rename_entries = result
 
     # Check for naming inconsistencies in existing files after the user has
     # confirmed/edited the manifest — merge any renames with manifest renames.

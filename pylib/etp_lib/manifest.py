@@ -21,7 +21,7 @@ from etp_lib.conflicts import (
     prompt_value,
     verify_hash,
 )
-from etp_lib.media_parser import normalize_for_matching
+from etp_lib.media_parser import normalize_for_matching, parse_component
 from etp_lib.naming import format_episode_filename, format_series_dirname
 from etp_lib.types import (
     AnimeInfo,
@@ -186,8 +186,6 @@ def match_episodes(
             if _is_generic:
                 download_title = ""
                 if sf.matched_download is not None:
-                    from etp_lib.media_parser import parse_component
-
                     download_title = parse_component(
                         sf.matched_download.name
                     ).episode_title
@@ -859,6 +857,44 @@ class ManifestWorkflow:
 
             return parsed_entries, extra_entries, rename_entries
 
+    def confirm_and_parse(
+        self,
+    ) -> (
+        tuple[
+            list[tuple[SourceFile, Path]],
+            list[tuple[Path, Path]],
+            list[tuple[Path, Path]],
+        ]
+        | None
+    ):
+        """Prompt to edit, parse manifest, return entries or None on skip.
+
+        Shows the "Edit manifest?" prompt, opens the editor if requested,
+        parses the result, and handles errors. Returns ``None`` if the user
+        cancels or the manifest has unresolvable errors.
+        """
+        try:
+            if prompt_confirm("\n  Edit manifest?"):
+                return self.edit_loop()
+            assert self.manifest_path is not None
+            parsed_entries, errors, extra_entries, rename_entries = parse_manifest(
+                self.manifest_path, self._known_sources, self.series_dir
+            )
+            if errors:
+                print(f"\n  Manifest has {len(errors)} error(s):")
+                for err in errors:
+                    print(err)
+                return None
+            if not parsed_entries:
+                print("  Manifest is empty. Skipping group.")
+                return None
+            return parsed_entries, extra_entries, rename_entries
+        except ValueError as e:
+            print(f"  {e}. Skipping group.")
+            return None
+        finally:
+            self.cleanup()
+
     def execute(
         self,
         parsed_entries: list[tuple[SourceFile, Path]],
@@ -941,27 +977,10 @@ class ManifestWorkflow:
         print()
         self.print_colorized_manifest()
 
-        try:
-            if prompt_confirm("\n  Edit manifest?"):
-                parsed_entries, extra_entries, rename_entries = self.edit_loop()
-            else:
-                assert self.manifest_path is not None
-                parsed_entries, errors, extra_entries, rename_entries = parse_manifest(
-                    self.manifest_path, self._known_sources, self.series_dir
-                )
-                if errors:
-                    print(f"\n  Manifest has {len(errors)} error(s):")
-                    for err in errors:
-                        print(err)
-                    return 0, file_count, []
-                if not parsed_entries:
-                    print("  Manifest is empty. Skipping group.")
-                    return 0, file_count, []
-        except ValueError as e:
-            print(f"  {e}. Skipping group.")
+        result = self.confirm_and_parse()
+        if result is None:
             return 0, file_count, []
-        finally:
-            self.cleanup()
+        parsed_entries, extra_entries, rename_entries = result
 
         return self.execute(
             parsed_entries,
