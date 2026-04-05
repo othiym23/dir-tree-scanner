@@ -1230,14 +1230,21 @@ def _match_files_to_season(
     if no_season:
         print(f"    (unseasoned): {len(no_season)} files")
 
-    # Prompt for which season
-    default = str(season_keys[0]) if len(season_keys) == 1 else ""
-    chosen_str = prompt_value("  Which season maps to this AniDB ID?", default)
-    try:
-        chosen = int(chosen_str)
-    except ValueError:
-        print("  Invalid season number.")
-        return [], pool
+    # Auto-select if there's only one non-specials season candidate
+    non_zero_keys = [s for s in season_keys if s != 0]
+    if len(non_zero_keys) == 1:
+        chosen = non_zero_keys[0]
+        print(f"  Auto-selected season {chosen}.")
+    elif len(season_keys) == 1:
+        chosen = season_keys[0]
+        print(f"  Auto-selected season {chosen}.")
+    else:
+        chosen_str = prompt_value("  Which season maps to this AniDB ID?", "")
+        try:
+            chosen = int(chosen_str)
+        except ValueError:
+            print("  Invalid season number.")
+            return [], pool
 
     if chosen not in by_season:
         print(f"  No files found for season {chosen}.")
@@ -1480,8 +1487,13 @@ def _process_group_batch(
     print()
     workflow.print_colorized_manifest()
 
-    # Phase 3: Confirmation loop
-    while True:
+    # Phase 3: Confirmation loop (auto-proceed if dir already exists)
+    if dir_exists:
+        print(f"\n  Series dir:     {proposed_dir.name}  [exists]")
+        print(f"  Concise name:   {concise_name}")
+        print(f"  Release group:  {release_group}")
+
+    while not dir_exists:
         choice = _prompt_batch_confirmation(
             proposed_dir, dir_exists, concise_name, release_group
         )
@@ -1616,39 +1628,17 @@ def _process_pool(
     while pool:
         anidb_id: int | None = None
         tvdb_id: int | None = None
+        id_from_config = False
 
-        # Try pre-populated ID queue first
+        # Auto-accept pre-populated ID queue (from config / .id files)
         if id_queue:
-            provider, sid = id_queue[0]
-            print(f"\n  {len(pool)} file(s) remaining in pool.")
-            raw = (
-                input(
-                    f"\n  Use {provider} {sid} from config?"
-                    f" [Y]es / [n]o / [s]kip / [d]one / [q]uit: "
-                )
-                .strip()
-                .lower()
-            )
-            if raw in ("", "y", "yes"):
-                id_queue.pop(0)
-                if provider == MetadataProvider.ANIDB:
-                    anidb_id = sid
-                else:
-                    tvdb_id = sid
-            elif raw == "n":
-                id_queue.pop(0)
-            elif raw == "s":
-                break
-            elif raw == "d":
-                if not dry_run:
-                    for sf in pool:
-                        already_copied.add(_resolve(sf.path))
-                    _save_triage_manifest(already_copied)
-                print(f"  Marked {len(pool)} file(s) as done.")
-                pool.clear()
-                break
-            elif raw == "q":
-                return total_success, total_failed, True
+            provider, sid = id_queue.pop(0)
+            id_from_config = True
+            print(f"\n  {len(pool)} file(s) remaining, using {provider} {sid}.")
+            if provider == MetadataProvider.ANIDB:
+                anidb_id = sid
+            else:
+                tvdb_id = sid
 
         # If no ID yet, prompt for one
         if anidb_id is None and tvdb_id is None:
@@ -1711,7 +1701,10 @@ def _process_pool(
                     title_index=title_index,
                 )
 
-        info = _confirm_anime_info(info)
+        # Skip interactive confirmation when ID came from config (read-through
+        # cache — the user already approved this ID mapping).
+        if not id_from_config:
+            info = _confirm_anime_info(info)
 
         if anidb_id is not None:
             matched, pool = _match_files_to_season(pool, info)

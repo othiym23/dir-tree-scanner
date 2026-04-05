@@ -178,6 +178,8 @@ def match_episodes(
                 season = 0
         elif ep_number is not None and not is_special:
             episode_name = info.find_episode_title(ep_number, season)
+            if not episode_name and episode_title:
+                episode_name = episode_title
         elif ep_number is not None and is_special and bonus_type:
             available = [
                 ep for ep in specials if ep.special_tag not in matched_special_tags
