@@ -428,6 +428,8 @@ def write_manifest(
             tag = "(todo)" if entry.is_todo else ""
             if entry.hash_failed:
                 lines.append("  // CRC32 MISMATCH — hash stripped from destination")
+            if entry.dest_path.exists():
+                lines.append("  // EXISTS — a file already exists at this destination")
             lines.append(f"  {tag}episode {ep_num} {{")
             if entry.source.matched_download is not None:
                 lines.append(

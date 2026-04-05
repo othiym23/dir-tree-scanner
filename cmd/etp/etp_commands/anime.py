@@ -1250,6 +1250,18 @@ def _match_files_to_season(
         print(f"  No files found for season {chosen}.")
         return [], pool
 
+    # When only specials/season 0 matched and AniDB has no specials,
+    # confirm the user wants to proceed (they may be hand-editing unmapped
+    # specials into the series).
+    if chosen == 0:
+        special_count = sum(
+            1 for ep in info.episodes if ep.ep_type != EpisodeType.REGULAR
+        )
+        if special_count == 0:
+            print("  AniDB has no specials for this entry.")
+            if not prompt_confirm("  Proceed with hand-editing?", default=False):
+                return [], pool
+
     # Separate regular episodes from special/bonus files.
     # Parser-detected specials (S01OVA, S03OP, NCOP) and files without
     # episode numbers are treated as bonus — they stay with the matched
@@ -1720,7 +1732,7 @@ def _process_pool(
                 verbose,
                 default_concise_name=group_name,
                 pre_matched=matched,
-                season_override=1,
+                season_override=matched[0].source.parsed.season or 1,
                 extras=extras,
                 config=config,
             )
