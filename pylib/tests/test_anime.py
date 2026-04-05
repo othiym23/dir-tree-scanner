@@ -635,7 +635,7 @@ class TestConciseNameFromConfig:
             ),
         ]
         matched = [MatchedFile(source=sf) for sf in parsed]
-        concise, _renames = anime._auto_resolve_concise_name(
+        concise = anime._auto_resolve_concise_name(
             matched,
             Path("/tmp/test/ゴールデンカムイ [Golden Kamuy] (2018)"),
             [1],
@@ -654,7 +654,7 @@ class TestConciseNameFromConfig:
             ),
         ]
         matched = [MatchedFile(source=sf) for sf in parsed]
-        concise, _renames = anime._auto_resolve_concise_name(
+        concise = anime._auto_resolve_concise_name(
             matched,
             Path("/tmp/test/Golden Kamuy (2018)"),
             [1],

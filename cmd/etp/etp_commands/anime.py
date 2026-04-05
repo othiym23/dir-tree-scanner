@@ -529,8 +529,15 @@ def _scan_existing_concise_names(
         for f in season_dir.iterdir():
             if not f.is_file() or f.suffix.lower() not in _MEDIA_EXTENSIONS:
                 continue
-            pm = media_parser.parse_component(f.name)
-            name = pm.series_name.strip()
+            # Extract concise name: use text before the first " - " separator
+            # to avoid including episode titles in the concise name.
+            stem = f.stem
+            sep_idx = stem.find(" - ")
+            if sep_idx > 0:
+                name = stem[:sep_idx].strip()
+            else:
+                pm = media_parser.parse_component(f.name)
+                name = pm.series_name.strip()
             if name:
                 names.setdefault(name, []).append(f)
         if names:
@@ -1140,6 +1147,8 @@ def _process_file(
 def _match_files_to_season(
     pool: list[SourceFile],
     info: AnimeInfo,
+    *,
+    more_ids_queued: bool = False,
 ) -> tuple[list[MatchedFile], list[SourceFile]]:
     """Match files from the pool against an AniDB season.
 
@@ -1231,8 +1240,15 @@ def _match_files_to_season(
     if no_season:
         print(f"    (unseasoned): {len(no_season)} files")
 
-    # Auto-select if there's only one non-specials season candidate
+    # Auto-select if there's only one non-specials season candidate.
+    # When more AniDB IDs are queued, prefer the lowest season — higher
+    # seasons will be matched by subsequent IDs.
     non_zero_keys = [s for s in season_keys if s != 0]
+    if more_ids_queued and len(non_zero_keys) == 1 and non_zero_keys[0] > 1:
+        # Only higher-season files remain, but more IDs are queued.
+        # Skip this ID so the next one can pick up the right season.
+        print(f"  Only season {non_zero_keys[0]} files remain; deferring to next ID.")
+        return [], pool
     if len(non_zero_keys) == 1:
         chosen = non_zero_keys[0]
         print(f"  Auto-selected season {chosen}.")
@@ -1349,19 +1365,20 @@ def _auto_resolve_concise_name(
     seasons_list: list[int],
     config: AnimeConfig | None,
     group_key: str,
-) -> tuple[str, list[tuple[Path, Path]]]:
-    """Determine the concise name and any renames without prompting."""
+) -> str:
+    """Determine the concise name without prompting or triggering renames."""
     default = group_key
-    renames: list[tuple[Path, Path]] = []
 
     if series_dir.is_dir():
         existing_names = _scan_existing_concise_names(series_dir, seasons_list)
         if existing_names:
-            default_from_existing, renames = _resolve_concise_name_from_existing(
-                existing_names, series_dir
-            )
-            if default_from_existing:
-                default = default_from_existing
+            # Use the most common existing name as default (no rename prompt)
+            global_counts: Counter[str] = Counter()
+            for names_in_dir in existing_names.values():
+                for name, files in names_in_dir.items():
+                    global_counts[name] += len(files)
+            if global_counts:
+                default = global_counts.most_common(1)[0][0]
 
     saved_concise = (
         config.concise_names.get(group_key, "")
@@ -1374,7 +1391,7 @@ def _auto_resolve_concise_name(
         sources = [mf.source for mf in matched]
         default = _extract_concise_name(sources)
 
-    return _strip_year(default), renames
+    return _strip_year(default)
 
 
 def _auto_detect_release_group(matched: list[MatchedFile]) -> str:
@@ -1409,20 +1426,17 @@ def _apply_batch_traits(
             mf.is_uncensored = True
 
 
-def _print_existing_dest_files(series_dir: Path, seasons: list[int]) -> None:
-    """Print colorized existing media files in affected season directories."""
+def _print_existing_dest_files(series_dir: Path) -> None:
+    """Print colorized existing media files in all season/specials directories."""
+    if not series_dir.is_dir():
+        return
     existing: list[tuple[str, str]] = []
-    for s in seasons:
-        season_dir = series_dir / f"Season {s:02d}"
-        if season_dir.is_dir():
-            for f in sorted(season_dir.iterdir()):
-                if f.is_file() and f.suffix.lower() in _MEDIA_EXTENSIONS:
-                    existing.append((f"Season {s:02d}", f.name))
-    specials_dir = series_dir / "Specials"
-    if specials_dir.is_dir():
-        for f in sorted(specials_dir.iterdir()):
+    for subdir in sorted(series_dir.iterdir()):
+        if not subdir.is_dir():
+            continue
+        for f in sorted(subdir.iterdir()):
             if f.is_file() and f.suffix.lower() in _MEDIA_EXTENSIONS:
-                existing.append(("Specials", f.name))
+                existing.append((subdir.name, f.name))
 
     if existing:
         print(f"\n  Existing files in {series_dir.name}:")
@@ -1499,7 +1513,7 @@ def _process_group_batch(
 
     # Phase 1: Gather settings (no side effects)
     proposed_dir, dir_exists = propose_series_directory(dest, info, id_map)
-    concise_name, renames = _auto_resolve_concise_name(
+    concise_name = _auto_resolve_concise_name(
         matched, proposed_dir, seasons_list, config, group_key
     )
     detected_group = _auto_detect_release_group(matched)
@@ -1562,12 +1576,22 @@ def _process_group_batch(
     if info.tvdb_id is not None:
         id_map[(MetadataProvider.TVDB, info.tvdb_id)] = series_dir
 
-    # Phase 5: Enrich with mediainfo + CRC32
-    workflow.enrich(extras=extras, renames=renames)
+    # Phase 5: Enrich with mediainfo + CRC32, then check for naming renames
+    workflow.enrich(extras=extras, renames=[])
+    # Now that the directory exists and we have the concise name, check for
+    # naming inconsistencies in existing files and offer to normalize.
+    renames: list[tuple[Path, Path]] = []
+    existing_names = _scan_existing_concise_names(series_dir, seasons_list)
+    if existing_names:
+        _resolved_name, renames = _resolve_concise_name_from_existing(
+            existing_names, series_dir
+        )
+    if renames:
+        workflow.write(extras=extras, renames=renames)
     file_count = len(workflow.parsed)
 
     # Phase 6: Show existing files + enriched manifest + edit prompt
-    _print_existing_dest_files(series_dir, seasons_list)
+    _print_existing_dest_files(series_dir)
     print()
     workflow.print_colorized_manifest()
 
@@ -1731,7 +1755,9 @@ def _process_pool(
             info = _confirm_anime_info(info)
 
         if anidb_id is not None:
-            matched, pool = _match_files_to_season(pool, info)
+            matched, pool = _match_files_to_season(
+                pool, info, more_ids_queued=len(id_queue) > 0
+            )
             if not matched:
                 print("  No files matched. Try another ID.")
                 continue
@@ -1744,7 +1770,7 @@ def _process_pool(
                 verbose,
                 default_concise_name=group_name,
                 pre_matched=matched,
-                season_override=matched[0].source.parsed.season or 1,
+                season_override=1,
                 extras=extras,
                 config=config,
             )
