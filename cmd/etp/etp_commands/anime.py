@@ -1366,20 +1366,14 @@ def _auto_resolve_concise_name(
     config: AnimeConfig | None,
     group_key: str,
 ) -> str:
-    """Determine the concise name without prompting or triggering renames."""
+    """Determine the concise name without prompting or triggering renames.
+
+    Priority: existing files in dest (most common name) > config > parsed.
+    Existing files take priority because the user has already established
+    a naming convention in the destination directory.
+    """
+    # Start with config or parsed as the baseline
     default = group_key
-
-    if series_dir.is_dir():
-        existing_names = _scan_existing_concise_names(series_dir, seasons_list)
-        if existing_names:
-            # Use the most common existing name as default (no rename prompt)
-            global_counts: Counter[str] = Counter()
-            for names_in_dir in existing_names.values():
-                for name, files in names_in_dir.items():
-                    global_counts[name] += len(files)
-            if global_counts:
-                default = global_counts.most_common(1)[0][0]
-
     saved_concise = (
         config.concise_names.get(group_key, "")
         if config is not None and group_key
@@ -1390,6 +1384,17 @@ def _auto_resolve_concise_name(
     elif not default:
         sources = [mf.source for mf in matched]
         default = _extract_concise_name(sources)
+
+    # Existing files in dest override — they reflect the established naming
+    if series_dir.is_dir():
+        existing_names = _scan_existing_concise_names(series_dir, seasons_list)
+        if existing_names:
+            global_counts: Counter[str] = Counter()
+            for names_in_dir in existing_names.values():
+                for name, files in names_in_dir.items():
+                    global_counts[name] += len(files)
+            if global_counts:
+                default = global_counts.most_common(1)[0][0]
 
     return _strip_year(default)
 
@@ -1576,18 +1581,8 @@ def _process_group_batch(
     if info.tvdb_id is not None:
         id_map[(MetadataProvider.TVDB, info.tvdb_id)] = series_dir
 
-    # Phase 5: Enrich with mediainfo + CRC32, then check for naming renames
+    # Phase 5: Enrich with mediainfo + CRC32
     workflow.enrich(extras=extras, renames=[])
-    # Now that the directory exists and we have the concise name, check for
-    # naming inconsistencies in existing files and offer to normalize.
-    renames: list[tuple[Path, Path]] = []
-    existing_names = _scan_existing_concise_names(series_dir, seasons_list)
-    if existing_names:
-        _resolved_name, renames = _resolve_concise_name_from_existing(
-            existing_names, series_dir
-        )
-    if renames:
-        workflow.write(extras=extras, renames=renames)
     file_count = len(workflow.parsed)
 
     # Phase 6: Show existing files + enriched manifest + edit prompt
@@ -1616,6 +1611,15 @@ def _process_group_batch(
         return 0, file_count, []
     finally:
         workflow.cleanup()
+
+    # Check for naming inconsistencies in existing files after the user has
+    # confirmed/edited the manifest — merge any renames with manifest renames.
+    existing_names = _scan_existing_concise_names(series_dir, seasons_list)
+    if existing_names:
+        _resolved_name, extra_renames = _resolve_concise_name_from_existing(
+            existing_names, series_dir
+        )
+        rename_entries.extend(extra_renames)
 
     return workflow.execute(
         parsed_entries,
