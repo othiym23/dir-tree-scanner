@@ -339,15 +339,53 @@ def create_series_directory(
     """Create the series directory structure and ID file."""
     dirname = format_series_dirname(info.title_ja, info.title_en, info.year)
     series_dir = base / dirname
+    create_series_directory_structure(series_dir, info, seasons, dry_run)
+    return series_dir
 
+
+def propose_series_directory(
+    dest: Path,
+    info: AnimeInfo,
+    id_map: dict[tuple[str, int], Path] | None = None,
+) -> tuple[Path, bool]:
+    """Find the best series directory path without creating anything.
+
+    Returns ``(path, already_exists)`` using a 2-step lookup:
+    1. Check *id_map* for a matching AniDB/TheTVDB ID
+    2. Check if the conventionally-named directory already exists
+    Falls back to the conventional path with ``already_exists=False``.
+    """
+    if id_map:
+        if info.anidb_id is not None:
+            match = id_map.get((MetadataProvider.ANIDB, info.anidb_id))
+            if match is not None:
+                return match, True
+        if info.tvdb_id is not None:
+            match = id_map.get((MetadataProvider.TVDB, info.tvdb_id))
+            if match is not None:
+                return match, True
+
+    dirname = format_series_dirname(info.title_ja, info.title_en, info.year)
+    conventional = dest / dirname
+    if conventional.is_dir():
+        return conventional, True
+
+    return conventional, False
+
+
+def create_series_directory_structure(
+    series_dir: Path,
+    info: AnimeInfo,
+    seasons: list[int] | None = None,
+    dry_run: bool = False,
+) -> None:
+    """Create the directory tree and ID file for a series."""
     if dry_run:
         print(f"  [dry-run] mkdir -p {series_dir}")
     else:
         series_dir.mkdir(parents=True, exist_ok=True)
-
     _ensure_subdirs(series_dir, seasons, dry_run)
     _write_id_file(series_dir, info, dry_run)
-    return series_dir
 
 
 def resolve_series_directory(
@@ -363,31 +401,31 @@ def resolve_series_directory(
     2. Check if the conventionally-named directory already exists
     3. Prompt the user to pick an existing directory or create a new one
     """
-    # Step 1: ID match
-    if id_map:
-        if info.anidb_id is not None:
-            match = id_map.get((MetadataProvider.ANIDB, info.anidb_id))
-            if match is not None:
-                print(f"  Found existing directory by AniDB ID: {match.name}")
-                _ensure_subdirs(match, seasons, dry_run)
-                return match
-        if info.tvdb_id is not None:
-            match = id_map.get((MetadataProvider.TVDB, info.tvdb_id))
-            if match is not None:
-                print(f"  Found existing directory by TheTVDB ID: {match.name}")
-                _ensure_subdirs(match, seasons, dry_run)
-                return match
+    proposed, exists = propose_series_directory(dest, info, id_map)
 
-    # Step 2: conventional name match
-    dirname = format_series_dirname(info.title_ja, info.title_en, info.year)
-    conventional = dest / dirname
-    if conventional.is_dir():
-        print(f"  Found existing directory: {conventional.name}")
-        _ensure_subdirs(conventional, seasons, dry_run)
-        _write_id_file(conventional, info, dry_run)
-        return conventional
+    if exists:
+        print(f"  Found existing directory: {proposed.name}")
+        _ensure_subdirs(proposed, seasons, dry_run)
+        # Write ID file only if the directory wasn't found via id_map
+        # (i.e., it was found by conventional name)
+        found_via_id = False
+        if id_map:
+            for pid in [info.anidb_id, info.tvdb_id]:
+                if pid is not None:
+                    provider = (
+                        MetadataProvider.ANIDB
+                        if pid == info.anidb_id
+                        else MetadataProvider.TVDB
+                    )
+                    if id_map.get((provider, pid)) == proposed:
+                        found_via_id = True
+                        break
+        if not found_via_id:
+            _write_id_file(proposed, info, dry_run)
+        return proposed
 
     # Step 3: prompt user -- can enter an existing directory name or a new name
+    dirname = proposed.name
     print(f"\n  No existing directory found for: {dirname}")
     raw = prompt_value(
         "  Directory name, path to existing, or Enter to create default", ""
@@ -406,7 +444,8 @@ def resolve_series_directory(
         _write_id_file(manual_dir, info, dry_run)
         return manual_dir
 
-    return create_series_directory(dest, info, seasons, dry_run)
+    create_series_directory_structure(proposed, info, seasons, dry_run)
+    return proposed
 
 
 # ---------------------------------------------------------------------------
