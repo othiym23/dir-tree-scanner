@@ -145,17 +145,20 @@ def fetch_tvdb_series(
     """Fetch series info from TheTVDB with caching."""
     cache_file = cache_dir("tvdb") / f"{series_id}.json"
 
-    # Check cache (24h validity)
+    # Check cache (24h validity).  Re-fetch if the cached result has no
+    # episodes — the entry may have been fetched before episodes were added.
     if not no_cache and cache_file.exists():
         age = time.time() - cache_file.stat().st_mtime
         if age < CACHE_MAX_AGE_SECONDS:
             cached = json.loads(cache_file.read_text(encoding="utf-8"))
-            return _parse_tvdb_json(
+            info = _parse_tvdb_json(
                 cached["series"],
                 cached["episodes"],
                 series_id,
                 translations=cached.get("translations"),
             )
+            if info.episodes:
+                return info
 
     # Login and fetch
     token = tvdb_login(api_key)

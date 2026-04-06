@@ -620,93 +620,49 @@ class TestStripYear:
 
 
 class TestConciseNameFromConfig:
-    """Tests for saved concise name being used as the prompt default."""
+    """Tests for _auto_resolve_concise_name using config and defaults."""
 
-    def test_config_concise_name_used(self, monkeypatch):
-        """Saved concise name from config takes priority over directory name."""
-        captured = {}
-
-        class _Done(Exception):
-            pass
-
-        def fake_prompt(prompt, default=""):
-            if "concise" in prompt.lower():
-                captured["default"] = default
-                raise _Done
-            return default
-
-        monkeypatch.setattr(anime, "prompt_value", fake_prompt)
+    def test_config_concise_name_used(self):
+        """Saved concise name from config takes priority over group key."""
+        from etp_lib.types import MatchedFile
 
         config = anime.AnimeConfig(
             concise_names={"ゴールデンカムイ [Golden Kamuy] (2018)": "Golden Kamuy"},
         )
-        info = anime.AnimeInfo(
-            anidb_id=100,
-            tvdb_id=None,
-            title_ja="ゴールデンカムイ",
-            title_en="Golden Kamuy",
-            year=2018,
-            episodes=[anime.Episode(1, EpisodeType.REGULAR, "Ep 1", "", "")],
-        )
         parsed = [
             anime.SourceFile(
                 path=Path("ep1.mkv"), parsed=anime.ParsedMetadata(season=1, episode=1)
             ),
         ]
-        with pytest.raises(_Done):
-            anime._process_group_batch(
-                [],
-                info,
-                {},
-                Path("/tmp/test"),
-                dry_run=True,
-                verbose=False,
-                default_concise_name="ゴールデンカムイ [Golden Kamuy] (2018)",
-                pre_parsed=parsed,
-                config=config,
-            )
-        assert captured["default"] == "Golden Kamuy"
-
-    def test_year_stripped_without_config(self, monkeypatch):
-        """Directory name has year stripped even without config."""
-        captured = {}
-
-        class _Done(Exception):
-            pass
-
-        def fake_prompt(prompt, default=""):
-            if "concise" in prompt.lower():
-                captured["default"] = default
-                raise _Done
-            return default
-
-        monkeypatch.setattr(anime, "prompt_value", fake_prompt)
-
-        info = anime.AnimeInfo(
-            anidb_id=100,
-            tvdb_id=None,
-            title_ja="ゴールデンカムイ",
-            title_en="Golden Kamuy",
-            year=2018,
-            episodes=[anime.Episode(1, EpisodeType.REGULAR, "Ep 1", "", "")],
+        matched = [MatchedFile(source=sf) for sf in parsed]
+        # Empty DestScan — no existing files, so config wins
+        empty_scan = anime.DestScan({}, {})
+        concise = anime._auto_resolve_concise_name(
+            matched,
+            empty_scan,
+            config,
+            "ゴールデンカムイ [Golden Kamuy] (2018)",
         )
+        assert concise == "Golden Kamuy"
+
+    def test_year_stripped_without_config(self):
+        """Group key has year stripped even without config."""
+        from etp_lib.types import MatchedFile
+
         parsed = [
             anime.SourceFile(
                 path=Path("ep1.mkv"), parsed=anime.ParsedMetadata(season=1, episode=1)
             ),
         ]
-        with pytest.raises(_Done):
-            anime._process_group_batch(
-                [],
-                info,
-                {},
-                Path("/tmp/test"),
-                dry_run=True,
-                verbose=False,
-                default_concise_name="Golden Kamuy (2018)",
-                pre_parsed=parsed,
-            )
-        assert captured["default"] == "Golden Kamuy"
+        matched = [MatchedFile(source=sf) for sf in parsed]
+        empty_scan = anime.DestScan({}, {})
+        concise = anime._auto_resolve_concise_name(
+            matched,
+            empty_scan,
+            None,
+            "Golden Kamuy (2018)",
+        )
+        assert concise == "Golden Kamuy"
 
 
 class TestReleaseGroupOverride:
@@ -1775,8 +1731,8 @@ class TestIterMediaFiles:
         assert result == []
 
 
-class TestScanExistingConciseNames:
-    """Tests for scanning existing dest files to extract concise names."""
+class TestScanDestDirectory:
+    """Tests for scan_dest_directory — single scan for all consumers."""
 
     def test_extracts_names_from_existing_files(self, tmp_path):
         series_dir = tmp_path / "series"
@@ -1785,22 +1741,26 @@ class TestScanExistingConciseNames:
         (s01 / "Apothecary Diaries - s1e01 - Maomao [BD,1080p].mkv").touch()
         (s01 / "Apothecary Diaries - s1e02 - Episode [BD,1080p].mkv").touch()
 
-        result = anime._scan_existing_concise_names(series_dir, [1])
-        assert s01 in result
-        assert "Apothecary Diaries" in result[s01]
-        assert len(result[s01]["Apothecary Diaries"]) == 2
+        result = anime.scan_dest_directory(series_dir)
+        assert s01 in result.names_by_subdir
+        assert "Apothecary Diaries" in result.names_by_subdir[s01]
+        assert len(result.names_by_subdir[s01]["Apothecary Diaries"]) == 2
+        assert s01 in result.files_by_subdir
+        assert len(result.files_by_subdir[s01]) == 2
 
     def test_empty_dir_returns_empty(self, tmp_path):
         series_dir = tmp_path / "series"
         s01 = series_dir / "Season 01"
         s01.mkdir(parents=True)
 
-        result = anime._scan_existing_concise_names(series_dir, [1])
-        assert result == {}
+        result = anime.scan_dest_directory(series_dir)
+        assert result.names_by_subdir == {}
+        assert result.files_by_subdir == {}
 
     def test_nonexistent_dir_returns_empty(self, tmp_path):
-        result = anime._scan_existing_concise_names(tmp_path / "missing", [1])
-        assert result == {}
+        result = anime.scan_dest_directory(tmp_path / "missing")
+        assert result.names_by_subdir == {}
+        assert result.files_by_subdir == {}
 
     def test_detects_multiple_names(self, tmp_path):
         series_dir = tmp_path / "series"
@@ -1809,8 +1769,8 @@ class TestScanExistingConciseNames:
         (s01 / "Apothecary Diaries - s1e01 [BD].mkv").touch()
         (s01 / "The Apothecary Diaries - s1e02 [BD].mkv").touch()
 
-        result = anime._scan_existing_concise_names(series_dir, [1])
-        assert len(result[s01]) == 2
+        result = anime.scan_dest_directory(series_dir)
+        assert len(result.names_by_subdir[s01]) == 2
 
     def test_scans_specials_dir(self, tmp_path):
         series_dir = tmp_path / "series"
@@ -1818,8 +1778,17 @@ class TestScanExistingConciseNames:
         specials.mkdir(parents=True)
         (specials / "Show - NCOP1 [BD].mkv").touch()
 
-        result = anime._scan_existing_concise_names(series_dir, [1])
-        assert specials in result
+        result = anime.scan_dest_directory(series_dir)
+        assert specials in result.names_by_subdir
+
+    def test_scans_all_subdirs(self, tmp_path):
+        series_dir = tmp_path / "series"
+        for d in ["Season 01", "Season 02", "Specials", "Extras"]:
+            (series_dir / d).mkdir(parents=True)
+            (series_dir / d / "file.mkv").touch()
+
+        result = anime.scan_dest_directory(series_dir)
+        assert len(result.files_by_subdir) == 4
 
 
 class TestResolveConciseNameFromExisting:

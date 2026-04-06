@@ -170,12 +170,15 @@ def fetch_anidb_anime(
     """Fetch anime info from AniDB HTTP API with caching."""
     cache_file = cache_dir("anidb") / f"{aid}.xml"
 
-    # Check cache (24h validity)
+    # Check cache (24h validity).  Re-fetch if the cached result has no
+    # episodes — the entry may have been fetched before episodes were added.
     if not no_cache and cache_file.exists():
         age = time.time() - cache_file.stat().st_mtime
         if age < CACHE_MAX_AGE_SECONDS:
             xml_text = cache_file.read_text(encoding="utf-8")
-            return _parse_anidb_xml(xml_text, aid)
+            info = _parse_anidb_xml(xml_text, aid)
+            if info.episodes:
+                return info
 
     # Fetch from API
     _anidb_rate_limit()

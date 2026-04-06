@@ -21,9 +21,14 @@ from etp_lib.conflicts import (
     prompt_value,
     verify_hash,
 )
-from etp_lib.media_parser import normalize_for_matching
-from etp_lib.naming import format_episode_filename, format_series_dirname
+from etp_lib.media_parser import normalize_for_matching, parse_component
+from etp_lib.naming import (
+    format_episode_filename,
+    format_series_dirname,
+    season_subdir,
+)
 from etp_lib.types import (
+    ConflictAction,
     AnimeInfo,
     BonusType,
     Episode,
@@ -129,29 +134,26 @@ def escape_kdl(s: str) -> str:
 _MAX_FILENAME_BYTES = 255  # ext4/Btrfs filename length limit
 
 
-def build_manifest_entries(
+def match_episodes(
     parsed: list[SourceFile],
     info: AnimeInfo,
     concise_name: str,
     series_dir: Path,
-    verbose: bool,
-    analyze_file_fn=None,
 ) -> list[ManifestEntry]:
-    """Build manifest entries for all files without per-file prompts.
+    """Match parsed files to episodes and build manifest entries.
 
-    Runs mediainfo, verifies CRC32 hashes, matches episodes, and constructs
-    destination paths using defaults.
+    Performs episode matching and destination path construction only — no
+    mediainfo analysis, no CRC32 verification. Source files keep
+    ``media=None`` so filenames lack metadata blocks. Use
+    :func:`enrich_manifest_entries` afterward to fill those in.
     """
     entries: list[ManifestEntry] = []
-    # Track AniDB specials already matched so each is used at most once
     matched_special_tags: set[str] = set()
     specials = [ep for ep in info.episodes if ep.ep_type != EpisodeType.REGULAR]
     specials_by_num: dict[int, Episode] = {
         ep.number: ep for ep in specials if ep.season == 0
     }
 
-    # When using TVDB, start HamaTV ranges after the highest existing
-    # TVDB special number to avoid collisions in the single Specials/ dir.
     max_special_num = max((ep.number for ep in specials_by_num.values()), default=0)
     hamatv_counters: dict[str, int] = {}
     if info.tvdb_id is not None and max_special_num > 0:
@@ -162,32 +164,7 @@ def build_manifest_entries(
 
     parsed = sorted(parsed, key=_bonus_source_sort_key)
 
-    total = len(parsed)
-    for i, sf in enumerate(parsed, 1):
-        print(f"  Analyzing {i}/{total}: {sf.path.name}")
-
-        # Analyze with mediainfo
-        try:
-            if analyze_file_fn is not None:
-                sf.media = analyze_file_fn(sf.path)
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            if verbose:
-                print(f"    warning: mediainfo failed: {e}")
-
-        # Verify CRC32 hash -- on mismatch, clear hash so it's stripped from dest
-        hash_failed = False
-        hash_result = verify_hash(sf)
-        if hash_result is not None:
-            ok, actual = hash_result
-            if not ok:
-                print(
-                    f"    CRC32 MISMATCH: expected {sf.parsed.hash_code}, got {actual}"
-                )
-                sf.parsed.hash_code = ""
-                hash_failed = True
-            elif verbose:
-                print(f"    CRC32 verified: {sf.parsed.hash_code}")
-
+    for sf in parsed:
         ep_number = sf.parsed.episode
         season = sf.parsed.season if sf.parsed.season is not None else 1
         is_special = season == 0 or sf.parsed.is_special
@@ -206,9 +183,19 @@ def build_manifest_entries(
                 season = 0
         elif ep_number is not None and not is_special:
             episode_name = info.find_episode_title(ep_number, season)
+            # Replace generic "Episode N" placeholders with the actual title
+            # from the downloaded or sonarr filename, in that order.
+            _is_generic = not episode_name or re.match(
+                rf"Episode\s+{ep_number}$", episode_name, re.IGNORECASE
+            )
+            if _is_generic:
+                download_title = ""
+                if sf.matched_download is not None:
+                    download_title = parse_component(
+                        sf.matched_download.name
+                    ).episode_title
+                episode_name = download_title or episode_title or episode_name
         elif ep_number is not None and is_special and bonus_type:
-            # Parser detected both an episode number and a bonus type
-            # (e.g. S03ED from SeasonSpecial) — try bonus matching first
             available = [
                 ep for ep in specials if ep.special_tag not in matched_special_tags
             ]
@@ -224,8 +211,6 @@ def build_manifest_entries(
                 ep_number = matched_ep.number
                 season = 0
             else:
-                # No AniDB match — assign HamaTV number and build tag
-                # from bonus_type + parser episode (e.g. NCOP1, NCED2).
                 if sf.parsed.special_tag:
                     special_tag = sf.parsed.special_tag
                 elif bonus_type:
@@ -247,8 +232,6 @@ def build_manifest_entries(
             if matched_ep is not None:
                 is_special = True
                 if bonus_type in (BonusType.NCOP, BonusType.NCED):
-                    # Build tag like NCOP1, NCED1a from AniDB title.
-                    # AniDB titles: "Opening", "Opening 1", "Ending 1a"
                     m = re.search(r"(\d+)([a-z]*)\s*$", matched_ep.title_en)
                     suffix = (
                         f"{m.group(1)}{m.group(2)}" if m else str(matched_ep.number)
@@ -272,9 +255,7 @@ def build_manifest_entries(
                 sf.parsed.episode = ep_number
                 sf.parsed.season = 0
 
-        # Build destination path
         if ep_number is None:
-            # Can't auto-match -- mark as TODO
             placeholder = format_episode_filename(
                 concise_name=concise_name,
                 season=season,
@@ -285,13 +266,16 @@ def build_manifest_entries(
                 special_tag=special_tag,
             )
             placeholder = placeholder.replace("s1e00", "s1eXX")
-            dest_dir = series_dir / f"Season {season:02d}"
+            dest_dir = season_subdir(series_dir, season, is_special)
             entries.append(
                 ManifestEntry(
                     source=sf,
                     dest_path=dest_dir / placeholder,
                     is_todo=True,
-                    hash_failed=hash_failed,
+                    hash_failed=False,
+                    episode_name=episode_name,
+                    is_special=is_special,
+                    special_tag=special_tag,
                 )
             )
         else:
@@ -304,19 +288,91 @@ def build_manifest_entries(
                 is_special=is_special,
                 special_tag=special_tag,
             )
-            if is_special:
-                dest_dir = series_dir / "Specials"
-            else:
-                dest_dir = series_dir / f"Season {season:02d}"
+            dest_dir = season_subdir(series_dir, season, is_special)
             entries.append(
                 ManifestEntry(
                     source=sf,
                     dest_path=dest_dir / filename,
                     is_todo=is_unmatched_special,
-                    hash_failed=hash_failed,
+                    hash_failed=False,
+                    episode_name=episode_name,
+                    is_special=is_special,
+                    special_tag=special_tag,
                 )
             )
 
+    return entries
+
+
+def enrich_manifest_entries(
+    entries: list[ManifestEntry],
+    concise_name: str,
+    series_dir: Path,
+    verbose: bool,
+    analyze_file_fn=None,
+) -> None:
+    """Run mediainfo and CRC32 verification, then regenerate dest filenames.
+
+    Mutates *entries* in place — updates ``source.media``, ``hash_failed``,
+    and ``dest_path`` with the full metadata block.
+    """
+    total = len(entries)
+    for i, entry in enumerate(entries, 1):
+        sf = entry.source
+        print(f"  Analyzing {i}/{total}: {sf.path.name}")
+
+        try:
+            if analyze_file_fn is not None:
+                sf.media = analyze_file_fn(sf.path)
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            if verbose:
+                print(f"    warning: mediainfo failed: {e}")
+
+        hash_result = verify_hash(sf)
+        if hash_result is not None:
+            ok, actual = hash_result
+            if not ok:
+                print(
+                    f"    CRC32 MISMATCH: expected {sf.parsed.hash_code}, got {actual}"
+                )
+                sf.parsed.hash_code = ""
+                entry.hash_failed = True
+            elif verbose:
+                print(f"    CRC32 verified: {sf.parsed.hash_code}")
+
+        # Regenerate filename now that media metadata block is populated
+        if not entry.is_todo:
+            ep_number = sf.parsed.episode or 0
+            season = sf.parsed.season if sf.parsed.season is not None else 1
+            filename = format_episode_filename(
+                concise_name=concise_name,
+                season=season,
+                episode=ep_number,
+                episode_name=entry.episode_name,
+                source=sf,
+                is_special=entry.is_special,
+                special_tag=entry.special_tag,
+            )
+            entry.dest_path = (
+                season_subdir(series_dir, season, entry.is_special) / filename
+            )
+
+
+def build_manifest_entries(
+    parsed: list[SourceFile],
+    info: AnimeInfo,
+    concise_name: str,
+    series_dir: Path,
+    verbose: bool,
+    analyze_file_fn=None,
+) -> list[ManifestEntry]:
+    """Build manifest entries for all files without per-file prompts.
+
+    Runs mediainfo, verifies CRC32 hashes, matches episodes, and constructs
+    destination paths using defaults.
+    """
+    entries = match_episodes(parsed, info, concise_name, series_dir)
+    enrich_manifest_entries(entries, concise_name, series_dir, verbose, analyze_file_fn)
     return entries
 
 
@@ -382,6 +438,8 @@ def write_manifest(
             tag = "(todo)" if entry.is_todo else ""
             if entry.hash_failed:
                 lines.append("  // CRC32 MISMATCH — hash stripped from destination")
+            if entry.dest_path.exists():
+                lines.append("  // EXISTS — a file already exists at this destination")
             lines.append(f"  {tag}episode {ep_num} {{")
             if entry.source.matched_download is not None:
                 lines.append(
@@ -521,14 +579,14 @@ def parse_manifest(
 
         # Determine destination subdirectory
         if group_node.name == "specials":
-            dest_subdir = series_dir / "Specials"
+            dest_subdir = season_subdir(series_dir, 0, is_special=True)
         elif group_node.name == "season" and group_node.args:
             try:
                 season_num = int(group_node.args[0])
             except ValueError, TypeError:
                 errors.append(f"  invalid season number: '{group_node.args[0]}'")
                 continue
-            dest_subdir = series_dir / f"Season {season_num:02d}"
+            dest_subdir = season_subdir(series_dir, season_num)
         else:
             continue
 
@@ -624,14 +682,14 @@ def execute_manifest(
                 parse_source_filename_fn=parse_source_filename_fn,
                 analyze_file_fn=analyze_file_fn,
             )
-            if action in ("keep", "skip"):
+            if action in (ConflictAction.KEEP, ConflictAction.SKIP):
                 triaged_paths.append(sf.path)
-                if action == "skip":
+                if action == ConflictAction.SKIP:
                     failed += 1
                 else:
                     success += 1
                 continue
-            if action == "both":
+            if action == ConflictAction.BOTH:
                 # Keep existing. If dest already exists (same filename from
                 # matching metadata), disambiguate by appending the source
                 # file's CRC32 to the filename.
@@ -708,6 +766,29 @@ class ManifestWorkflow:
         self.entries: list[ManifestEntry] = []
         self.manifest_path: Path | None = None
 
+    def build_lightweight(self) -> list[ManifestEntry]:
+        """Match episodes and build entries without mediainfo or CRC32."""
+        self.entries = match_episodes(
+            self.parsed, self.info, self.concise_name, self.series_dir
+        )
+        return self.entries
+
+    def enrich(
+        self,
+        extras: list[Path] | None = None,
+        renames: list[tuple[Path, Path]] | None = None,
+    ) -> None:
+        """Run mediainfo + CRC32 on entries, regenerate filenames, re-write manifest."""
+        print()
+        enrich_manifest_entries(
+            self.entries,
+            self.concise_name,
+            self.series_dir,
+            self.verbose,
+            analyze_file_fn=self.analyze_file_fn,
+        )
+        self.write(extras=extras, renames=renames)
+
     def build(self) -> list[ManifestEntry]:
         """Build manifest entries (mediainfo + CRC32 verification)."""
         print()
@@ -775,6 +856,44 @@ class ManifestWorkflow:
                 raise ValueError("Manifest is empty")
 
             return parsed_entries, extra_entries, rename_entries
+
+    def confirm_and_parse(
+        self,
+    ) -> (
+        tuple[
+            list[tuple[SourceFile, Path]],
+            list[tuple[Path, Path]],
+            list[tuple[Path, Path]],
+        ]
+        | None
+    ):
+        """Prompt to edit, parse manifest, return entries or None on skip.
+
+        Shows the "Edit manifest?" prompt, opens the editor if requested,
+        parses the result, and handles errors. Returns ``None`` if the user
+        cancels or the manifest has unresolvable errors.
+        """
+        try:
+            if prompt_confirm("\n  Edit manifest?"):
+                return self.edit_loop()
+            assert self.manifest_path is not None
+            parsed_entries, errors, extra_entries, rename_entries = parse_manifest(
+                self.manifest_path, self._known_sources, self.series_dir
+            )
+            if errors:
+                print(f"\n  Manifest has {len(errors)} error(s):")
+                for err in errors:
+                    print(err)
+                return None
+            if not parsed_entries:
+                print("  Manifest is empty. Skipping group.")
+                return None
+            return parsed_entries, extra_entries, rename_entries
+        except ValueError as e:
+            print(f"  {e}. Skipping group.")
+            return None
+        finally:
+            self.cleanup()
 
     def execute(
         self,
@@ -858,27 +977,10 @@ class ManifestWorkflow:
         print()
         self.print_colorized_manifest()
 
-        try:
-            if prompt_confirm("\n  Edit manifest?"):
-                parsed_entries, extra_entries, rename_entries = self.edit_loop()
-            else:
-                assert self.manifest_path is not None
-                parsed_entries, errors, extra_entries, rename_entries = parse_manifest(
-                    self.manifest_path, self._known_sources, self.series_dir
-                )
-                if errors:
-                    print(f"\n  Manifest has {len(errors)} error(s):")
-                    for err in errors:
-                        print(err)
-                    return 0, file_count, []
-                if not parsed_entries:
-                    print("  Manifest is empty. Skipping group.")
-                    return 0, file_count, []
-        except ValueError as e:
-            print(f"  {e}. Skipping group.")
+        result = self.confirm_and_parse()
+        if result is None:
             return 0, file_count, []
-        finally:
-            self.cleanup()
+        parsed_entries, extra_entries, rename_entries = result
 
         return self.execute(
             parsed_entries,

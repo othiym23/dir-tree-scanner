@@ -19,6 +19,7 @@ import argparse
 import json
 import os
 import re
+from dataclasses import dataclass
 import readline  # noqa: F401 — enables line editing in input()
 import shutil
 import subprocess
@@ -37,18 +38,29 @@ from etp_lib.conflicts import (
     prompt_value,
     verify_hash,
 )
+from etp_lib.colorize import colorize_path
+from etp_lib.download_cache import (
+    DownloadCache,
+    check_cache_freshness,
+    find_stale_dirs,
+    load_cache,
+    save_cache,
+    scan_dir_mtimes,
+)
 from etp_lib.manifest import ManifestWorkflow, escape_kdl
 from etp_lib.mediainfo import analyze_file
 from etp_lib.naming import (
     build_metadata_block,  # noqa: F401 (re-export for tests)
     format_episode_filename,
     format_series_dirname,
+    season_subdir,
 )
 from etp_lib.paths import cache_dir as _cache_dir
 from etp_lib.tvdb import fetch_tvdb_series
 from etp_lib.types import (
     AnimeConfig,
     AnimeInfo,
+    ConflictAction,
     DEFAULT_ANIME_SOURCE_DIR,  # noqa: F401 (re-export for tests)
     DEFAULT_DEST_DIR,  # noqa: F401 (re-export for tests)
     DEFAULT_DOWNLOADS_DIR,  # noqa: F401 (re-export for tests)
@@ -229,6 +241,8 @@ def _maybe_save_mapping(
 
 # Media file extensions (canonical set in media_parser)
 _MEDIA_EXTENSIONS = media_parser._MEDIA_EXTENSIONS
+_VIDEO_EXTENSIONS = media_parser._VIDEO_EXTENSIONS
+_AUDIO_EXTENSIONS = media_parser._AUDIO_EXTENSIONS
 _EXTRAS_EXTENSIONS = frozenset({".rar", ".zip", ".7z", ".flac", ".wav", ".ape", ".txt"})
 
 
@@ -241,6 +255,7 @@ def parse_source_filename(filename: str) -> SourceFile:
     return SourceFile(
         path=Path(filename),
         parsed=ParsedMetadata(
+            series_name=pm.series_name,
             release_group=pm.release_group,
             source_type=pm.source_type,
             is_remux=pm.is_remux,
@@ -264,6 +279,36 @@ def parse_source_filename(filename: str) -> SourceFile:
 # ---------------------------------------------------------------------------
 # Directory management
 # ---------------------------------------------------------------------------
+
+
+def build_id_queue(
+    series_name: str,
+    config: AnimeConfig,
+    source_dir: Path | None = None,
+) -> list[tuple[str, int]]:
+    """Build an ordered ID queue from source directory .id files and config.
+
+    Reads ``anidb.id`` / ``tvdb.id`` from *source_dir* (if provided), then
+    appends any config mappings not already in the queue.
+    """
+    queue: list[tuple[str, int]] = []
+    if source_dir is not None:
+        for id_filename, provider in (
+            ("anidb.id", MetadataProvider.ANIDB),
+            ("tvdb.id", MetadataProvider.TVDB),
+        ):
+            id_file = source_dir / id_filename
+            if id_file.is_file():
+                try:
+                    raw = id_file.read_text(encoding="utf-8").strip()
+                    if raw:
+                        queue.append((provider, int(raw)))
+                except ValueError, OSError:
+                    pass
+    for entry in lookup_series_ids(series_name, config):
+        if entry not in queue:
+            queue.append(entry)
+    return queue
 
 
 def scan_dest_ids(dest: Path) -> dict[tuple[str, int], Path]:
@@ -292,6 +337,29 @@ def scan_dest_ids(dest: Path) -> dict[tuple[str, int], Path]:
                 except ValueError, OSError:
                     pass
     return result
+
+
+def _cached_scan_dest_ids(
+    dest: Path, no_cache: bool = False
+) -> dict[tuple[str, int], Path]:
+    """Scan dest IDs with caching — avoids walking 1500+ dirs on repeat runs."""
+    if not no_cache:
+        cached = load_cache()
+        if cached is not None and cached.dest_ids:
+            dest_mtimes = scan_dir_mtimes([dest])
+            changed, removed = find_stale_dirs(cached.dest_mtimes, dest_mtimes)
+            if not changed and not removed:
+                print(f"Using cached dest ID map ({len(cached.dest_ids)} entries).")
+                return {k: Path(v) for k, v in cached.dest_ids.items()}
+
+    id_map = scan_dest_ids(dest)
+    save_cache(
+        DownloadCache(
+            dest_ids={k: str(v) for k, v in id_map.items()},
+            dest_mtimes=scan_dir_mtimes([dest]),
+        )
+    )
+    return id_map
 
 
 def _ensure_subdirs(
@@ -339,15 +407,53 @@ def create_series_directory(
     """Create the series directory structure and ID file."""
     dirname = format_series_dirname(info.title_ja, info.title_en, info.year)
     series_dir = base / dirname
+    create_series_directory_structure(series_dir, info, seasons, dry_run)
+    return series_dir
 
+
+def propose_series_directory(
+    dest: Path,
+    info: AnimeInfo,
+    id_map: dict[tuple[str, int], Path] | None = None,
+) -> tuple[Path, bool, bool]:
+    """Find the best series directory path without creating anything.
+
+    Returns ``(path, already_exists, found_via_id)`` using a 2-step lookup:
+    1. Check *id_map* for a matching AniDB/TheTVDB ID
+    2. Check if the conventionally-named directory already exists
+    Falls back to the conventional path with ``already_exists=False``.
+    """
+    if id_map:
+        if info.anidb_id is not None:
+            match = id_map.get((MetadataProvider.ANIDB, info.anidb_id))
+            if match is not None:
+                return match, True, True
+        if info.tvdb_id is not None:
+            match = id_map.get((MetadataProvider.TVDB, info.tvdb_id))
+            if match is not None:
+                return match, True, True
+
+    dirname = format_series_dirname(info.title_ja, info.title_en, info.year)
+    conventional = dest / dirname
+    if conventional.is_dir():
+        return conventional, True, False
+
+    return conventional, False, False
+
+
+def create_series_directory_structure(
+    series_dir: Path,
+    info: AnimeInfo,
+    seasons: list[int] | None = None,
+    dry_run: bool = False,
+) -> None:
+    """Create the directory tree and ID file for a series."""
     if dry_run:
         print(f"  [dry-run] mkdir -p {series_dir}")
     else:
         series_dir.mkdir(parents=True, exist_ok=True)
-
     _ensure_subdirs(series_dir, seasons, dry_run)
     _write_id_file(series_dir, info, dry_run)
-    return series_dir
 
 
 def resolve_series_directory(
@@ -363,31 +469,17 @@ def resolve_series_directory(
     2. Check if the conventionally-named directory already exists
     3. Prompt the user to pick an existing directory or create a new one
     """
-    # Step 1: ID match
-    if id_map:
-        if info.anidb_id is not None:
-            match = id_map.get((MetadataProvider.ANIDB, info.anidb_id))
-            if match is not None:
-                print(f"  Found existing directory by AniDB ID: {match.name}")
-                _ensure_subdirs(match, seasons, dry_run)
-                return match
-        if info.tvdb_id is not None:
-            match = id_map.get((MetadataProvider.TVDB, info.tvdb_id))
-            if match is not None:
-                print(f"  Found existing directory by TheTVDB ID: {match.name}")
-                _ensure_subdirs(match, seasons, dry_run)
-                return match
+    proposed, exists, found_via_id = propose_series_directory(dest, info, id_map)
 
-    # Step 2: conventional name match
-    dirname = format_series_dirname(info.title_ja, info.title_en, info.year)
-    conventional = dest / dirname
-    if conventional.is_dir():
-        print(f"  Found existing directory: {conventional.name}")
-        _ensure_subdirs(conventional, seasons, dry_run)
-        _write_id_file(conventional, info, dry_run)
-        return conventional
+    if exists:
+        print(f"  Found existing directory: {proposed.name}")
+        _ensure_subdirs(proposed, seasons, dry_run)
+        if not found_via_id:
+            _write_id_file(proposed, info, dry_run)
+        return proposed
 
     # Step 3: prompt user -- can enter an existing directory name or a new name
+    dirname = proposed.name
     print(f"\n  No existing directory found for: {dirname}")
     raw = prompt_value(
         "  Directory name, path to existing, or Enter to create default", ""
@@ -406,7 +498,8 @@ def resolve_series_directory(
         _write_id_file(manual_dir, info, dry_run)
         return manual_dir
 
-    return create_series_directory(dest, info, seasons, dry_run)
+    create_series_directory_structure(proposed, info, seasons, dry_run)
+    return proposed
 
 
 # ---------------------------------------------------------------------------
@@ -441,15 +534,22 @@ def _save_triage_manifest(copied: set[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _iter_media_files(source_dirs: list[Path]) -> list[Path]:
-    """Walk source directories recursively for media files."""
+def _iter_media_files(
+    source_dirs: list[Path], include_audio: bool = False
+) -> list[Path]:
+    """Walk source directories recursively for media files.
+
+    By default only video files are returned.  Set *include_audio* to
+    also collect audio files (for the QA tool or extras detection).
+    """
+    extensions = _MEDIA_EXTENSIONS if include_audio else _VIDEO_EXTENSIONS
     results: list[Path] = []
     for source_dir in source_dirs:
         if not source_dir.is_dir():
             continue
         for root, _dirs, files in os.walk(source_dir):
             for name in files:
-                if Path(name).suffix.lower() in _MEDIA_EXTENSIONS:
+                if Path(name).suffix.lower() in extensions:
                     results.append(Path(root) / name)
     return results
 
@@ -470,33 +570,68 @@ def _extract_concise_name(source_files: list[SourceFile]) -> str:
     return pm.series_name
 
 
-def _scan_existing_concise_names(
-    series_dir: Path, seasons: list[int]
-) -> dict[Path, dict[str, list[Path]]]:
-    """Scan existing media files in dest season dirs and extract concise names.
+@dataclass
+class DestScan:
+    """Cached scan of all media files in a series destination directory.
 
-    Returns ``{season_dir: {concise_name: [file_paths]}}`` for each affected
-    season directory that already contains files.
+    Built once per batch by :func:`scan_dest_directory` and threaded through
+    concise-name resolution, existing-file display, and rename detection.
     """
-    result: dict[Path, dict[str, list[Path]]] = {}
-    dirs_to_check = [series_dir / f"Season {s:02d}" for s in seasons]
-    dirs_to_check.append(series_dir / "Specials")
 
-    for season_dir in dirs_to_check:
-        if not season_dir.is_dir():
+    files_by_subdir: dict[Path, list[Path]]
+    """``{subdir_path: [media_file_paths]}`` for every subdirectory."""
+
+    names_by_subdir: dict[Path, dict[str, list[Path]]]
+    """``{subdir_path: {concise_name: [file_paths]}}``."""
+
+
+def scan_dest_directory(series_dir: Path) -> DestScan:
+    """Scan all subdirectories of *series_dir* for media files.
+
+    Returns a :class:`DestScan` with both the raw file listing (for display)
+    and the concise-name grouping (for name resolution and rename detection).
+    """
+    files_by_subdir: dict[Path, list[Path]] = {}
+    names_by_subdir: dict[Path, dict[str, list[Path]]] = {}
+
+    if not series_dir.is_dir():
+        return DestScan(files_by_subdir, names_by_subdir)
+
+    for subdir in sorted(series_dir.iterdir()):
+        if not subdir.is_dir():
             continue
+        media_files: list[Path] = []
         names: dict[str, list[Path]] = {}
-        for f in season_dir.iterdir():
+        for f in sorted(subdir.iterdir()):
             if not f.is_file() or f.suffix.lower() not in _MEDIA_EXTENSIONS:
                 continue
-            pm = media_parser.parse_component(f.name)
-            name = pm.series_name.strip()
+            media_files.append(f)
+            stem = f.stem
+            sep_idx = stem.find(" - ")
+            if sep_idx > 0:
+                name = stem[:sep_idx].strip()
+            else:
+                pm = media_parser.parse_component(f.name)
+                name = pm.series_name.strip()
             if name:
                 names.setdefault(name, []).append(f)
+        if media_files:
+            files_by_subdir[subdir] = media_files
         if names:
-            result[season_dir] = names
+            names_by_subdir[subdir] = names
 
-    return result
+    return DestScan(files_by_subdir, names_by_subdir)
+
+
+def _most_common_concise_name(
+    names_by_subdir: dict[Path, dict[str, list[Path]]],
+) -> str:
+    """Return the most common concise name across all subdirectories."""
+    counts: Counter[str] = Counter()
+    for names_in_dir in names_by_subdir.values():
+        for name, files in names_in_dir.items():
+            counts[name] += len(files)
+    return counts.most_common(1)[0][0] if counts else ""
 
 
 def _resolve_concise_name_from_existing(
@@ -512,16 +647,9 @@ def _resolve_concise_name_from_existing(
     Returns ``(default_name, renames)`` where *renames* is a list of
     ``(old_path, new_path)`` for files that need renaming.
     """
-    # Flatten to get global most-common name across all season dirs
-    global_counts: Counter[str] = Counter()
-    for names_in_dir in existing_names.values():
-        for name, files in names_in_dir.items():
-            global_counts[name] += len(files)
-
-    if not global_counts:
+    most_common = _most_common_concise_name(existing_names)
+    if not most_common:
         return "", []
-
-    most_common = global_counts.most_common(1)[0][0]
     renames: list[tuple[Path, Path]] = []
 
     for season_dir, names_in_dir in existing_names.items():
@@ -1064,13 +1192,7 @@ def _process_file(
         special_tag=special_tag,
     )
 
-    # Determine destination
-    if is_special:
-        dest_dir = series_dir / "Specials"
-    else:
-        dest_dir = series_dir / f"Season {season:02d}"
-
-    dest_path = dest_dir / filename
+    dest_path = season_subdir(series_dir, season, is_special) / filename
     print(f"\n  -> {dest_path}")
 
     # Check for existing file at destination
@@ -1081,9 +1203,9 @@ def _process_file(
             parse_source_filename_fn=parse_source_filename,
             analyze_file_fn=analyze_file,
         )
-        if action == "skip":
+        if action == ConflictAction.SKIP:
             return False
-        if action == "keep":
+        if action == ConflictAction.KEEP:
             return True
 
     if not prompt_confirm("  Copy this file?"):
@@ -1100,6 +1222,8 @@ def _process_file(
 def _match_files_to_season(
     pool: list[SourceFile],
     info: AnimeInfo,
+    *,
+    more_ids_queued: bool = False,
 ) -> tuple[list[MatchedFile], list[SourceFile]]:
     """Match files from the pool against an AniDB season.
 
@@ -1128,8 +1252,7 @@ def _match_files_to_season(
     title_unmatched: list[SourceFile] = []
     if known_titles:
         for sf in pool:
-            sf_pm = media_parser.parse_component(sf.path.name)
-            sf_title_norm = media_parser.normalize_for_matching(sf_pm.series_name)
+            sf_title_norm = media_parser.normalize_for_matching(sf.parsed.series_name)
             if not sf_title_norm:
                 # Can't determine series name — include by default
                 title_matched.append(sf)
@@ -1191,18 +1314,44 @@ def _match_files_to_season(
     if no_season:
         print(f"    (unseasoned): {len(no_season)} files")
 
-    # Prompt for which season
-    default = str(season_keys[0]) if len(season_keys) == 1 else ""
-    chosen_str = prompt_value("  Which season maps to this AniDB ID?", default)
-    try:
-        chosen = int(chosen_str)
-    except ValueError:
-        print("  Invalid season number.")
+    # Auto-select if there's only one non-specials season candidate.
+    # When more AniDB IDs are queued, prefer the lowest season — higher
+    # seasons will be matched by subsequent IDs.
+    non_zero_keys = [s for s in season_keys if s != 0]
+    if more_ids_queued and len(non_zero_keys) == 1 and non_zero_keys[0] > 1:
+        # Only higher-season files remain, but more IDs are queued.
+        # Skip this ID so the next one can pick up the right season.
+        print(f"  Only season {non_zero_keys[0]} files remain; deferring to next ID.")
         return [], pool
+    if len(non_zero_keys) == 1:
+        chosen = non_zero_keys[0]
+        print(f"  Auto-selected season {chosen}.")
+    elif len(season_keys) == 1:
+        chosen = season_keys[0]
+        print(f"  Auto-selected season {chosen}.")
+    else:
+        chosen_str = prompt_value("  Which season maps to this AniDB ID?", "")
+        try:
+            chosen = int(chosen_str)
+        except ValueError:
+            print("  Invalid season number.")
+            return [], pool
 
     if chosen not in by_season:
         print(f"  No files found for season {chosen}.")
         return [], pool
+
+    # When only specials/season 0 matched and AniDB has no specials,
+    # confirm the user wants to proceed (they may be hand-editing unmapped
+    # specials into the series).
+    if chosen == 0:
+        special_count = sum(
+            1 for ep in info.episodes if ep.ep_type != EpisodeType.REGULAR
+        )
+        if special_count == 0:
+            print("  AniDB has no specials for this entry.")
+            if not prompt_confirm("  Proceed with hand-editing?", default=False):
+                return [], pool
 
     # Separate regular episodes from special/bonus files.
     # Parser-detected specials (S01OVA, S03OP, NCOP) and files without
@@ -1284,6 +1433,105 @@ def _strip_year(name: str) -> str:
     return _RE_TRAILING_YEAR.sub("", name)
 
 
+def _auto_resolve_concise_name(
+    matched: list[MatchedFile],
+    dest_scan: DestScan,
+    config: AnimeConfig | None,
+    group_key: str,
+) -> str:
+    """Determine the concise name without prompting or triggering renames.
+
+    Priority: existing files in dest (most common name) > config > parsed.
+    Existing files take priority because the user has already established
+    a naming convention in the destination directory.
+    """
+    default = group_key
+    saved_concise = (
+        config.concise_names.get(group_key, "")
+        if config is not None and group_key
+        else ""
+    )
+    if saved_concise:
+        default = saved_concise
+    elif not default:
+        sources = [mf.source for mf in matched]
+        default = _extract_concise_name(sources)
+
+    # Existing files in dest override — they reflect the established naming
+    if dest_scan.names_by_subdir:
+        from_existing = _most_common_concise_name(dest_scan.names_by_subdir)
+        if from_existing:
+            default = from_existing
+
+    return _strip_year(default)
+
+
+def _auto_detect_release_group(matched: list[MatchedFile]) -> str:
+    """Return the first non-empty release group from matched files."""
+    return next(
+        (
+            mf.source.parsed.release_group
+            for mf in matched
+            if mf.source.parsed.release_group
+        ),
+        "",
+    )
+
+
+def _apply_batch_traits(
+    matched: list[MatchedFile], release_group: str, detected_group: str
+) -> None:
+    """Apply release group overrides and majority-vote batch traits."""
+    for mf in matched:
+        existing = mf.source.parsed.release_group
+        if not existing or existing == detected_group:
+            mf.release_group = release_group
+
+    dual_count = sum(1 for mf in matched if mf.source.parsed.is_dual_audio)
+    if dual_count > len(matched) // 2:
+        for mf in matched:
+            mf.is_dual_audio = True
+
+    uncensored_count = sum(1 for mf in matched if mf.source.parsed.is_uncensored)
+    if uncensored_count > len(matched) // 2:
+        for mf in matched:
+            mf.is_uncensored = True
+
+
+def _print_existing_dest_files(series_dir: Path, dest_scan: DestScan) -> None:
+    """Print colorized existing media files from a pre-scanned directory."""
+    if not dest_scan.files_by_subdir:
+        return
+    print(f"\n  Existing files in {series_dir.name}:")
+    for subdir, files in dest_scan.files_by_subdir.items():
+        for f in files:
+            print(f"    {subdir.name}/{colorize_path(f.name)}")
+
+
+def _prompt_batch_confirmation(
+    proposed_dir: Path,
+    dir_exists: bool,
+    concise_name: str,
+    release_group: str,
+) -> str:
+    """Show batch settings and get confirmation.
+
+    Returns ``"y"`` to proceed, ``"e"`` to edit settings, ``"s"`` to skip.
+    """
+    status = "exists" if dir_exists else "new"
+    print(f"\n  Series dir:     {proposed_dir.name}  [{status}]")
+    print(f"  Concise name:   {concise_name}")
+    print(f"  Release group:  {release_group}")
+    while True:
+        raw = input("\n  [Y]es / [e]dit / [s]kip: ").strip().lower()
+        if raw in ("", "y", "yes"):
+            return "y"
+        if raw in ("e", "edit"):
+            return "e"
+        if raw in ("s", "skip"):
+            return "s"
+
+
 def _process_group_batch(
     files: list[Path],
     info: AnimeInfo,
@@ -1300,8 +1548,9 @@ def _process_group_batch(
 ) -> tuple[int, int, list[Path]]:
     """Batch-process a group of files via an editable manifest.
 
-    Uses a vidir-style workflow: build all source->destination mappings,
-    open in $EDITOR, then execute.
+    Uses a two-phase workflow: build a lightweight preview (episode matching
+    only, no mediainfo/CRC), show it for confirmation, then enrich with
+    mediainfo/CRC and execute.
 
     If *pre_matched* is provided (from _match_files_to_season), uses those
     MatchedFile objects directly. If *pre_parsed* is provided, wraps them
@@ -1318,96 +1567,106 @@ def _process_group_batch(
     else:
         matched = [MatchedFile(source=sf) for sf in _parse_files(files)]
 
-    # Apply season override (for AniDB per-season processing)
     if season_override is not None:
         for mf in matched:
             mf.season = season_override
 
-    # Resolve series directory first — needed to scan existing files
     seasons_needed = {mf.effective_season or 1 for mf in matched}
     seasons_list = sorted(seasons_needed)
+    group_key = default_concise_name
 
-    series_dir = resolve_series_directory(
-        dest, info, id_map=id_map, seasons=seasons_list, dry_run=dry_run
+    # Phase 1: Gather settings (no side effects)
+    proposed_dir, dir_exists, _found_via_id = propose_series_directory(
+        dest, info, id_map
     )
-    print(f"\nSeries directory: {series_dir}")
+    dest_scan = scan_dest_directory(proposed_dir)
+    concise_name = _auto_resolve_concise_name(matched, dest_scan, config, group_key)
+    detected_group = _auto_detect_release_group(matched)
+    release_group = detected_group
+    _apply_batch_traits(matched, release_group, detected_group)
+    snapshot_parsed = [mf.to_source_snapshot() for mf in matched]
+
+    # Phase 2: Lightweight build (no display yet — wait for enrichment)
+    workflow = ManifestWorkflow(
+        snapshot_parsed,
+        info,
+        concise_name,
+        proposed_dir,
+        verbose=verbose,
+        analyze_file_fn=analyze_file,
+    )
+    workflow.build_lightweight()
+
+    # Phase 3: Confirmation gate for new directories
+    while not dir_exists:
+        choice = _prompt_batch_confirmation(
+            proposed_dir, dir_exists, concise_name, release_group
+        )
+        if choice == "s":
+            return 0, len(matched), []
+        if choice == "e":
+            concise_name = prompt_value(
+                "Concise series name for filenames", concise_name
+            )
+            release_group = prompt_value("Release group", release_group)
+            raw_dir = prompt_value("Series directory name", proposed_dir.name)
+            if raw_dir != proposed_dir.name:
+                new_dir = Path(raw_dir)
+                if not new_dir.is_absolute():
+                    new_dir = dest / new_dir
+                proposed_dir = new_dir
+                dir_exists = proposed_dir.is_dir()
+
+            # Rebuild with new settings
+            _apply_batch_traits(matched, release_group, detected_group)
+            snapshot_parsed = [mf.to_source_snapshot() for mf in matched]
+            workflow = ManifestWorkflow(
+                snapshot_parsed,
+                info,
+                concise_name,
+                proposed_dir,
+                verbose=verbose,
+                analyze_file_fn=analyze_file,
+            )
+            workflow.build_lightweight()
+            continue
+        break  # "y"
+
+    # Phase 4: Commit side effects — create directory structure
+    create_series_directory_structure(proposed_dir, info, seasons_list, dry_run)
+    series_dir = proposed_dir
 
     if info.anidb_id is not None:
         id_map[(MetadataProvider.ANIDB, info.anidb_id)] = series_dir
     if info.tvdb_id is not None:
         id_map[(MetadataProvider.TVDB, info.tvdb_id)] = series_dir
 
-    # Scan existing files in affected dest season dirs to determine the
-    # default concise name and detect naming inconsistencies.
-    group_key = default_concise_name  # preserve for config lookup
-    renames: list[tuple[Path, Path]] = []
-    existing_names = _scan_existing_concise_names(series_dir, seasons_list)
-    if existing_names:
-        default_from_existing, renames = _resolve_concise_name_from_existing(
-            existing_names, series_dir
+    # Phase 5: Enrich with mediainfo + CRC32
+    workflow.enrich(extras=extras, renames=[])
+    file_count = len(workflow.parsed)
+
+    # Phase 6: Show existing files + enriched manifest + edit prompt
+    _print_existing_dest_files(series_dir, dest_scan)
+    print()
+    workflow.print_colorized_manifest()
+
+    result = workflow.confirm_and_parse()
+    if result is None:
+        return 0, file_count, []
+    parsed_entries, extra_entries, rename_entries = result
+
+    # Check for naming inconsistencies — reuses the scan from phase 1
+    if dest_scan.names_by_subdir:
+        _resolved_name, extra_renames = _resolve_concise_name_from_existing(
+            dest_scan.names_by_subdir, series_dir
         )
-        if default_from_existing:
-            default_concise_name = default_from_existing
+        rename_entries.extend(extra_renames)
 
-    # Config saved name can override any default (including from existing files)
-    saved_concise = (
-        config.concise_names.get(group_key, "")
-        if config is not None and group_key
-        else ""
-    )
-    if saved_concise:
-        default_concise_name = saved_concise
-    elif not default_concise_name:
-        sources = [mf.source for mf in matched]
-        default_concise_name = _extract_concise_name(sources)
-    default_concise_name = _strip_year(default_concise_name)
-    concise_name = prompt_value(
-        "Concise series name for filenames", default_concise_name
-    )
-
-    # Prompt for release group — applied only to files that lack one or
-    # that match the auto-detected default. Files with a different group
-    # (e.g., specials from a different release) keep their own.
-    detected = next(
-        (
-            mf.source.parsed.release_group
-            for mf in matched
-            if mf.source.parsed.release_group
-        ),
-        "",
-    )
-    group = prompt_value("Release group", detected)
-    for mf in matched:
-        existing = mf.source.parsed.release_group
-        if not existing or existing == detected:
-            mf.release_group = group
-
-    # Detect batch-level traits (majority vote)
-    dual_count = sum(1 for mf in matched if mf.source.parsed.is_dual_audio)
-    if dual_count > len(matched) // 2:
-        for mf in matched:
-            mf.is_dual_audio = True
-
-    uncensored_count = sum(1 for mf in matched if mf.source.parsed.is_uncensored)
-    if uncensored_count > len(matched) // 2:
-        for mf in matched:
-            mf.is_uncensored = True
-
-    # Snapshot MatchedFile overrides into SourceFile copies for the workflow
-    snapshot_parsed = [mf.to_source_snapshot() for mf in matched]
-
-    workflow = ManifestWorkflow(
-        snapshot_parsed,
-        info,
-        concise_name,
-        series_dir,
-        verbose=verbose,
-        analyze_file_fn=analyze_file,
-    )
-    return workflow.run(
-        dry_run=dry_run,
-        extras=extras,
-        renames=renames,
+    return workflow.execute(
+        parsed_entries,
+        extra_entries,
+        rename_entries,
+        dry_run,
         parse_source_filename_fn=parse_source_filename,
     )
 
@@ -1442,6 +1701,7 @@ def _process_pool(
     download_index: DownloadIndex | None = None,
     title_index: media_parser.TitleAliasIndex | None = None,
     resolved_paths: dict[Path, str] | None = None,
+    auto_accept_ids: bool = False,
 ) -> tuple[int, int, bool]:
     """Process a file pool against metadata IDs interactively.
 
@@ -1459,42 +1719,57 @@ def _process_pool(
             return resolved_paths.get(p, str(p.resolve()))
         return str(p.resolve())
 
+    def _mark_pool_done() -> None:
+        if not dry_run:
+            for sf in pool:
+                already_copied.add(_resolve(sf.path))
+            _save_triage_manifest(already_copied)
+        print(f"  Marked {len(pool)} file(s) as done.")
+        pool.clear()
+
     while pool:
         anidb_id: int | None = None
         tvdb_id: int | None = None
+        id_from_config = False
 
-        # Try pre-populated ID queue first
+        # Use pre-populated ID queue. In series mode (auto_accept_ids),
+        # accept without prompting. In triage mode, prompt for confirmation.
         if id_queue:
             provider, sid = id_queue[0]
-            print(f"\n  {len(pool)} file(s) remaining in pool.")
-            raw = (
-                input(
-                    f"\n  Use {provider} {sid} from config?"
-                    f" [Y]es / [n]o / [s]kip / [d]one / [q]uit: "
-                )
-                .strip()
-                .lower()
-            )
-            if raw in ("", "y", "yes"):
+            if auto_accept_ids:
                 id_queue.pop(0)
+                id_from_config = True
+                print(f"\n  {len(pool)} file(s) remaining, using {provider} {sid}.")
                 if provider == MetadataProvider.ANIDB:
                     anidb_id = sid
                 else:
                     tvdb_id = sid
-            elif raw == "n":
-                id_queue.pop(0)
-            elif raw == "s":
-                break
-            elif raw == "d":
-                if not dry_run:
-                    for sf in pool:
-                        already_copied.add(_resolve(sf.path))
-                    _save_triage_manifest(already_copied)
-                print(f"  Marked {len(pool)} file(s) as done.")
-                pool.clear()
-                break
-            elif raw == "q":
-                return total_success, total_failed, True
+            else:
+                print(f"\n  {len(pool)} file(s) remaining in pool.")
+                raw = (
+                    input(
+                        f"\n  Use {provider} {sid} from config?"
+                        f" [Y]es / [n]o / [s]kip / [d]one / [q]uit: "
+                    )
+                    .strip()
+                    .lower()
+                )
+                if raw in ("", "y", "yes"):
+                    id_queue.pop(0)
+                    id_from_config = True
+                    if provider == MetadataProvider.ANIDB:
+                        anidb_id = sid
+                    else:
+                        tvdb_id = sid
+                elif raw == "n":
+                    id_queue.pop(0)
+                elif raw == "s":
+                    break
+                elif raw == "d":
+                    _mark_pool_done()
+                    break
+                elif raw == "q":
+                    return total_success, total_failed, True
 
         # If no ID yet, prompt for one
         if anidb_id is None and tvdb_id is None:
@@ -1512,12 +1787,7 @@ def _process_pool(
             if not raw or raw.lower() == "s":
                 break
             if raw.lower() == "d":
-                if not dry_run:
-                    for sf in pool:
-                        already_copied.add(_resolve(sf.path))
-                    _save_triage_manifest(already_copied)
-                print(f"  Marked {len(pool)} file(s) as done.")
-                pool.clear()
+                _mark_pool_done()
                 break
             if raw.lower() == "q":
                 return total_success, total_failed, True
@@ -1532,14 +1802,6 @@ def _process_pool(
             )
             pid = anidb_id if anidb_id is not None else tvdb_id
             assert pid is not None
-            _maybe_save_mapping(
-                group_name,
-                provider,
-                pid,
-                config,
-                dry_run,
-                concise_name=_extract_concise_name(pool),
-            )
 
         # Fetch metadata
         try:
@@ -1565,10 +1827,15 @@ def _process_pool(
                     title_index=title_index,
                 )
 
-        info = _confirm_anime_info(info)
+        # Skip interactive confirmation when ID came from config (read-through
+        # cache — the user already approved this ID mapping).
+        if not id_from_config:
+            info = _confirm_anime_info(info)
 
         if anidb_id is not None:
-            matched, pool = _match_files_to_season(pool, info)
+            matched, pool = _match_files_to_season(
+                pool, info, more_ids_queued=len(id_queue) > 0
+            )
             if not matched:
                 print("  No files matched. Try another ID.")
                 continue
@@ -1604,6 +1871,22 @@ def _process_pool(
         print(f"\n  Done: {success} copied, {failed} skipped/failed")
         total_success += success
         total_failed += failed
+
+        # Save config mapping only after successful copy
+        if success > 0:
+            pid = anidb_id if anidb_id is not None else tvdb_id
+            if pid is not None:
+                _maybe_save_mapping(
+                    group_name,
+                    MetadataProvider.ANIDB
+                    if anidb_id is not None
+                    else MetadataProvider.TVDB,
+                    pid,
+                    config,
+                    dry_run,
+                    concise_name=_strip_year(group_name),
+                )
+
         if triaged and not dry_run:
             for p in triaged:
                 already_copied.add(_resolve(p))
@@ -1643,12 +1926,22 @@ def run_series(args: argparse.Namespace, config: AnimeConfig) -> int:
         print("No series directories found.")
         return 0
 
-    # Build download index for enriching metadata from original filenames
+    # Build download index — use cache if available
     downloads_dir = config.downloads_dir
     if downloads_dir.is_dir():
-        print(f"Building download index from {downloads_dir}...")
-        download_index = _build_download_index(downloads_dir)
-        print(f"  Indexed {download_index.file_count} files.")
+        cached, mtimes, fresh = check_cache_freshness(
+            [downloads_dir], no_cache=args.no_cache
+        )
+        if fresh and cached is not None and cached.download_index.file_count > 0:
+            print(
+                f"Using cached download index ({cached.download_index.file_count} files)."
+            )
+            download_index = cached.download_index
+        else:
+            print(f"Building download index from {downloads_dir}...")
+            download_index = _build_download_index(downloads_dir)
+            print(f"  Indexed {download_index.file_count} files.")
+            save_cache(DownloadCache(download_index=download_index, dir_mtimes=mtimes))
     else:
         download_index = DownloadIndex()
 
@@ -1669,7 +1962,7 @@ def run_series(args: argparse.Namespace, config: AnimeConfig) -> int:
     # Load triage manifest for tracking
     already_copied = _load_triage_manifest()
     force = args.force
-    id_map = scan_dest_ids(args.dest)
+    id_map = _cached_scan_dest_ids(args.dest, no_cache=args.no_cache)
 
     total_success = 0
     total_failed = 0
@@ -1696,31 +1989,7 @@ def run_series(args: argparse.Namespace, config: AnimeConfig) -> int:
 
         print(f"  {len(media_files)} file(s) to process.")
 
-        # Build a queue of IDs from source dir files + config mappings
-        id_queue: list[tuple[str, int]] = []
-
-        # Check for ID files in the source series directory
-        anidb_file = series_path / "anidb.id"
-        tvdb_file = series_path / "tvdb.id"
-        if anidb_file.is_file():
-            try:
-                id_queue.append(
-                    (MetadataProvider.ANIDB, int(anidb_file.read_text().strip()))
-                )
-            except ValueError:
-                pass
-        if tvdb_file.is_file():
-            try:
-                id_queue.append(
-                    (MetadataProvider.TVDB, int(tvdb_file.read_text().strip()))
-                )
-            except ValueError:
-                pass
-
-        # Add config mappings (may have multiple AniDB IDs for multi-season)
-        for entry in lookup_series_ids(series_path.name, config):
-            if entry not in id_queue:
-                id_queue.append(entry)
+        id_queue = build_id_queue(series_path.name, config, source_dir=series_path)
 
         if id_queue:
             print(f"  Known IDs: {', '.join(f'{p} {i}' for p, i in id_queue)}")
@@ -1757,6 +2026,7 @@ def run_series(args: argparse.Namespace, config: AnimeConfig) -> int:
             already_copied=already_copied,
             download_index=download_index,
             title_index=title_index,
+            auto_accept_ids=True,
         )
         total_success += success
         total_failed += failed
@@ -1846,7 +2116,15 @@ def run_triage(args: argparse.Namespace, config: AnimeConfig) -> int:
     out on subsequent runs (use --force to re-process).
     """
     source_dirs = args.source or [config.downloads_dir]
-    groups = _scan_and_group(source_dirs)
+
+    # Check cached grouping first — avoids re-walking 5K+ files
+    cached, mtimes, fresh = check_cache_freshness(source_dirs, no_cache=args.no_cache)
+    if fresh and cached is not None and cached.groups:
+        print("Using cached download index.")
+        groups = cached.groups
+    else:
+        groups = _scan_and_group(source_dirs)
+        save_cache(DownloadCache(groups=groups, dir_mtimes=mtimes))
 
     # Filter by pattern if provided
     pattern = args.pattern
@@ -1894,7 +2172,7 @@ def run_triage(args: argparse.Namespace, config: AnimeConfig) -> int:
         return 0
 
     # Scan destination for existing series (once, reused across groups)
-    id_map = scan_dest_ids(args.dest)
+    id_map = _cached_scan_dest_ids(args.dest, no_cache=args.no_cache)
 
     print(f"\nFound {len(groups)} group(s):")
     group_list = list(groups.items())
@@ -1912,7 +2190,7 @@ def run_triage(args: argparse.Namespace, config: AnimeConfig) -> int:
         print(f"Group: {name}  ({len(files)} files)")
         print(f"{'=' * 60}")
         for f in files:
-            print(f"  {f.name}")
+            print(f"  {colorize_path(f.name)}")
 
         # Parse all files upfront for the group
         pool = _parse_files(files)
@@ -1927,11 +2205,9 @@ def run_triage(args: argparse.Namespace, config: AnimeConfig) -> int:
                 if f.is_file() and f.suffix.lower() in _EXTRAS_EXTENSIONS
             ]
 
-        # Build ID queue from config for this group
-        id_queue: list[tuple[str, int]] = []
-        saved = lookup_series_ids(name, config)
-        if saved:
-            id_queue.extend(saved)
+        id_queue = build_id_queue(name, config)
+        if id_queue:
+            print(f"  Known IDs: {', '.join(f'{p} {i}' for p, i in id_queue)}")
 
         success, failed, quit_all = _process_pool(
             pool,

@@ -4,6 +4,42 @@ Implementation details and architecture for euterpe-tools. For conventions and
 commands, see [CLAUDE.md](../CLAUDE.md). For architectural decisions, see
 [docs/adrs/](adrs/).
 
+## CLI Design Principles
+
+The CLI is designed for both human operators and AI agents. Commands should be
+predictable, composable, and safe for automated use.
+
+1. **Explicit over convenient.** Commands require explicit arguments for
+   anything that changes behavior. No "smart" auto-detection that silently picks
+   a mode — if the tool can't determine what to do from the arguments, it fails
+   with a clear error message. Defaults are conservative (do nothing rather than
+   guess).
+
+2. **Fast failure.** Validate arguments and preconditions upfront. Fail before
+   doing any work, not halfway through. Error messages should include what was
+   expected, what was received, and what to do about it.
+
+3. **Structured output for agents.** Commands that produce output should support
+   `--format json` or equivalent for machine consumption. Human-readable output
+   is the default but not the only option. Exit codes are meaningful (0 =
+   success, 1 = failure, 2 = nothing to do).
+
+4. **Idempotent operations.** Running the same command twice with the same
+   arguments should produce the same result. Side effects (file copies, config
+   writes) happen at the end, not incrementally.
+
+5. **No hidden state.** All state that affects behavior is either in the
+   arguments, the config file, or the filesystem. Caches improve performance but
+   never change correctness — `--no-cache` always works.
+
+6. **Composable commands.** Each command does one thing. Complex workflows are
+   built by running multiple commands in sequence, not by adding flags to make
+   one command do everything. Plumbing commands (Rust) handle data; porcelain
+   commands (Python) handle interaction.
+
+See ADR `docs/adrs/2026-04-06-01-cli-design-for-ai-agents.md` for the rationale
+behind these principles.
+
 ## Repository Structure
 
 - `crates/` — Rust libraries (etp-lib, etp-cue)
