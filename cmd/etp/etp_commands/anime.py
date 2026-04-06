@@ -1924,6 +1924,9 @@ def _process_pool(
                 already_copied.add(_resolve(p))
             _save_triage_manifest(already_copied)
 
+    # Count remaining pool files as skipped
+    total_failed += len(pool)
+
     return total_success, total_failed, False
 
 
