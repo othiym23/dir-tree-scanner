@@ -110,11 +110,12 @@ async fn run(cli: Cli) -> Result<()> {
     );
 
     if let Some(ref find_pattern) = cli.find {
-        let pattern = ops::compile_pattern(find_pattern, cli.insensitive)?;
+        ops::compile_pattern(find_pattern, cli.insensitive)?;
         let matches = ops::collect_find_matches(
             &ctx.pool,
             Some(ctx.scan_id),
-            &pattern,
+            find_pattern,
+            cli.insensitive,
             &cli.exclude,
             &filter,
         )
