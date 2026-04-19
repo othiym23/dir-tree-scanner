@@ -61,6 +61,7 @@ from etp_lib.types import (
     AnimeConfig,
     AnimeInfo,
     BatchResult,
+    BonusType,
     ConflictAction,
     DEFAULT_ANIME_SOURCE_DIR,  # noqa: F401 (re-export for tests)
     DEFAULT_DEST_DIR,  # noqa: F401 (re-export for tests)
@@ -157,6 +158,30 @@ def load_anime_config(path: Path | None = None) -> AnimeConfig:
     return config
 
 
+def save_concise_name(
+    name: str,
+    concise: str,
+    *,
+    path: Path | None = None,
+) -> None:
+    """Append a concise-name mapping for *name* to the config file.
+
+    Written as a bare ``series`` block with no provider IDs — the loader
+    picks up the ``concise`` child regardless of whether IDs are present,
+    and any later re-read will see this block's value override earlier
+    mappings for the same series name.
+    """
+    if path is None:
+        from etp_lib import paths as etp_paths
+
+        path = etp_paths.anime_config()
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = f'\nseries "{escape_kdl(name)}" {{\n  concise "{escape_kdl(concise)}"\n}}\n'
+    with path.open("a", encoding="utf-8") as f:
+        f.write(line)
+
+
 def save_series_mapping(
     name: str,
     provider: str,
@@ -215,6 +240,27 @@ def _parse_id_input(raw: str) -> tuple[int | None, int | None]:
         return int(raw), None
     except ValueError:
         return None, None
+
+
+def _notify_if_dest_exists(
+    id_map: dict[tuple[str, int], Path],
+    anidb_id: int | None,
+    tvdb_id: int | None,
+) -> None:
+    """Print a hint if a series directory with the given ID marker already
+    exists in the destination. Does not prompt — files will be merged into
+    the existing directory as usual.
+    """
+    for provider, pid in (
+        (MetadataProvider.ANIDB, anidb_id),
+        (MetadataProvider.TVDB, tvdb_id),
+    ):
+        if pid is None:
+            continue
+        existing = id_map.get((provider, pid))
+        if existing is not None:
+            print(f"  note: existing series dir for {provider} {pid}: {existing}")
+            return
 
 
 def _maybe_save_mapping(
@@ -640,6 +686,40 @@ def _most_common_concise_name(
         for name, files in names_in_dir.items():
             counts[name] += len(files)
     return counts.most_common(1)[0][0] if counts else ""
+
+
+def _distinct_concise_names(
+    names_by_subdir: dict[Path, dict[str, list[Path]]],
+) -> list[tuple[str, int]]:
+    """Return every distinct concise name across *names_by_subdir*, sorted by
+    total file count descending. Each entry is ``(name, total_file_count)``.
+    """
+    counts: Counter[str] = Counter()
+    for names_in_dir in names_by_subdir.values():
+        for name, files in names_in_dir.items():
+            counts[name] += len(files)
+    return counts.most_common()
+
+
+def _prompt_pick_concise_name(candidates: list[tuple[str, int]]) -> str:
+    """Prompt the user to pick one of several concise names, or enter a
+    custom name. Returns the chosen name. Default is the first candidate
+    (which the caller should arrange to be the most common).
+    """
+    print("\n  Multiple concise names exist in this series directory:")
+    for idx, (name, count) in enumerate(candidates, start=1):
+        print(f"    {idx}. {name}  ({count} files)")
+    custom_idx = len(candidates) + 1
+    print(f"    {custom_idx}. enter a different name")
+    while True:
+        raw = input("\n  Choose [1]: ").strip() or "1"
+        if raw.isdigit():
+            choice = int(raw)
+            if 1 <= choice <= len(candidates):
+                return candidates[choice - 1][0]
+            if choice == custom_idx:
+                return prompt_value("  Concise series name", candidates[0][0])
+        print("  Invalid choice, try again.")
 
 
 def _resolve_concise_name_from_existing(
@@ -1455,9 +1535,19 @@ def _match_files_to_season(
             ep = ep - renumber_offset
         matched.append(MatchedFile(source=sf, episode=ep, season=sf.parsed.season))
 
-    # Include unseasoned files as (todo) entries
+    # Include unseasoned files. In multi-season groupings (the pool held
+    # files from more than one non-zero season), these are almost always
+    # batch extras — default them to Specials with a generic bonus tag so
+    # they flow through HamaTV auto-numbering and get copied rather than
+    # landing as (todo) entries that require manual resolution.
+    is_multi_season_grouping = len([s for s in by_season if s > 0]) > 1
     for sf in no_season:
-        matched.append(MatchedFile(source=sf))
+        if is_multi_season_grouping:
+            matched.append(
+                MatchedFile(source=sf, is_special=True, bonus_type=BonusType.BONUS)
+            )
+        else:
+            matched.append(MatchedFile(source=sf))
 
     # Build remaining pool (everything not matched, leftover already included)
     consumed_with_extras = consumed + no_season
@@ -1623,6 +1713,22 @@ def _process_group_batch(
     )
     dest_scan = scan_dest_directory(proposed_dir)
     concise_name = _auto_resolve_concise_name(matched, dest_scan, config, group_key)
+
+    # If the dest dir has multiple distinct concise names and the config
+    # hasn't already pinned one, let the user choose; persist the choice
+    # so subsequent runs use it without re-prompting.
+    if (
+        config is not None
+        and group_key
+        and not config.concise_names.get(group_key)
+        and dest_scan.names_by_subdir
+    ):
+        candidates = _distinct_concise_names(dest_scan.names_by_subdir)
+        if len(candidates) > 1:
+            concise_name = _prompt_pick_concise_name(candidates)
+            config.concise_names[group_key] = concise_name
+            if not dry_run:
+                save_concise_name(group_key, concise_name)
     detected_group = _auto_detect_release_group(matched)
     release_group = detected_group
     _apply_batch_traits(matched, release_group, detected_group)
@@ -1848,6 +1954,10 @@ def _process_pool(
             )
             pid = anidb_id if anidb_id is not None else tvdb_id
             assert pid is not None
+
+        # Warn if a dest dir already exists for this ID so the user can
+        # spot collisions before metadata fetch.
+        _notify_if_dest_exists(id_map, anidb_id, tvdb_id)
 
         # Fetch metadata
         try:
@@ -2358,16 +2468,13 @@ def run_triage(args: argparse.Namespace, config: AnimeConfig) -> int:
 def run_ingest(args: argparse.Namespace, config: AnimeConfig) -> int:
     """Unified anime ingestion from Sonarr and/or downloads.
 
-    Requires at least one of ``--sonarr`` or ``--downloads``. When both
-    are specified, Sonarr sync runs first, then downloads triage handles
-    whatever Sonarr didn't cover.
+    Neither flag passed → run both (Sonarr sync, then downloads triage for
+    leftovers). Either flag alone → run just that portion. Both flags
+    explicit → same as passing neither.
     """
     if not args.sonarr and not args.downloads:
-        print(
-            "error: specify --sonarr, --downloads, or both.",
-            file=sys.stderr,
-        )
-        return 1
+        args.sonarr = True
+        args.downloads = True
 
     total_result = 0
 

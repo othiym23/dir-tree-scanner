@@ -38,6 +38,19 @@ from etp_lib.types import (
     SourceFile,
 )
 
+
+def _is_generic_episode_title(title: str, ep_number: int) -> bool:
+    """Return True for empty, 'TBA', or 'Episode N' placeholders."""
+    if not title:
+        return True
+    stripped = title.strip()
+    if stripped.upper() == "TBA":
+        return True
+    if re.match(rf"Episode\s+{ep_number}$", stripped, re.IGNORECASE):
+        return True
+    return False
+
+
 # HamaTV-compatible special episode ranges (from ScudLee anime-lists):
 #   S (Specials) = s0e1+, C (Credits) = s0e101+, T (Trailers) = s0e151+,
 #   P (Parodies) = s0e201+, O (Other) = s0e301+
@@ -191,18 +204,24 @@ def match_episodes(
                 )
             else:
                 episode_name = info.find_episode_title(ep_number, season)
-            # Replace generic "Episode N" placeholders with the actual title
-            # from the downloaded or sonarr filename, in that order.
-            _is_generic = not episode_name or re.match(
-                rf"Episode\s+{ep_number}$", episode_name, re.IGNORECASE
-            )
-            if _is_generic:
+            # Replace missing / TBA / generic "Episode N" placeholders with
+            # the title from the Sonarr-side source filename first (since
+            # Sonarr names tend to carry the canonical episode title), then
+            # fall back to the downloaded filename.
+            if _is_generic_episode_title(episode_name, ep_number):
                 download_title = ""
                 if sf.matched_download is not None:
                     download_title = parse_component(
                         sf.matched_download.name
                     ).episode_title
-                episode_name = download_title or episode_title or episode_name
+                sonarr_title = (
+                    episode_title
+                    if not _is_generic_episode_title(episode_title, ep_number)
+                    else ""
+                )
+                episode_name = (
+                    sonarr_title or download_title or episode_title or episode_name
+                )
         elif ep_number is not None and is_special and bonus_type:
             available = [
                 ep for ep in specials if ep.special_tag not in matched_special_tags
@@ -403,16 +422,19 @@ def write_manifest(
 
     dirname = format_series_dirname(info.title_ja, info.title_en, info.year)
 
-    # Group entries by season/specials
+    # Group entries by season/specials/movie
     groups: dict[str, list[ManifestEntry]] = {}
     for entry in entries:
-        # Determine group key from the destination path
-        dest_parent = entry.dest_path.parent.name
-        if dest_parent == "Specials":
-            key = "specials"
+        if entry.is_movie:
+            key = "movie"
         else:
-            # "Season 01" -> season number
-            key = dest_parent
+            # Determine group key from the destination path
+            dest_parent = entry.dest_path.parent.name
+            if dest_parent == "Specials":
+                key = "specials"
+            else:
+                # "Season 01" -> season number
+                key = dest_parent
         groups.setdefault(key, []).append(entry)
 
     # Build KDL document as text (easier than constructing Node objects
@@ -438,6 +460,8 @@ def write_manifest(
         )
         if group_key == "specials":
             lines.append("specials {")
+        elif group_key == "movie":
+            lines.append("movie {")
         else:
             # "Season 01" -> season 1
             season_num = group_key.replace("Season ", "").lstrip("0") or "0"
@@ -601,6 +625,9 @@ def parse_manifest(
         # Determine destination subdirectory
         if group_node.name == "specials":
             dest_subdir = season_subdir(series_dir, 0, is_special=True)
+        elif group_node.name == "movie":
+            # Movies land at the series root — no Season NN / Specials subdir.
+            dest_subdir = series_dir
         elif group_node.name == "season" and group_node.args:
             try:
                 season_num = int(group_node.args[0])

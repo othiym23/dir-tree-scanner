@@ -278,6 +278,67 @@ class TestScanDestIds:
         assert anime.scan_dest_ids(tmp_path) == {}
 
 
+class TestNotifyIfDestExists:
+    """`_notify_if_dest_exists` warns when an ID's series dir already exists."""
+
+    def test_anidb_match_prints_existing_path(self, capsys):
+        id_map = {("anidb", 42): Path("/dest/Existing Series")}
+        anime._notify_if_dest_exists(id_map, anidb_id=42, tvdb_id=None)
+        out = capsys.readouterr().out
+        assert "anidb 42" in out
+        assert "/dest/Existing Series" in out
+
+    def test_tvdb_match_prints_existing_path(self, capsys):
+        id_map = {("tvdb", 99): Path("/dest/Other")}
+        anime._notify_if_dest_exists(id_map, anidb_id=None, tvdb_id=99)
+        out = capsys.readouterr().out
+        assert "tvdb 99" in out
+
+    def test_no_match_is_silent(self, capsys):
+        id_map = {("anidb", 1): Path("/dest/X")}
+        anime._notify_if_dest_exists(id_map, anidb_id=99, tvdb_id=99)
+        assert capsys.readouterr().out == ""
+
+    def test_anidb_takes_precedence_over_tvdb(self, capsys):
+        # Both IDs present and both have matches — anidb wins (single notice).
+        id_map = {
+            ("anidb", 42): Path("/dest/Series-a"),
+            ("tvdb", 99): Path("/dest/Series-t"),
+        }
+        anime._notify_if_dest_exists(id_map, anidb_id=42, tvdb_id=99)
+        out = capsys.readouterr().out
+        assert out.count("note: existing series dir") == 1
+        assert "anidb 42" in out
+
+
+class TestDistinctConciseNames:
+    """`_distinct_concise_names` returns names sorted by file count desc."""
+
+    def test_empty_returns_empty_list(self):
+        assert anime._distinct_concise_names({}) == []
+
+    def test_single_name_single_subdir(self, tmp_path):
+        names_by_subdir = {tmp_path / "Season 01": {"Frieren": [Path("a.mkv")]}}
+        assert anime._distinct_concise_names(names_by_subdir) == [("Frieren", 1)]
+
+    def test_multiple_names_sorted_by_count(self, tmp_path):
+        names_by_subdir = {
+            tmp_path / "Season 01": {
+                "Frieren": [Path("a.mkv"), Path("b.mkv"), Path("c.mkv")]
+            },
+            tmp_path / "Season 02": {"Sousou no Frieren": [Path("d.mkv")]},
+        }
+        result = anime._distinct_concise_names(names_by_subdir)
+        assert result == [("Frieren", 3), ("Sousou no Frieren", 1)]
+
+    def test_same_name_across_subdirs_aggregates(self, tmp_path):
+        names_by_subdir = {
+            tmp_path / "Season 01": {"Show": [Path("a.mkv")]},
+            tmp_path / "Season 02": {"Show": [Path("b.mkv"), Path("c.mkv")]},
+        }
+        assert anime._distinct_concise_names(names_by_subdir) == [("Show", 3)]
+
+
 class TestResolveSeriesDirectory:
     """Tests for the 3-step directory resolution."""
 

@@ -315,6 +315,10 @@ class ManifestEntry:
     episode_name: str = ""
     is_special: bool = False
     special_tag: str = ""
+    is_movie: bool = False
+    """When true the manifest groups this entry under a ``movie`` block and
+    the destination lands at the series root (no ``Season NN/`` or
+    ``Specials/`` subdirectory)."""
 
 
 @dataclass

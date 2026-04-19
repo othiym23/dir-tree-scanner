@@ -437,6 +437,50 @@ class TestParseManifest:
         assert len(entries) == 1
         assert entries[0][1] == series_dir / "Specials" / "special.mkv"
 
+    def test_movie_group_lands_at_series_root(self, tmp_path):
+        """``movie`` node skips Season NN/Specials subdir — dest is series_dir/<name>."""
+        sf = SourceFile(path=Path("/src/film.mkv"))
+        manifest = tmp_path / "manifest.kdl"
+        manifest.write_text(
+            'movie {\n  episode 1 {\n    source "film.mkv"\n'
+            '    dest "My Movie (2024).mkv"\n  }\n}\n',
+            encoding="utf-8",
+        )
+        series_dir = tmp_path / "series"
+        entries, errors, _extras, _renames = parse_manifest(
+            manifest, {"film.mkv": sf}, series_dir
+        )
+        assert errors == []
+        assert len(entries) == 1
+        assert entries[0][1] == series_dir / "My Movie (2024).mkv"
+
+    def test_movie_group_writer_emits_movie_block(self, tmp_path):
+        """Writer groups entries flagged ``is_movie`` under a ``movie`` block."""
+        sf = SourceFile(path=Path("/src/film.mkv"))
+        entry = ManifestEntry(
+            source=sf,
+            dest_path=tmp_path / "series" / "Film.mkv",
+            is_movie=True,
+        )
+        info = AnimeInfo(
+            anidb_id=9999,
+            tvdb_id=None,
+            title_ja="映画",
+            title_en="Film",
+            year=2024,
+        )
+        manifest = write_manifest(
+            entries=[entry],
+            info=info,
+            concise_name="Film",
+            series_dir=tmp_path / "series",
+        )
+        content = manifest.read_text(encoding="utf-8")
+        assert "movie {" in content
+        # No season or specials block for a pure-movie manifest
+        assert "season " not in content
+        assert "specials {" not in content
+
     def test_invalid_season_number(self, tmp_path):
         """Non-integer season number should produce an error, not crash."""
         manifest = tmp_path / "manifest.kdl"
