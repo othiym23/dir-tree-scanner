@@ -71,7 +71,7 @@ struct Cli {
 async fn run(cli: Cli) -> Result<()> {
     let config = etp_lib::config::RuntimeConfig::load_or_default();
 
-    let pattern = ops::compile_pattern(&cli.pattern, cli.insensitive)?;
+    ops::compile_pattern(&cli.pattern, cli.insensitive)?;
 
     // Resolve nicknames on -R/--root and/or --db.
     let (directory, explicit_db) = if let Some(ref dir) = cli.directory {
@@ -170,8 +170,15 @@ async fn run(cli: Cli) -> Result<()> {
 
     if needs_collect {
         // Collect all matches
-        let matches =
-            ops::collect_find_matches(&pool, scan_id, &pattern, &cli.exclude, &filter).await?;
+        let matches = ops::collect_find_matches(
+            &pool,
+            scan_id,
+            &cli.pattern,
+            cli.insensitive,
+            &cli.exclude,
+            &filter,
+        )
+        .await?;
         let count = matches.len();
         let total_size: u64 = matches.iter().map(|m| m.size).sum();
 
@@ -201,8 +208,15 @@ async fn run(cli: Cli) -> Result<()> {
         }
     } else {
         // Stream matches to stdout
-        let (count, total_size) =
-            ops::stream_find_matches(&pool, scan_id, &pattern, &cli.exclude, &filter).await?;
+        let (count, total_size) = ops::stream_find_matches(
+            &pool,
+            scan_id,
+            &cli.pattern,
+            cli.insensitive,
+            &cli.exclude,
+            &filter,
+        )
+        .await?;
 
         if cli.size {
             println!("\n{} matches, {}", count, ops::format_size(total_size));

@@ -368,7 +368,7 @@ pub async fn remove_stale_directories(
     tracing::instrument(name = "list_files", skip_all)
 )]
 pub async fn list_files(pool: &SqlitePool, scan_id: i64) -> Result<Vec<FileRecord>, sqlx::Error> {
-    let rows: Vec<(String, String, String, i64, i64, i64)> = sqlx::query_as(
+    let rows: Vec<RawRow> = sqlx::query_as(
         "SELECT s.root_path, d.path, f.filename, f.size, f.ctime, f.mtime
          FROM files f
          JOIN directories d ON f.dir_id = d.id
@@ -379,23 +379,7 @@ pub async fn list_files(pool: &SqlitePool, scan_id: i64) -> Result<Vec<FileRecor
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|(root, dir_path, filename, size, ctime, mtime)| {
-            let full_path = if dir_path.is_empty() {
-                root
-            } else {
-                format!("{}/{}", root, dir_path)
-            };
-            FileRecord {
-                dir_path: full_path,
-                filename,
-                size: size as u64,
-                ctime,
-                mtime,
-            }
-        })
-        .collect())
+    Ok(rows.into_iter().map(row_to_file_record).collect())
 }
 
 /// Stream all files for a scan, yielding `FileRecord` values one at a time
@@ -419,11 +403,24 @@ pub fn stream_files(
     })
 }
 
-type RawRowStream<'a> = Pin<
-    Box<
-        dyn Stream<Item = Result<(String, String, String, i64, i64, i64), sqlx::Error>> + Send + 'a,
-    >,
->;
+type RawRow = (String, String, String, i64, i64, i64);
+type RawRowStream<'a> = Pin<Box<dyn Stream<Item = Result<RawRow, sqlx::Error>> + Send + 'a>>;
+
+fn row_to_file_record(row: RawRow) -> FileRecord {
+    let (root, dir_path, filename, size, ctime, mtime) = row;
+    let full_path = if dir_path.is_empty() {
+        root
+    } else {
+        format!("{root}/{dir_path}")
+    };
+    FileRecord {
+        dir_path: full_path,
+        filename,
+        size: size as u64,
+        ctime,
+        mtime,
+    }
+}
 
 /// Adapter that maps raw query rows to `FileRecord`.
 struct MapStream<'a> {
@@ -437,30 +434,16 @@ impl Stream for MapStream<'_> {
         mut self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        self.inner.as_mut().poll_next(cx).map(|opt| {
-            opt.map(|res| {
-                res.map(|(root, dir_path, filename, size, ctime, mtime)| {
-                    let full_path = if dir_path.is_empty() {
-                        root
-                    } else {
-                        format!("{}/{}", root, dir_path)
-                    };
-                    FileRecord {
-                        dir_path: full_path,
-                        filename,
-                        size: size as u64,
-                        ctime,
-                        mtime,
-                    }
-                })
-            })
-        })
+        self.inner
+            .as_mut()
+            .poll_next(cx)
+            .map(|opt| opt.map(|res| res.map(row_to_file_record)))
     }
 }
 
 /// List all files across all scans. Same as `list_files` but without scan filter.
 pub async fn list_all_files(pool: &SqlitePool) -> Result<Vec<FileRecord>, sqlx::Error> {
-    let rows: Vec<(String, String, String, i64, i64, i64)> = sqlx::query_as(
+    let rows: Vec<RawRow> = sqlx::query_as(
         "SELECT s.root_path, d.path, f.filename, f.size, f.ctime, f.mtime
          FROM files f
          JOIN directories d ON f.dir_id = d.id
@@ -469,23 +452,7 @@ pub async fn list_all_files(pool: &SqlitePool) -> Result<Vec<FileRecord>, sqlx::
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|(root, dir_path, filename, size, ctime, mtime)| {
-            let full_path = if dir_path.is_empty() {
-                root
-            } else {
-                format!("{}/{}", root, dir_path)
-            };
-            FileRecord {
-                dir_path: full_path,
-                filename,
-                size: size as u64,
-                ctime,
-                mtime,
-            }
-        })
-        .collect())
+    Ok(rows.into_iter().map(row_to_file_record).collect())
 }
 
 /// Stream all files across all scans. Same as `stream_files` but without scan filter.
@@ -500,6 +467,104 @@ pub fn stream_all_files(
     )
     .fetch(pool);
 
+    Box::pin(MapStream {
+        inner: Box::pin(raw),
+    })
+}
+
+// Query variants differ on two axes — scan-id filter and system-file filter —
+// so there are four `&'static str` consts. The streaming API needs a static
+// pointer without per-call string allocation. Every variant pushes the user
+// match into SQLite via the REGEXP UDF registered by `with_regexp()`;
+// callers handle case folding by prefixing `(?i)` as needed.
+//
+// The `*_NO_SYS` variants add `AND NOT (<full_path>) REGEXP ?` so system
+// files (@eaDir, .etp.db, etc.) are discarded at the B-tree layer rather
+// than crossing into Rust. SQLite short-circuits AND chains, so rows that
+// don't match the user pattern never hit the system regex.
+const FIND_REGEXP_ALL: &str = "SELECT s.root_path, d.path, f.filename, f.size, f.ctime, f.mtime
+     FROM files f
+     JOIN directories d ON f.dir_id = d.id
+     JOIN scans s ON d.scan_id = s.id
+     WHERE (s.root_path || CASE WHEN d.path = '' THEN '' ELSE '/' || d.path END || '/' || f.filename) REGEXP ?";
+const FIND_REGEXP_SCAN: &str = "SELECT s.root_path, d.path, f.filename, f.size, f.ctime, f.mtime
+     FROM files f
+     JOIN directories d ON f.dir_id = d.id
+     JOIN scans s ON d.scan_id = s.id
+     WHERE d.scan_id = ?
+       AND (s.root_path || CASE WHEN d.path = '' THEN '' ELSE '/' || d.path END || '/' || f.filename) REGEXP ?";
+const FIND_REGEXP_ALL_NO_SYS: &str = "SELECT s.root_path, d.path, f.filename, f.size, f.ctime, f.mtime
+     FROM files f
+     JOIN directories d ON f.dir_id = d.id
+     JOIN scans s ON d.scan_id = s.id
+     WHERE (s.root_path || CASE WHEN d.path = '' THEN '' ELSE '/' || d.path END || '/' || f.filename) REGEXP ?
+       AND NOT ((s.root_path || CASE WHEN d.path = '' THEN '' ELSE '/' || d.path END || '/' || f.filename) REGEXP ?)";
+const FIND_REGEXP_SCAN_NO_SYS: &str = "SELECT s.root_path, d.path, f.filename, f.size, f.ctime, f.mtime
+     FROM files f
+     JOIN directories d ON f.dir_id = d.id
+     JOIN scans s ON d.scan_id = s.id
+     WHERE d.scan_id = ?
+       AND (s.root_path || CASE WHEN d.path = '' THEN '' ELSE '/' || d.path END || '/' || f.filename) REGEXP ?
+       AND NOT ((s.root_path || CASE WHEN d.path = '' THEN '' ELSE '/' || d.path END || '/' || f.filename) REGEXP ?)";
+
+fn find_query_str(has_scan_id: bool, has_system_re: bool) -> &'static str {
+    match (has_scan_id, has_system_re) {
+        (true, true) => FIND_REGEXP_SCAN_NO_SYS,
+        (true, false) => FIND_REGEXP_SCAN,
+        (false, true) => FIND_REGEXP_ALL_NO_SYS,
+        (false, false) => FIND_REGEXP_ALL,
+    }
+}
+
+/// Build the SQL query + bind the user pattern, scan id, and system regex
+/// for the `list_files_matching` / `stream_files_matching` call path. Bind
+/// values are owned so the returned query is not tied to caller lifetimes —
+/// important for `stream_files_matching`, which must outlive its inputs.
+fn bind_find_query(
+    scan_id: Option<i64>,
+    pattern: &str,
+    exclude_system_re: Option<&str>,
+) -> sqlx::query::QueryAs<'static, sqlx::Sqlite, RawRow, sqlx::sqlite::SqliteArguments<'static>> {
+    let query = find_query_str(scan_id.is_some(), exclude_system_re.is_some());
+    let mut q = sqlx::query_as::<_, RawRow>(query);
+    if let Some(id) = scan_id {
+        q = q.bind(id);
+    }
+    q = q.bind(pattern.to_string());
+    if let Some(sys) = exclude_system_re {
+        q = q.bind(sys.to_string());
+    }
+    q
+}
+
+/// List files whose reconstructed full path matches `pattern` (a regex).
+///
+/// - `scan_id: Some(id)` searches a single scan; `None` searches all scans.
+/// - `exclude_system_re: Some(r)` adds `AND NOT path REGEXP r` to the WHERE
+///   clause, so system files are filtered out at the SQL layer.
+/// - Case sensitivity is controlled by the pattern itself — callers that
+///   want case-insensitive matching should prefix `(?i)`.
+pub async fn list_files_matching(
+    pool: &SqlitePool,
+    scan_id: Option<i64>,
+    pattern: &str,
+    exclude_system_re: Option<&str>,
+) -> Result<Vec<FileRecord>, sqlx::Error> {
+    let rows = bind_find_query(scan_id, pattern, exclude_system_re)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(row_to_file_record).collect())
+}
+
+/// Stream files whose reconstructed full path matches `pattern` (a regex).
+/// See [`list_files_matching`] for parameter notes.
+pub fn stream_files_matching<'a>(
+    pool: &'a SqlitePool,
+    scan_id: Option<i64>,
+    pattern: &str,
+    exclude_system_re: Option<&str>,
+) -> Pin<Box<dyn Stream<Item = Result<FileRecord, sqlx::Error>> + Send + 'a>> {
+    let raw = bind_find_query(scan_id, pattern, exclude_system_re).fetch(pool);
     Box::pin(MapStream {
         inner: Box::pin(raw),
     })
@@ -1084,7 +1149,7 @@ pub async fn count_files_by_extension(
     }
 
     let mut result: Vec<(String, i64)> = counts.into_iter().collect();
-    result.sort_by(|a, b| b.1.cmp(&a.1));
+    result.sort_by_key(|r| std::cmp::Reverse(r.1));
     Ok(result)
 }
 

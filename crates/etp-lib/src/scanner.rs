@@ -5,8 +5,26 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use walkdir::WalkDir;
+
+/// Verbose progress cadence for long phases (walk, reconcile match loop).
+const PROGRESS_EVERY: Duration = Duration::from_secs(30);
+
+/// Log a completed phase when `verbose` is true. `detail` may be empty.
+fn log_phase(verbose: bool, name: &str, elapsed: Duration, detail: &str) {
+    if !verbose {
+        return;
+    }
+    if detail.is_empty() {
+        eprintln!("phase: {name} done in {:.2}s", elapsed.as_secs_f64());
+    } else {
+        eprintln!(
+            "phase: {name} done in {:.2}s — {detail}",
+            elapsed.as_secs_f64()
+        );
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ScanError {
@@ -56,7 +74,14 @@ pub async fn scan_to_db(
     let mut all_removed: Vec<RemovedFile> = Vec::new();
 
     // Bulk-load all cached mtimes in one query instead of per-directory SELECTs.
+    let phase = Instant::now();
     let cached_mtimes: HashMap<String, i64> = dao::all_directory_mtimes(pool, scan_id).await?;
+    log_phase(
+        verbose,
+        "all_directory_mtimes",
+        phase.elapsed(),
+        &format!("{} entries", cached_mtimes.len()),
+    );
 
     // Walk without sorting — order doesn't matter for scanning (output reads
     // from DB with its own sort). Skipping sort avoids buffering + extra
@@ -64,6 +89,8 @@ pub async fn scan_to_db(
     // walkdir never descends into them.
     let mut pending: Vec<DirUpdate> = Vec::new();
     const BATCH_SIZE: usize = 64;
+    let walk_start = Instant::now();
+    let mut last_progress = Instant::now();
 
     for entry in WalkDir::new(root)
         .sort_by(|_, _| std::cmp::Ordering::Equal)
@@ -142,34 +169,90 @@ pub async fn scan_to_db(
             let removed = flush_pending(pool, scan_id, &mut pending).await?;
             all_removed.extend(removed);
         }
+
+        if verbose && last_progress.elapsed() >= PROGRESS_EVERY {
+            eprintln!(
+                "progress: walking at {:.1}s — dirs_scanned={}, dirs_cached={}, seen_paths={}, removed_accum={}",
+                walk_start.elapsed().as_secs_f64(),
+                stats.dirs_scanned,
+                stats.dirs_cached,
+                seen_paths.len(),
+                all_removed.len(),
+            );
+            last_progress = Instant::now();
+        }
     }
 
     // Flush any remaining directories
     if !pending.is_empty() {
+        let phase = Instant::now();
         let removed = flush_pending(pool, scan_id, &mut pending).await?;
         all_removed.extend(removed);
+        log_phase(verbose, "final flush_pending", phase.elapsed(), "");
     }
+
+    log_phase(
+        verbose,
+        "walk",
+        walk_start.elapsed(),
+        &format!(
+            "dirs_scanned={}, dirs_cached={}, removed_files_accum={}, seen_paths={}",
+            stats.dirs_scanned,
+            stats.dirs_cached,
+            all_removed.len(),
+            seen_paths.len(),
+        ),
+    );
 
     // If nothing was scanned, every directory matched its cached mtime —
     // the DB is already in sync and no directories can be stale.
+    let phase = Instant::now();
     let (dir_removed, stale_orphans) = if stats.dirs_scanned > 0 {
         dao::remove_stale_directories(pool, scan_id, &seen_paths).await?
     } else {
         (0, Vec::new())
     };
     stats.dirs_removed = dir_removed;
+    log_phase(
+        verbose,
+        "remove_stale_directories",
+        phase.elapsed(),
+        &format!(
+            "dir_removed={dir_removed}, stale_orphans={}",
+            stale_orphans.len()
+        ),
+    );
 
     // Move-tracking: match removed files against newly appeared files by
     // size, then verify with BLAKE3 hash. Matched files get their dir_id
     // and filename updated; unmatched files are deleted.
+    let phase = Instant::now();
     let orphan_hashes = reconcile_moves(pool, root, &mut all_removed, verbose).await?;
+    log_phase(
+        verbose,
+        "reconcile_moves",
+        phase.elapsed(),
+        &format!("orphan_hashes={}", orphan_hashes.len()),
+    );
 
     // Clean up CAS blobs orphaned by unmatched deletions + stale dirs
+    let phase = Instant::now();
+    let mut blobs_removed = 0usize;
     for hash in orphan_hashes.iter().chain(stale_orphans.iter()) {
-        let _ = cas::remove_blob(hash, cas_dir);
+        if cas::remove_blob(hash, cas_dir).is_ok() {
+            blobs_removed += 1;
+        }
     }
+    log_phase(
+        verbose,
+        "cas blob cleanup",
+        phase.elapsed(),
+        &format!("blobs_removed={blobs_removed}"),
+    );
 
+    let phase = Instant::now();
     dao::finish_scan(pool, scan_id).await?;
+    log_phase(verbose, "finish_scan", phase.elapsed(), "");
 
     stats.elapsed_ms = start.elapsed().as_millis();
 
@@ -229,6 +312,10 @@ async fn reconcile_moves(
         return Ok(Vec::new());
     }
 
+    if verbose {
+        eprintln!("  reconcile: starting with {} removed files", removed.len());
+    }
+
     // Build a size → removed-files index
     let mut by_size: HashMap<u64, Vec<usize>> = HashMap::new();
     for (i, rf) in removed.iter().enumerate() {
@@ -245,6 +332,14 @@ async fn reconcile_moves(
 
     // Collect removed file IDs to exclude from candidates
     let removed_ids: HashSet<i64> = removed.iter().map(|rf| rf.file_id).collect();
+
+    if verbose {
+        eprintln!(
+            "  reconcile: {} unique sizes, {} removed_ids — building candidate query",
+            sizes.len(),
+            removed_ids.len()
+        );
+    }
 
     // Query files that match sizes of removed files. We filter out removed
     // file IDs to avoid matching a file against itself. We also exclude files
@@ -270,11 +365,20 @@ async fn reconcile_moves(
     for &s in &sizes {
         q = q.bind(s as i64);
     }
+    let phase = Instant::now();
     let candidates: Vec<(i64, String, String, i64, i64, i64, i64)> = q.fetch_all(pool).await?;
+    if verbose {
+        eprintln!(
+            "  reconcile: candidate query done in {:.2}s — {} candidates",
+            phase.elapsed().as_secs_f64(),
+            candidates.len()
+        );
+    }
 
     // Pre-fetch directory paths for removed files in one query (must happen
     // before we start the transaction, since pool has max_connections=1)
     let unique_dir_ids: HashSet<i64> = removed.iter().map(|rf| rf.dir_id).collect();
+    let phase = Instant::now();
     let dir_paths: HashMap<i64, String> = if unique_dir_ids.is_empty() {
         HashMap::new()
     } else {
@@ -290,6 +394,13 @@ async fn reconcile_moves(
         }
         q.fetch_all(pool).await?.into_iter().collect()
     };
+    if verbose {
+        eprintln!(
+            "  reconcile: dir_paths query done in {:.2}s — {} dirs",
+            phase.elapsed().as_secs_f64(),
+            dir_paths.len()
+        );
+    }
 
     // Build a size → candidates index to check uniqueness
     let mut candidates_by_size: HashMap<u64, Vec<usize>> = HashMap::new();
@@ -299,6 +410,9 @@ async fn reconcile_moves(
 
     let mut matched_removed: HashSet<usize> = HashSet::new();
     let mut matched_new: HashSet<i64> = HashSet::new();
+    let match_start = Instant::now();
+    let mut match_last_progress = Instant::now();
+    let mut hashes_computed = 0usize;
     let mut tx = pool.begin().await?;
 
     for (new_id, dir_path, new_filename, new_size, new_dir_id, new_mtime, new_ctime) in &candidates
@@ -321,6 +435,17 @@ async fn reconcile_moves(
             Some(h) => h,
             None => continue,
         };
+        hashes_computed += 1;
+
+        if verbose && match_last_progress.elapsed() >= PROGRESS_EVERY {
+            eprintln!(
+                "  reconcile: matching at {:.1}s — matched={}, hashes_computed={}",
+                match_start.elapsed().as_secs_f64(),
+                matched_new.len(),
+                hashes_computed
+            );
+            match_last_progress = Instant::now();
+        }
 
         for &idx in removed_indices {
             if matched_removed.contains(&idx) {
@@ -406,6 +531,15 @@ async fn reconcile_moves(
         }
     }
 
+    if verbose {
+        eprintln!(
+            "  reconcile: match loop done in {:.2}s — matched={}, hashes_computed={}",
+            match_start.elapsed().as_secs_f64(),
+            matched_new.len(),
+            hashes_computed
+        );
+    }
+
     // Delete unmatched removed files
     let unmatched: Vec<RemovedFile> = removed
         .iter()
@@ -414,8 +548,17 @@ async fn reconcile_moves(
         .map(|(_, rf)| rf.clone())
         .collect();
 
+    let phase = Instant::now();
     let orphans = dao::delete_unmatched_files(&mut tx, &unmatched).await?;
     tx.commit().await?;
+    if verbose {
+        eprintln!(
+            "  reconcile: delete_unmatched + commit done in {:.2}s — unmatched={}, orphans={}",
+            phase.elapsed().as_secs_f64(),
+            unmatched.len(),
+            orphans.len()
+        );
+    }
     Ok(orphans)
 }
 

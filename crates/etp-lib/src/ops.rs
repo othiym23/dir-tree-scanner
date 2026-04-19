@@ -243,6 +243,23 @@ impl FilterConfig {
         }
         true
     }
+
+    /// Like [`should_show`](Self::should_show), but assumes the SQL layer has
+    /// already applied the system-file filter when `include_system_files` is
+    /// false, so the expensive `is_system_path` walk is skipped. Only the
+    /// filename is checked — for the system-file exemption from dotfile and
+    /// user-exclude rules — because a filename that made it past SQL filtering
+    /// is, by construction, not in a system-named directory.
+    pub fn should_show_post_sql(&self, filename: &str) -> bool {
+        let is_system = is_system_name(filename, &self.system_patterns);
+        if !self.show_hidden && !is_system && filename.starts_with('.') {
+            return false;
+        }
+        if !is_system && is_user_excluded_name(filename, &self.user_excludes) {
+            return false;
+        }
+        true
+    }
 }
 
 /// Parse glob ignore patterns, warning on and discarding invalid ones.
@@ -529,25 +546,56 @@ pub async fn render_du(pool: &SqlitePool, scan_id: i64, show_subs: bool) -> anyh
     Ok(())
 }
 
+/// Build the regex pattern handed to SQLite's REGEXP UDF. `-i` prefixes
+/// `(?i)` so the Rust `regex` crate applies Unicode simple case folding;
+/// otherwise the pattern is used as-is and matches case-sensitively.
+fn regexp_pattern(pattern: &str, insensitive: bool) -> String {
+    if insensitive {
+        format!("(?i){pattern}")
+    } else {
+        pattern.to_string()
+    }
+}
+
+/// Build a regex that matches any path containing a system-pattern component.
+/// Used as the RHS of `AND NOT full_path REGEXP ?` to push system-file
+/// exclusion into SQLite.
+///
+/// Returns `None` when there are no patterns, so the caller can pick the
+/// cheaper query variant without the extra REGEXP call per row.
+fn system_excludes_regex(patterns: &HashSet<String>) -> Option<String> {
+    if patterns.is_empty() {
+        return None;
+    }
+    // Sort for stable output — helps sqlx-sqlite's auxdata regex cache reuse
+    // the compiled pattern across queries within a session.
+    let mut ps: Vec<&String> = patterns.iter().collect();
+    ps.sort();
+    let alternation: Vec<String> = ps.iter().map(|p| regex::escape(p)).collect();
+    // (?:^|/) and (?:$|/) anchor the match to whole path components, so
+    // `@eaDir` matches `foo/@eaDir/bar` and `foo/@eaDir` but NOT
+    // `foo/@eaDirectory`.
+    Some(format!(r"(?:^|/)(?:{})(?:$|/)", alternation.join("|")))
+}
+
 /// Stream files from DB, printing matching paths immediately. Returns (count, total_size).
 ///
 /// Pass `scan_id: Some(id)` to search a single scan, or `None` to search all scans.
 pub async fn stream_find_matches(
     pool: &SqlitePool,
     scan_id: Option<i64>,
-    pattern: &regex::Regex,
+    pattern: &str,
+    insensitive: bool,
     exclude: &[String],
     filter: &FilterConfig,
 ) -> anyhow::Result<(usize, u64)> {
-    use crate::finder;
     use futures_util::StreamExt;
 
-    let mut stream: std::pin::Pin<
-        Box<dyn futures_core::Stream<Item = Result<dao::FileRecord, sqlx::Error>> + Send + '_>,
-    > = match scan_id {
-        Some(id) => dao::stream_files(pool, id),
-        None => dao::stream_all_files(pool),
-    };
+    let sql_pattern = regexp_pattern(pattern, insensitive);
+    let system_re = (!filter.include_system_files)
+        .then(|| system_excludes_regex(&filter.system_patterns))
+        .flatten();
+    let mut stream = dao::stream_files_matching(pool, scan_id, &sql_pattern, system_re.as_deref());
 
     let mut count = 0;
     let mut total_size = 0u64;
@@ -557,14 +605,15 @@ pub async fn stream_find_matches(
         if is_excluded_path(&record.dir_path, exclude) {
             continue;
         }
-        if !filter.should_show(&record.dir_path, &record.filename) {
+        // System files are already excluded at the SQL layer when
+        // include_system_files is false. Passing the forged filter here
+        // skips the redundant is_system_path walk over every path component.
+        if !filter.should_show_post_sql(&record.filename) {
             continue;
         }
-        if let Some(m) = finder::matches_pattern(&record, pattern) {
-            println!("{}", m.full_path);
-            total_size += m.size;
-            count += 1;
-        }
+        println!("{}/{}", record.dir_path, record.filename);
+        total_size += record.size;
+        count += 1;
     }
 
     Ok((count, total_size))
@@ -576,23 +625,29 @@ pub async fn stream_find_matches(
 pub async fn collect_find_matches(
     pool: &SqlitePool,
     scan_id: Option<i64>,
-    pattern: &regex::Regex,
+    pattern: &str,
+    insensitive: bool,
     exclude: &[String],
     filter: &FilterConfig,
 ) -> anyhow::Result<Vec<crate::finder::FindMatch>> {
-    use crate::finder;
-
-    let files = match scan_id {
-        Some(id) => dao::list_files(pool, id).await,
-        None => dao::list_all_files(pool).await,
-    }
-    .context("reading from database")?;
+    let sql_pattern = regexp_pattern(pattern, insensitive);
+    let system_re = (!filter.include_system_files)
+        .then(|| system_excludes_regex(&filter.system_patterns))
+        .flatten();
+    let files = dao::list_files_matching(pool, scan_id, &sql_pattern, system_re.as_deref())
+        .await
+        .context("reading from database")?;
 
     Ok(files
-        .iter()
+        .into_iter()
         .filter(|record| !is_excluded_path(&record.dir_path, exclude))
-        .filter(|record| filter.should_show(&record.dir_path, &record.filename))
-        .filter_map(|record| finder::matches_pattern(record, pattern))
+        .filter(|record| filter.should_show_post_sql(&record.filename))
+        .map(|record| crate::finder::FindMatch {
+            full_path: format!("{}/{}", record.dir_path, record.filename),
+            size: record.size,
+            ctime: record.ctime,
+            mtime: record.mtime,
+        })
         .collect())
 }
 
@@ -679,6 +734,55 @@ mod tests {
     #[test]
     fn format_size_tib() {
         assert_eq!(format_size(1024 * 1024 * 1024 * 1024), "1.00 TiB");
+    }
+
+    #[test]
+    fn regexp_pattern_passes_through_without_i() {
+        assert_eq!(super::regexp_pattern("swans", false), "swans");
+        assert_eq!(super::regexp_pattern("sw.*ns", false), "sw.*ns");
+    }
+
+    #[test]
+    fn regexp_pattern_prefixes_i_flag() {
+        assert_eq!(super::regexp_pattern("swans", true), "(?i)swans");
+        assert_eq!(super::regexp_pattern("Björk", true), "(?i)Björk");
+    }
+
+    #[test]
+    fn system_excludes_regex_empty_returns_none() {
+        assert_eq!(super::system_excludes_regex(&HashSet::new()), None);
+    }
+
+    #[test]
+    fn system_excludes_regex_escapes_metachars_and_anchors_components() {
+        let patterns: HashSet<String> = ["@eaDir", ".etp.db", "#recycle"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let re = super::system_excludes_regex(&patterns).unwrap();
+        // Alternation is sorted; `regex::escape` conservatively escapes `.`,
+        // `#` (potential `x`-flag comment) and `@`-safe chars. Confirm that
+        // the resulting regex compiles and works — not the exact bytes.
+        let compiled = regex::Regex::new(&re).unwrap();
+        assert!(compiled.is_match("/@eaDir"));
+        assert!(compiled.is_match("/a/.etp.db"));
+        assert!(compiled.is_match("/a/#recycle/b"));
+        assert!(!compiled.is_match("/a/normal/b"));
+    }
+
+    #[test]
+    fn system_excludes_regex_matches_component_only() {
+        let patterns: HashSet<String> = ["@eaDir"].iter().map(|s| (*s).to_string()).collect();
+        let re_str = super::system_excludes_regex(&patterns).unwrap();
+        let re = regex::Regex::new(&re_str).unwrap();
+        // Component hits:
+        assert!(re.is_match("/a/b/@eaDir/c"));
+        assert!(re.is_match("/a/b/@eaDir"));
+        assert!(re.is_match("@eaDir/c"));
+        assert!(re.is_match("@eaDir"));
+        // Must NOT false-match a substring inside another name:
+        assert!(!re.is_match("/a/@eaDirectory/c"));
+        assert!(!re.is_match("/a/not@eaDir/c"));
     }
 
     #[test]
